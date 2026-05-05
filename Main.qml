@@ -34,6 +34,10 @@ ApplicationWindow {
         }
     }
 
+    ListModel {
+        id: detailQuoteModel
+    }
+
     // Speichert das aktuell selektierte Symbol & Exchange
     property string selectedSymbol: ""
     property string selectedExchange: ""
@@ -42,6 +46,11 @@ ApplicationWindow {
 
     property int currentSortPeriod: 0
     property bool currentSortAsc: true
+    property var detailStock: ({})
+    property var detailPeriods: []
+    property var detailQuotes: []
+    property int detailFromDay: 1
+    property int detailToDay: 1
 
     Timer {
         id: clipboardTimer
@@ -126,11 +135,11 @@ ApplicationWindow {
         function onGetSharesComplete(data) {
             console.log("📥 SIGNAL getSharesComplete:", data.length)
             loadingOverlay.running = false
-
-            if (data.length > 0 ) {
-                updateStockModel(data); // ❌ Nur nutzen, wenn man die gesamte Tabelle neu aufbauen will
-            } else {
-                console.warn("⚠️ Kein Daten für:", symbol);
+            updateStockModel(data);
+            if (data.length === 0) {
+                textItem.text = "Keine Aktien fuer die aktuellen Filter gefunden";
+                clipboardPopup.visible = true;
+                clipboardTimer.restart();
             }
         }
     }
@@ -485,19 +494,19 @@ ApplicationWindow {
 
             let result = dbManager.getShares(
                 parseInt(firstPeriodLoader.item.toDay),
-                parseInt(firstPeriodLoader.item.successThreshold),
+                activeThreshold(firstPeriodLoader.item),
                 firstPeriodLoader.item.greaterThan,
 
                 parseInt(secondPeriodLoader.item.toDay),
-                parseInt(secondPeriodLoader.item.successThreshold),
+                activeThreshold(secondPeriodLoader.item),
                 secondPeriodLoader.item.greaterThan,
 
                 parseInt(thirdPeriodLoader.item.toDay),
-                parseInt(thirdPeriodLoader.item.successThreshold),
+                activeThreshold(thirdPeriodLoader.item),
                 thirdPeriodLoader.item.greaterThan,
 
                 parseInt(fourthPeriodLoader.item.toDay),
-                parseInt(fourthPeriodLoader.item.successThreshold),
+                activeThreshold(fourthPeriodLoader.item),
                 fourthPeriodLoader.item.greaterThan,
 
                 parseInt(filterSelectionLoader.item.salesPriceGreaterThan),
@@ -534,6 +543,75 @@ ApplicationWindow {
         return 1; // Default-Fallback
     }
 
+    function activeThreshold(periodItem) {
+        if (!periodItem || !periodItem.active)
+            return 0
+        let threshold = parseInt(periodItem.successThreshold)
+        return isNaN(threshold) ? 0 : threshold
+    }
+
+    function getConfiguredPeriods() {
+        let loaders = [firstPeriodLoader, secondPeriodLoader, thirdPeriodLoader, fourthPeriodLoader]
+        let fields = [
+            { success: "daysFirstPeriodSuccess", valueInc: "firstPeriodValueInc", volume: "firstPeriodVolume", volumePrice: "firstPeriodVolumePrice" },
+            { success: "daysSecondPeriodSuccess", valueInc: "secondPeriodValueInc", volume: "secondPeriodVolume", volumePrice: "secondPeriodVolumePrice" },
+            { success: "daysThirdPeriodSuccess", valueInc: "thirdPeriodValueInc", volume: "thirdPeriodVolume", volumePrice: "thirdPeriodVolumePrice" },
+            { success: "daysFourthPeriodSuccess", valueInc: "fourthPeriodValueInc", volume: "fourthPeriodVolume", volumePrice: "fourthPeriodVolumePrice" }
+        ]
+        let periods = []
+
+        for (let i = 0; i < loaders.length; i++) {
+            let item = loaders[i].item
+            if (!item || !item.active)
+                continue
+
+            let fromDay = parseInt(item.fromDay)
+            let toDay = parseInt(item.toDay)
+            if (isNaN(fromDay) || isNaN(toDay))
+                continue
+
+            periods.push({
+                index: i + 1,
+                label: "Periode " + (i + 1),
+                fromDay: fromDay,
+                toDay: toDay,
+                threshold: parseInt(item.successThreshold),
+                greaterThan: item.greaterThan,
+                successField: fields[i].success,
+                valueIncField: fields[i].valueInc,
+                volumeField: fields[i].volume,
+                volumePriceField: fields[i].volumePrice
+            })
+        }
+
+        return periods
+    }
+
+    function openDetailWindow(modelIndex) {
+        if (modelIndex < 0 || modelIndex >= stockModel.count)
+            return
+
+        let periods = getConfiguredPeriods()
+        if (periods.length === 0) {
+            textItem.text = "Keine aktive Periode ausgewählt"
+            clipboardPopup.visible = true
+            clipboardTimer.restart()
+            return
+        }
+
+        let stock = normalizeStockData(stockModel.get(modelIndex))
+        detailStock = stock
+        detailPeriods = periods
+        detailFromDay = periods[0].fromDay
+        detailToDay = periods[periods.length - 1].toDay
+        detailQuotes = dbManager.getQuoteDetails(stock.symbol, detailFromDay, detailToDay)
+        detailQuoteModel.clear()
+        detailQuotes.forEach(row => detailQuoteModel.append(row))
+        detailWindow.title = stock.symbol + " - Details"
+        detailWindow.show()
+        detailChart.requestPaint()
+    }
+
     Component {
         id: periodSelectionComponent
         GroupBox {
@@ -545,6 +623,7 @@ ApplicationWindow {
             property alias greaterThan: greaterThanCheckBox.checked
             property alias fromDayInput: fromDayInput
             property alias toDayInput: toDayInput
+            property alias active: disablePeriodSelectionID.checked
             property int index: -1
             Rectangle {
                 height: periodTextID.implicitHeight
@@ -812,6 +891,224 @@ ApplicationWindow {
         }
     }
 
+    Window {
+        id: detailWindow
+        width: 1250
+        height: 760
+        minimumWidth: 900
+        minimumHeight: 580
+        modality: Qt.NonModal
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#f4f6f7"
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 10
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 16
+
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+
+                        Label {
+                            text: (detailStock.symbol || "") + "  " + (detailStock.name || "")
+                            font.pixelSize: 22
+                            font.bold: true
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                        }
+
+                        Label {
+                            text: "Tage " + detailFromDay + " bis " + detailToDay + " | letzter Preis: " + (detailStock.lastClosePrice || "-") + " vom " + (detailStock.lastClosePriceDate || "-")
+                            color: "#4f5b62"
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                        }
+                    }
+
+                    Button {
+                        text: "Schließen"
+                        onClicked: detailWindow.close()
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Repeater {
+                        model: detailPeriods
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 96
+                            color: "#ffffff"
+                            border.color: "#d3d8dc"
+                            radius: 4
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                spacing: 2
+
+                                Label {
+                                    text: modelData.label + " | Tag " + modelData.fromDay + "-" + modelData.toDay
+                                    font.bold: true
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                }
+
+                                Label {
+                                    text: "Anstiege: " + (detailStock[modelData.successField] || 0) + " | Grenze: " + (modelData.greaterThan ? ">" : "<") + " " + (modelData.threshold || 0)
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                }
+
+                                Label {
+                                    text: "Gesamt: " + Number(detailStock[modelData.valueIncField] || 0).toFixed(2) + "% | Volumen: " + (detailStock[modelData.volumeField] || 0)
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                }
+
+                                Label {
+                                    text: "Umsatz: " + (detailStock[modelData.volumePriceField] || 0)
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 230
+                    color: "#ffffff"
+                    border.color: "#d3d8dc"
+                    radius: 4
+
+                    Canvas {
+                        id: detailChart
+                        anchors.fill: parent
+                        anchors.margins: 12
+
+                        onPaint: {
+                            let ctx = getContext("2d")
+                            ctx.reset()
+                            ctx.clearRect(0, 0, width, height)
+
+                            let count = detailQuoteModel.count
+                            ctx.strokeStyle = "#d7dde1"
+                            ctx.lineWidth = 1
+                            ctx.beginPath()
+                            ctx.moveTo(0, height - 24)
+                            ctx.lineTo(width, height - 24)
+                            ctx.stroke()
+
+                            if (count === 0) {
+                                ctx.fillStyle = "#66727a"
+                                ctx.font = "14px sans-serif"
+                                ctx.fillText("Keine Kursdaten für diesen Bereich", 12, 28)
+                                return
+                            }
+
+                            let minPrice = Number(detailQuoteModel.get(0).closeprice)
+                            let maxPrice = minPrice
+                            for (let i = 1; i < count; i++) {
+                                let price = Number(detailQuoteModel.get(i).closeprice)
+                                minPrice = Math.min(minPrice, price)
+                                maxPrice = Math.max(maxPrice, price)
+                            }
+
+                            let range = Math.max(0.0001, maxPrice - minPrice)
+                            let leftPad = 52
+                            let rightPad = 16
+                            let topPad = 18
+                            let bottomPad = 34
+                            let plotWidth = Math.max(1, width - leftPad - rightPad)
+                            let plotHeight = Math.max(1, height - topPad - bottomPad)
+
+                            ctx.strokeStyle = "#5b8db8"
+                            ctx.lineWidth = 2
+                            ctx.beginPath()
+                            for (let j = 0; j < count; j++) {
+                                let row = detailQuoteModel.get(j)
+                                let x = leftPad + (count === 1 ? plotWidth / 2 : (j / (count - 1)) * plotWidth)
+                                let y = topPad + (1 - ((Number(row.closeprice) - minPrice) / range)) * plotHeight
+                                if (j === 0)
+                                    ctx.moveTo(x, y)
+                                else
+                                    ctx.lineTo(x, y)
+                            }
+                            ctx.stroke()
+
+                            ctx.fillStyle = "#4f5b62"
+                            ctx.font = "12px sans-serif"
+                            ctx.fillText(maxPrice.toFixed(2), 4, topPad + 8)
+                            ctx.fillText(minPrice.toFixed(2), 4, topPad + plotHeight)
+                            ctx.fillText("Tag " + detailFromDay, leftPad, height - 8)
+                            ctx.fillText("Tag " + detailToDay, Math.max(leftPad, width - 82), height - 8)
+                        }
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 1
+                    color: "#c9d0d5"
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 1
+                    Label { text: "Tag"; Layout.preferredWidth: 60; font.bold: true; horizontalAlignment: Text.AlignRight }
+                    Label { text: "Datum"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignHCenter }
+                    Label { text: "Open"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
+                    Label { text: "Close"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
+                    Label { text: "High"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
+                    Label { text: "Low"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
+                    Label { text: "Änderung"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
+                    Label { text: "Volumen"; Layout.preferredWidth: 140; font.bold: true; horizontalAlignment: Text.AlignRight }
+                    Item { Layout.fillWidth: true }
+                }
+
+                ListView {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    model: detailQuoteModel
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                    delegate: Rectangle {
+                        width: ListView.view.width
+                        height: 30
+                        color: index % 2 === 0 ? "#ffffff" : "#eef2f4"
+
+                        RowLayout {
+                            anchors.fill: parent
+                            spacing: 1
+                            Label { text: model.dayindex; Layout.preferredWidth: 60; horizontalAlignment: Text.AlignRight }
+                            Label { text: model.closedate; Layout.preferredWidth: 110; horizontalAlignment: Text.AlignHCenter }
+                            Label { text: Number(model.openprice || 0).toFixed(2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
+                            Label { text: Number(model.closeprice || 0).toFixed(2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
+                            Label { text: Number(model.highestprice || 0).toFixed(2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
+                            Label { text: Number(model.lowestprice || 0).toFixed(2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
+                            Label { text: Number(model.changepercent || 0).toFixed(2) + "%"; Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
+                            Label { text: model.volume || 0; Layout.preferredWidth: 140; horizontalAlignment: Text.AlignRight }
+                            Item { Layout.fillWidth: true }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
 
     ColumnLayout {
         anchors.fill: parent
@@ -1027,10 +1324,10 @@ ApplicationWindow {
                                         repeat: false
                                         onTriggered: {
                                             dbManager.getSharesAsync(
-                                                ${firstItem.toDay}, ${firstItem.successThreshold}, ${firstItem.greaterThan},
-                                                ${secondItem.toDay}, ${secondItem.successThreshold}, ${secondItem.greaterThan},
-                                                ${thirdItem.toDay}, ${thirdItem.successThreshold}, ${thirdItem.greaterThan},
-                                                ${fourthItem.toDay}, ${fourthItem.successThreshold}, ${fourthItem.greaterThan},
+                                                ${firstItem.toDay}, ${activeThreshold(firstItem)}, ${firstItem.greaterThan},
+                                                ${secondItem.toDay}, ${activeThreshold(secondItem)}, ${secondItem.greaterThan},
+                                                ${thirdItem.toDay}, ${activeThreshold(thirdItem)}, ${thirdItem.greaterThan},
+                                                ${fourthItem.toDay}, ${activeThreshold(fourthItem)}, ${fourthItem.greaterThan},
                                                 ${filterItem.salesPriceGreaterThan},
                                                 ${getSortPeriodIndex()},
                                                 ${filterItem.sortAscCheckBox.checked},""
@@ -1502,6 +1799,17 @@ ApplicationWindow {
                                         selectionAnchor = clickedIndex;
                                     }
                                     updateSelectedItems();
+                                }
+                                onDoubleClicked: function(mouse) {
+                                    mouse.accepted = true;
+                                    currentListViewIndex = index;
+                                    listView.currentIndex = index;
+                                    if (!selectedIndices.includes(index)) {
+                                        selectedIndices = [index];
+                                        selectionAnchor = index;
+                                        updateSelectedItems();
+                                    }
+                                    openDetailWindow(index);
                                 }
                             }
                         }

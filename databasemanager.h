@@ -32,6 +32,7 @@ public:
     Q_INVOKABLE void createQuotesForStock(const QString symbol, const QString exchange);
     Q_INVOKABLE void generateQuotesForAllStocks(); // Neue Methode für alle Stocks
     Q_INVOKABLE void generateQuoteForStock(const QString symbol, const QString exchange);
+    Q_INVOKABLE QVariantList getQuoteDetails(const QString &symbol, int fromDay, int toDay);
 
     Q_INVOKABLE QVariantList getShares(
         int firstTo, int firstThreshold, bool firstGreaterThan,

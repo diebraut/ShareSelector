@@ -450,6 +450,69 @@ void DatabaseManager::generateQuotesForAllStocks() {
     qDebug() << "✅ Verarbeitung aller Stocks abgeschlossen. Gesamtzahl: " << stockCounter;
 }
 
+QVariantList DatabaseManager::getQuoteDetails(const QString &symbol, int fromDay, int toDay)
+{
+    QVariantList results;
+
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank ist nicht verbunden!";
+        return results;
+    }
+
+    if (symbol.trimmed().isEmpty() || fromDay < 1 || toDay < fromDay) {
+        qWarning() << "Ungültige Parameter für Kursdetails:" << symbol << fromDay << toDay;
+        return results;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        WITH ordered_quotes AS (
+            SELECT
+                "Symbol",
+                "CloseDate",
+                "OpenPrice",
+                "ClosePrice",
+                "HighestPrice",
+                "LowestPrice",
+                "Volume",
+                ROW_NUMBER() OVER (PARTITION BY "Symbol" ORDER BY "CloseDate" DESC) AS dayIndex,
+                LAG("ClosePrice") OVER (PARTITION BY "Symbol" ORDER BY "CloseDate" ASC) AS previousClosePrice
+            FROM "Quotes"
+            WHERE "Symbol" = :symbol
+        )
+        SELECT
+            dayIndex,
+            TO_CHAR("CloseDate", 'DD.MM.YYYY') AS closeDate,
+            "OpenPrice" AS openPrice,
+            "ClosePrice" AS closePrice,
+            "HighestPrice" AS highestPrice,
+            "LowestPrice" AS lowestPrice,
+            "Volume" AS volume,
+            ROUND((("ClosePrice" - previousClosePrice) / NULLIF(previousClosePrice, 0) * 100)::numeric, 2) AS changePercent
+        FROM ordered_quotes
+        WHERE dayIndex BETWEEN :fromDay AND :toDay
+        ORDER BY dayIndex ASC
+    )SQL");
+    query.bindValue(":symbol", symbol);
+    query.bindValue(":fromDay", fromDay);
+    query.bindValue(":toDay", toDay);
+
+    if (!query.exec()) {
+        qCritical() << "SQL-Fehler bei Kursdetails:" << query.lastError().text();
+        return results;
+    }
+
+    while (query.next()) {
+        QVariantMap row;
+        for (int i = 0; i < query.record().count(); ++i) {
+            row.insert(query.record().fieldName(i), query.value(i));
+        }
+        results << row;
+    }
+
+    return results;
+}
+
 QVariantList DatabaseManager::runShareQuery(const QString& sql)
 {
     QVariantList results;
