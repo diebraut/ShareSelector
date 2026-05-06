@@ -27,6 +27,7 @@ ApplicationWindow {
     // Datenmodell
     ListModel {
         id: stockModel
+        dynamicRoles: true
         function initSelection() {
             for (var i = 0; i < count; i++) {
                 get(i).selected = false;
@@ -36,6 +37,10 @@ ApplicationWindow {
 
     ListModel {
         id: detailQuoteModel
+    }
+
+    ListModel {
+        id: boughtStockModel
     }
 
     // Speichert das aktuell selektierte Symbol & Exchange
@@ -51,6 +56,10 @@ ApplicationWindow {
     property var detailQuotes: []
     property int detailFromDay: 1
     property int detailToDay: 1
+    property string boughtStockMessage: ""
+    property int selectedBoughtStockIndex: -1
+    property bool detailStockBought: false
+    property string pendingDeleteBoughtSymbol: ""
 
     Timer {
         id: clipboardTimer
@@ -93,6 +102,7 @@ ApplicationWindow {
         anchors.fill: parent
         visible: running
         property bool running: false
+        property string message: "Laden..."
         z: 9999
 
         Rectangle {
@@ -112,11 +122,25 @@ ApplicationWindow {
             }
         }
 
-        BusyIndicator {
+        Column {
             anchors.centerIn: parent
-            running: true
-            width: 80
-            height: 80
+            spacing: 12
+
+            BusyIndicator {
+                anchors.horizontalCenter: parent.horizontalCenter
+                running: true
+                width: 80
+                height: 80
+            }
+
+            Label {
+                text: loadingOverlay.message
+                color: "white"
+                font.bold: true
+                font.pixelSize: 18
+                horizontalAlignment: Text.AlignHCenter
+                anchors.horizontalCenter: parent.horizontalCenter
+            }
         }
     }
 
@@ -166,36 +190,45 @@ ApplicationWindow {
         data.forEach(item => stockModel.append(item));
     }
 
+    function fieldValue(raw, names, fallback) {
+        for (let i = 0; i < names.length; i++) {
+            let value = raw[names[i]]
+            if (value !== undefined && value !== null)
+                return value
+        }
+        return fallback
+    }
+
     function normalizeStockData(raw) {
         return {
-            symbol: raw.symbol || "",
-            name: raw.name || "",
-            mic: raw.mic || "",
-            lastUpdateDate: raw.lastUpdateDate || "",
-            lastClosePrice: raw.lastClosePrice || 0,
-            lastClosePriceDate: raw.lastClosePriceDate || "",
+            symbol: fieldValue(raw, ["symbol", "Symbol"], ""),
+            name: fieldValue(raw, ["name", "Name"], ""),
+            mic: fieldValue(raw, ["mic", "MIC", "exchange"], ""),
+            lastUpdateDate: fieldValue(raw, ["lastUpdateDate", "LastUpdateDate"], ""),
+            lastClosePrice: fieldValue(raw, ["lastClosePrice", "lastcloseprice"], 0),
+            lastClosePriceDate: fieldValue(raw, ["lastClosePriceDate", "lastclosepricedate"], ""),
 
-            daysFirstPeriodSuccess: raw.daysFirstPeriodSuccess || 0,
-            daysSecondPeriodSuccess: raw.daysSecondPeriodSuccess || 0,
-            daysThirdPeriodSuccess: raw.daysThirdPeriodSuccess || 0,
-            daysFourthPeriodSuccess: raw.daysFourthPeriodSuccess || 0,
+            daysFirstPeriodSuccess: fieldValue(raw, ["daysFirstPeriodSuccess", "daysfirstperiodsuccess"], 0),
+            daysSecondPeriodSuccess: fieldValue(raw, ["daysSecondPeriodSuccess", "dayssecondperiodsuccess"], 0),
+            daysThirdPeriodSuccess: fieldValue(raw, ["daysThirdPeriodSuccess", "daysthirdperiodsuccess"], 0),
+            daysFourthPeriodSuccess: fieldValue(raw, ["daysFourthPeriodSuccess", "daysfourthperiodsuccess"], 0),
 
-            firstPeriodValueInc: raw.firstPeriodValueInc || 0,
-            secondPeriodValueInc: raw.secondPeriodValueInc || 0,
-            thirdPeriodValueInc: raw.thirdPeriodValueInc || 0,
-            fourthPeriodValueInc: raw.fourthPeriodValueInc || 0,
+            firstPeriodValueInc: fieldValue(raw, ["firstPeriodValueInc", "firstperiodvalueinc"], 0),
+            secondPeriodValueInc: fieldValue(raw, ["secondPeriodValueInc", "secondperiodvalueinc"], 0),
+            thirdPeriodValueInc: fieldValue(raw, ["thirdPeriodValueInc", "thirdperiodvalueinc"], 0),
+            fourthPeriodValueInc: fieldValue(raw, ["fourthPeriodValueInc", "fourthperiodvalueinc"], 0),
 
-            firstPeriodVolume: raw.firstPeriodVolume || 0,
-            secondPeriodVolume: raw.secondPeriodVolume || 0,
-            secondPeriodVolume: raw.secondPeriodVolume || 0,
-            fourthPeriodVolume: raw.fourthPeriodVolume || 0,
+            firstPeriodVolume: fieldValue(raw, ["firstPeriodVolume", "firstperiodvolume"], 0),
+            secondPeriodVolume: fieldValue(raw, ["secondPeriodVolume", "secondperiodvolume"], 0),
+            thirdPeriodVolume: fieldValue(raw, ["thirdPeriodVolume", "thirdperiodvolume"], 0),
+            fourthPeriodVolume: fieldValue(raw, ["fourthPeriodVolume", "fourthperiodvolume"], 0),
 
-            firstPeriodVolumePrice: raw.firstPeriodVolumePrice || 0,
-            secondPeriodVolumePrice: raw.secondPeriodVolumePrice || 0,
-            thirdPeriodVolumePrice: raw.thirdPeriodVolumePrice || 0,
-            fourthPeriodVolumePrice: raw.fourthPeriodVolumePrice || 0,
+            firstPeriodVolumePrice: fieldValue(raw, ["firstPeriodVolumePrice", "firstperiodvolumeprice"], 0),
+            secondPeriodVolumePrice: fieldValue(raw, ["secondPeriodVolumePrice", "secondperiodvolumeprice"], 0),
+            thirdPeriodVolumePrice: fieldValue(raw, ["thirdPeriodVolumePrice", "thirdperiodvolumeprice"], 0),
+            fourthPeriodVolumePrice: fieldValue(raw, ["fourthPeriodVolumePrice", "fourthperiodvolumeprice"], 0),
 
-            selected: false
+            selected: fieldValue(raw, ["selected"], false)
         };
     }
 
@@ -234,32 +267,7 @@ ApplicationWindow {
         console.log("Data received, first item:", JSON.stringify(data.length > 0 ? data[0] : {}))
         stockModel.clear()
         data.forEach(stock => {
-            stockModel.append({
-                "symbol": stock.Symbol,
-                "name": stock.Name,
-                "lastUpdateDate": stock.LastUpdateDate,
-                "lastClosePrice": stock.lastcloseprice,
-                "lastClosePriceDate": stock.lastclosepricedate,
-                "mic": stock.MIC,
-                "daysFirstPeriodSuccess": stock.daysfirstperiodsuccess,
-                "daysSecondPeriodSuccess": stock.dayssecondperiodsuccess,
-                "daysThirdPeriodSuccess": stock.daysthirdperiodsuccess,
-                "daysFourthPeriodSuccess": stock.daysfourthperiodsuccess,
-                "firstPeriodValueInc": stock.firstperiodvalueinc,
-                "secondPeriodValueInc": stock.secondperiodvalueinc,
-                "thirdPeriodValueInc": stock.thirdperiodvalueinc,
-                "fourthPeriodValueInc": stock.fourthperiodvalueinc,
-                "firstPeriodVolume": stock.firstperiodvolume,
-                "secondPeriodVolume": stock.secondperiodvolume,
-                "thirdPeriodVolume": stock.thirdperiodvolume,
-                "fourthPeriodVolume": stock.fourthperiodvolume,
-                "firstPeriodVolumePrice": stock.firstperiodvolumeprice,
-                "secondPeriodVolumePrice": stock.secondperiodvolumeprice,
-                "thirdPeriodVolumePrice": stock.thirdperiodvolumeprice,
-                "fourthPeriodVolumePrice": stock.fourthperiodvolumeprice,
-                "firstPeriodVolumePrice": stock.firstperiodvolumeprice,
-                selected: false // Initial nicht selektiert
-            })
+            stockModel.append(normalizeStockData(stock))
         })
         resetSelection();
         listView.contentY += 1
@@ -279,40 +287,127 @@ ApplicationWindow {
 
     function searchByTickerAndExchange() {
         loadingOverlay.running = true
-        const results = dbManager.searchByTickerAndExchange(tickerInput.text, exchangeInput.text)
-        stockModel.clear()
-        if (results.length === 0) {
-            console.log("❌ Keine Daten gefunden!")
-        }
+        loadingOverlay.message = "Suche Aktie..."
 
-        results.forEach(stock => {
-            stockModel.append({
-                "symbol": stock.symbol,
-                "name": stock.name,
-                "exchange": stock.exchange,
-                "lastUpdateDate": stock.lastUpdateDate,
-                "lastClosePrice": stock.lastClosePrice,
-                "lastClosePriceDate": stock.lastClosePriceDate,
-                "daysFirstPeriodSuccess": stock.daysFirstPeriodSuccess,
-                "daysSecondPeriodSuccess": stock.daysSecondPeriodSuccess,
-                "daysThirdPeriodSuccess": stock.daysThirdPeriodSuccess,
-                "daysFourthPeriodSuccess": stock.daysFourthPeriodSuccess,
-                "firstPeriodValueInc": stock.firstPeriodValueInc,
-                "secondPeriodValueInc": stock.secondPeriodValueInc,
-                "thirdPeriodValueInc": stock.thirdPeriodValueInc,
-                "fourthPeriodValueInc": stock.fourthPeriodValueInc,
-                "firstPeriodVolume": stock.firstPeriodVolume,
-                "secondPeriodVolume": stock.secondPeriodVolume,
-                "thirdPeriodVolume": stock.thirdPeriodVolume,
-                "fourthPeriodVolume": stock.fourthPeriodVolume,
-                "firstPeriodVolumePrice": stock.firstPeriodVolumePrice,
-                "secondPeriodVolumePrice": stock.secondPeriodVolumePrice,
-                "thirdPeriodVolumePrice": stock.thirdPeriodVolumePrice,
-                "fourthPeriodVolumePrice": stock.fourthPeriodVolumePrice
+        let firstItem = firstPeriodLoader.item
+        let secondItem = secondPeriodLoader.item
+        let thirdItem = thirdPeriodLoader.item
+        let fourthItem = fourthPeriodLoader.item
+        let filterItem = filterSelectionLoader.item
+        let tickerText = tickerInput.text.trim()
+        let nameText = nameInput.text.trim()
+        let searchSymbol = tickerText.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")
+        let searchName = nameText.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")
+        let searchByName = tickerText === "" && nameText !== ""
+
+        Qt.callLater(() => {
+            Qt.createQmlObject(`
+                import QtQuick 2.0
+                Timer {
+                    interval: 50
+                    running: true
+                    repeat: false
+                    onTriggered: {
+                        dbManager.${searchByName ? "getSharesByNameAsync" : "getSharesAsync"}(
+                            ${firstItem.toDay}, ${activeThreshold(firstItem)}, ${firstItem.greaterThan},
+                            ${secondItem.toDay}, ${activeThreshold(secondItem)}, ${secondItem.greaterThan},
+                            ${thirdItem.toDay}, ${activeThreshold(thirdItem)}, ${thirdItem.greaterThan},
+                            ${fourthItem.toDay}, ${activeThreshold(fourthItem)}, ${fourthItem.greaterThan},
+                            ${filterItem.salesPriceGreaterThan},
+                            ${getSortPeriodIndex()},
+                            ${filterItem.sortAscCheckBox.checked},
+                            "${searchByName ? searchName : searchSymbol}"
+                        )
+                        timer.start()
+                    }
+                }
+            `, mainWindow)
+        })
+    }
+
+    function parseDecimal(text) {
+        let value = Number(String(text).replace(",", "."))
+        return isNaN(value) ? 0 : value
+    }
+
+    function updateBoughtStockModel(data) {
+        boughtStockModel.clear()
+        data.forEach(stock => {
+            boughtStockModel.append({
+                symbol: fieldValue(stock, ["Symbol", "symbol"], ""),
+                name: fieldValue(stock, ["Name", "name"], ""),
+                buyDate: fieldValue(stock, ["BuyDate", "buyDate"], ""),
+                sellDate: fieldValue(stock, ["SellDate", "sellDate"], ""),
+                currentValue: fieldValue(stock, ["CurrentValue", "currentValue"], 0),
+                entryValue: fieldValue(stock, ["EntryValue", "entryValue"], 0),
+                valueIncreasePercent: fieldValue(stock, ["ValueIncreasePercent", "valueIncreasePercent"], 0),
+                status: fieldValue(stock, ["Status", "status"], 0)
             })
         })
-        loadingOverlay.running = false
-        resetSelection()
+        selectedBoughtStockIndex = boughtStockModel.count > 0 ? 0 : -1
+    }
+
+    function loadBoughtStocks() {
+        updateBoughtStockModel(dbManager.getBoughtStocks())
+    }
+
+    function currentIsoDate() {
+        let now = new Date()
+        return now.getFullYear() + "-" +
+               String(now.getMonth() + 1).padStart(2, "0") + "-" +
+               String(now.getDate()).padStart(2, "0")
+    }
+
+    function sellSelectedBoughtStock() {
+        if (selectedBoughtStockIndex < 0 || selectedBoughtStockIndex >= boughtStockModel.count) {
+            boughtStockMessage = "Keine Aktie ausgewählt"
+            return
+        }
+
+        let stock = boughtStockModel.get(selectedBoughtStockIndex)
+        let ok = dbManager.saveBoughtStock(
+            stock.symbol,
+            stock.name,
+            stock.buyDate,
+            currentIsoDate(),
+            Number(stock.currentValue || 0),
+            Number(stock.entryValue || 0),
+            Number(stock.valueIncreasePercent || 0),
+            10
+        )
+
+        if (ok) {
+            boughtStockMessage = "Verkauft"
+            loadBoughtStocks()
+        } else {
+            boughtStockMessage = "Verkaufen fehlgeschlagen"
+        }
+    }
+
+    function requestDeleteBoughtStock(index) {
+        if (index < 0 || index >= boughtStockModel.count) {
+            boughtStockMessage = "Keine Aktie ausgewählt"
+            return
+        }
+
+        selectedBoughtStockIndex = index
+        let stock = boughtStockModel.get(index)
+        pendingDeleteBoughtSymbol = stock.symbol
+        deleteBoughtStockDialog.open()
+    }
+
+    function deletePendingBoughtStock() {
+        if (!pendingDeleteBoughtSymbol)
+            return
+
+        let ok = dbManager.deleteBoughtStock(pendingDeleteBoughtSymbol)
+        if (ok) {
+            boughtStockMessage = "Aktie entfernt"
+            pendingDeleteBoughtSymbol = ""
+            loadBoughtStocks()
+        } else {
+            boughtStockMessage = "Entfernen fehlgeschlagen"
+        }
     }
 
     function resetSelection() {
@@ -601,6 +696,7 @@ ApplicationWindow {
 
         let stock = normalizeStockData(stockModel.get(modelIndex))
         detailStock = stock
+        detailStockBought = dbManager.isBoughtStock(stock.symbol)
         detailPeriods = periods
         detailFromDay = periods[0].fromDay
         detailToDay = periods[periods.length - 1].toDay
@@ -610,6 +706,34 @@ ApplicationWindow {
         detailWindow.title = stock.symbol + " - Details"
         detailWindow.show()
         detailChart.requestPaint()
+    }
+
+    function buyDetailStock() {
+        if (!detailStock.symbol || detailStockBought)
+            return
+
+        let lastPrice = Number(detailStock.lastClosePrice || 0)
+        let ok = dbManager.saveBoughtStock(
+            detailStock.symbol,
+            detailStock.name,
+            currentIsoDate(),
+            "",
+            lastPrice,
+            lastPrice,
+            0,
+            0
+        )
+
+        if (ok) {
+            detailStockBought = true
+            boughtStockMessage = "Gekauft"
+            loadBoughtStocks()
+            boughtStocksDialog.show()
+        } else {
+            textItem.text = "Kaufen fehlgeschlagen"
+            clipboardPopup.visible = true
+            clipboardTimer.restart()
+        }
     }
 
     Component {
@@ -933,6 +1057,12 @@ ApplicationWindow {
                     }
 
                     Button {
+                        text: "Kaufen"
+                        enabled: Boolean(detailStock.symbol) && !detailStockBought
+                        onClicked: buyDetailStock()
+                    }
+
+                    Button {
                         text: "Schließen"
                         onClicked: detailWindow.close()
                     }
@@ -1109,6 +1239,147 @@ ApplicationWindow {
         }
     }
 
+    Window {
+        id: boughtStocksDialog
+        title: "Gekaufte Aktien"
+        width: 1180
+        height: 620
+        minimumWidth: 900
+        minimumHeight: 420
+
+        onVisibleChanged: {
+            if (visible) {
+                boughtStockMessage = ""
+                loadBoughtStocks()
+            }
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#f4f6f7"
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 10
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 1
+                    Label { text: "Symbol"; Layout.preferredWidth: 110; font.bold: true }
+                    Label { text: "Name"; Layout.preferredWidth: 260; font.bold: true }
+                    Label { text: "Gekauft"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignHCenter }
+                    Label { text: "Verkauft"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignHCenter }
+                    Label { text: "Aktuell"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignRight }
+                    Label { text: "Einstieg"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignRight }
+                    Label { text: "Steigerung"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignRight }
+                    Label { text: "Status"; Layout.preferredWidth: 70; font.bold: true; horizontalAlignment: Text.AlignHCenter }
+                    Item { Layout.fillWidth: true }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 1
+                    color: "#c9d0d5"
+                }
+
+                ListView {
+                    id: boughtStockListView
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    model: boughtStockModel
+                    currentIndex: selectedBoughtStockIndex
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                    delegate: Rectangle {
+                        width: ListView.view.width
+                        height: 34
+                        color: selectedBoughtStockIndex === index ? "lightsteelblue" : (index % 2 === 0 ? "#ffffff" : "#eef2f4")
+
+                        RowLayout {
+                            anchors.fill: parent
+                            spacing: 1
+                            Label { text: model.symbol; Layout.preferredWidth: 110; elide: Text.ElideRight }
+                            Label { text: model.name; Layout.preferredWidth: 260; elide: Text.ElideRight }
+                            Label { text: model.buyDate; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignHCenter }
+                            Label { text: model.sellDate; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignHCenter }
+                            Label { text: Number(model.currentValue || 0).toFixed(2); Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight }
+                            Label { text: Number(model.entryValue || 0).toFixed(2); Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight }
+                            Label { text: Number(model.valueIncreasePercent || 0).toFixed(2) + "%"; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight }
+                            Label { text: model.status; Layout.preferredWidth: 70; horizontalAlignment: Text.AlignHCenter }
+                            Item { Layout.fillWidth: true }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                            onClicked: function(mouse) {
+                                selectedBoughtStockIndex = index
+                                boughtStockMessage = ""
+                                if (mouse.button === Qt.RightButton)
+                                    boughtStockContextMenu.popup()
+                            }
+                        }
+
+                        Menu {
+                            id: boughtStockContextMenu
+                            MenuItem {
+                                text: "Aktie entfernen"
+                                onTriggered: requestDeleteBoughtStock(index)
+                            }
+                        }
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Button {
+                        text: "Aktie entfernen"
+                        enabled: selectedBoughtStockIndex >= 0
+                        onClicked: requestDeleteBoughtStock(selectedBoughtStockIndex)
+                    }
+
+                    Label {
+                        text: boughtStockMessage
+                        color: boughtStockMessage === "Verkauft" ? "darkgreen" : "darkred"
+                        Layout.fillWidth: true
+                    }
+
+                    Button {
+                        text: "Verkaufen"
+                        enabled: selectedBoughtStockIndex >= 0
+                        onClicked: sellSelectedBoughtStock()
+                    }
+
+                    Button {
+                        text: "Abbrechen"
+                        onClicked: boughtStocksDialog.close()
+                    }
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: deleteBoughtStockDialog
+        title: "Aktie entfernen"
+        parent: boughtStocksDialog.contentItem
+        modal: true
+        standardButtons: Dialog.Yes | Dialog.No
+        closePolicy: Popup.CloseOnEscape
+        width: 420
+        anchors.centerIn: parent
+        onAccepted: deletePendingBoughtStock()
+        onRejected: pendingDeleteBoughtSymbol = ""
+
+        contentItem: Label {
+            text: "Die Aktie " + pendingDeleteBoughtSymbol + " endgültig entfernen?"
+            wrapMode: Text.Wrap
+        }
+    }
 
     ColumnLayout {
         anchors.fill: parent
@@ -1121,14 +1392,13 @@ ApplicationWindow {
             TextField {
                 id: tickerInput
                 Layout.preferredWidth: 200
-                text: "APC.XFRA"
                 placeholderText: "Ticker eingeben"
             }
 
             TextField {
-                id: exchangeInput
+                id: nameInput
                 Layout.preferredWidth: 200
-                placeholderText: "Exchange eingeben"
+                placeholderText: "Name eingeben"
             }
 
             Button {
@@ -1143,7 +1413,7 @@ ApplicationWindow {
                     return;
                     /*
                     tickerInput.text = ""
-                    exchangeInput.text = ""
+                    nameInput.text = ""
                     loadAllStocks()
                     */
                 }
@@ -1188,6 +1458,16 @@ ApplicationWindow {
                     console.log("📊 Lade historische Daten für alle Aktien")
                     loadingOverlay.running = true
                     dbManager.generateQuotesForAllStocks()
+                }
+            }
+
+            Item { Layout.fillWidth: true }
+
+            Button {
+                text: "Gekaufte Aktien"
+                onClicked: {
+                    boughtStockMessage = ""
+                    boughtStocksDialog.show()
                 }
             }
         }
@@ -1312,6 +1592,7 @@ ApplicationWindow {
                                 return
                             }
 
+                            loadingOverlay.message = "Lade Aktien..."
                             loadingOverlay.running = true
 
                             Qt.callLater(() => {

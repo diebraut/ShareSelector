@@ -33,6 +33,18 @@ public:
     Q_INVOKABLE void generateQuotesForAllStocks(); // Neue Methode für alle Stocks
     Q_INVOKABLE void generateQuoteForStock(const QString symbol, const QString exchange);
     Q_INVOKABLE QVariantList getQuoteDetails(const QString &symbol, int fromDay, int toDay);
+    Q_INVOKABLE QVariantList getBoughtStocks();
+    Q_INVOKABLE bool isBoughtStock(const QString &symbol);
+    Q_INVOKABLE bool deleteBoughtStock(const QString &symbol);
+    Q_INVOKABLE bool saveBoughtStock(
+        const QString &symbol,
+        const QString &name,
+        const QString &buyDate,
+        const QString &sellDate,
+        double currentValue,
+        double entryValue,
+        double valueIncreasePercent,
+        int status);
 
     Q_INVOKABLE QVariantList getShares(
         int firstTo, int firstThreshold, bool firstGreaterThan,
@@ -47,6 +59,12 @@ public:
         int thirdTo, int thirdThreshold, bool thirdGreaterThan,
         int fourthTo, int fourthThreshold, bool fourthGreaterThan,
         int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& symbol);
+    Q_INVOKABLE void getSharesByNameAsync(
+        int firstTo, int firstThreshold, bool firstGreaterThan,
+        int secondTo, int secondThreshold, bool secondGreaterThan,
+        int thirdTo, int thirdThreshold, bool thirdGreaterThan,
+        int fourthTo, int fourthThreshold, bool fourthGreaterThan,
+        int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& name);
 
     Q_INVOKABLE void updateAllISINs();
 
@@ -73,7 +91,8 @@ private:
         int secondTo, int secondThreshold, bool secondGreaterThan,
         int thirdTo, int thirdThreshold, bool thirdGreaterThan,
         int fourthTo, int fourthThreshold, bool fourthGreaterThan,
-        int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& symbol);
+        int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& symbol,
+        const QString& name = QString());
 
 
 };

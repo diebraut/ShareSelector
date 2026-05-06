@@ -41,6 +41,152 @@ bool DatabaseManager::connectToDatabase(const QString &host, const QString &dbNa
     return true;
 }
 
+QVariantList DatabaseManager::getBoughtStocks()
+{
+    QVariantList results;
+
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return results;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT
+            "Symbol",
+            "Name",
+            TO_CHAR("BuyDate", 'YYYY-MM-DD') AS "BuyDate",
+            TO_CHAR("SellDate", 'YYYY-MM-DD') AS "SellDate",
+            "CurrentValue",
+            "EntryValue",
+            "ValueIncreasePercent",
+            "Status"
+        FROM "BoughtStocks"
+        ORDER BY "BuyDate" DESC, "Symbol" ASC
+    )SQL");
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Laden der gekauften Aktien:" << query.lastError().text();
+        return results;
+    }
+
+    while (query.next()) {
+        QVariantMap row;
+        for (int i = 0; i < query.record().count(); ++i) {
+            row.insert(query.record().fieldName(i), query.value(i));
+        }
+        results << row;
+    }
+
+    return results;
+}
+
+bool DatabaseManager::isBoughtStock(const QString &symbol)
+{
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return false;
+    }
+
+    QSqlQuery query(db);
+    query.prepare("SELECT 1 FROM \"BoughtStocks\" WHERE \"Symbol\" = :symbol LIMIT 1");
+    query.bindValue(":symbol", symbol.trimmed());
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Prüfen der gekauften Aktie:" << query.lastError().text();
+        return false;
+    }
+
+    return query.next();
+}
+
+bool DatabaseManager::deleteBoughtStock(const QString &symbol)
+{
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return false;
+    }
+
+    QSqlQuery query(db);
+    query.prepare("DELETE FROM \"BoughtStocks\" WHERE \"Symbol\" = :symbol");
+    query.bindValue(":symbol", symbol.trimmed());
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Löschen der gekauften Aktie:" << query.lastError().text();
+        return false;
+    }
+
+    return query.numRowsAffected() > 0;
+}
+
+bool DatabaseManager::saveBoughtStock(
+    const QString &symbol,
+    const QString &name,
+    const QString &buyDate,
+    const QString &sellDate,
+    double currentValue,
+    double entryValue,
+    double valueIncreasePercent,
+    int status)
+{
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return false;
+    }
+
+    if (symbol.trimmed().isEmpty() || name.trimmed().isEmpty() || buyDate.trimmed().isEmpty()) {
+        qWarning() << "Pflichtfelder für gekaufte Aktie fehlen.";
+        return false;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        INSERT INTO "BoughtStocks" (
+            "Symbol",
+            "Name",
+            "BuyDate",
+            "SellDate",
+            "CurrentValue",
+            "EntryValue",
+            "ValueIncreasePercent",
+            "Status"
+        )
+        VALUES (
+            :symbol,
+            :name,
+            :buyDate,
+            NULLIF(:sellDate, '')::date,
+            :currentValue,
+            :entryValue,
+            :valueIncreasePercent,
+            :status
+        )
+        ON CONFLICT ("Symbol") DO UPDATE SET
+            "Name" = EXCLUDED."Name",
+            "BuyDate" = EXCLUDED."BuyDate",
+            "SellDate" = EXCLUDED."SellDate",
+            "CurrentValue" = EXCLUDED."CurrentValue",
+            "EntryValue" = EXCLUDED."EntryValue",
+            "ValueIncreasePercent" = EXCLUDED."ValueIncreasePercent",
+            "Status" = EXCLUDED."Status"
+    )SQL");
+    query.bindValue(":symbol", symbol.trimmed());
+    query.bindValue(":name", name.trimmed());
+    query.bindValue(":buyDate", buyDate.trimmed());
+    query.bindValue(":sellDate", sellDate.trimmed());
+    query.bindValue(":currentValue", currentValue);
+    query.bindValue(":entryValue", entryValue);
+    query.bindValue(":valueIncreasePercent", valueIncreasePercent);
+    query.bindValue(":status", status);
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Speichern der gekauften Aktie:" << query.lastError().text();
+        return false;
+    }
+
+    return true;
+}
+
 QVariantList DatabaseManager::searchByTickerAndExchange(const QString &symbol, const QString &exchange) {
     QVariantList results;
 
@@ -576,6 +722,30 @@ void DatabaseManager::getSharesAsync(
     });
 }
 
+void DatabaseManager::getSharesByNameAsync(
+    int firstTo, int firstThreshold, bool firstGreaterThan,
+    int secondTo, int secondThreshold, bool secondGreaterThan,
+    int thirdTo, int thirdThreshold, bool thirdGreaterThan,
+    int fourthTo, int fourthThreshold, bool fourthGreaterThan,
+    int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& name)
+{
+    (void) QtConcurrent::run([=]() {
+        QString sql = buildShareQuery(
+            firstTo, firstThreshold, firstGreaterThan,
+            secondTo, secondThreshold, secondGreaterThan,
+            thirdTo, thirdThreshold, thirdGreaterThan,
+            fourthTo, fourthThreshold, fourthGreaterThan,
+            greaterThanSalesPrice, sortPeriod, sortAsc, "", name
+            );
+
+        QVariantList results = runShareQuery(sql);
+
+        QMetaObject::invokeMethod(this, [=]() {
+                emit getSharesComplete(results);
+            }, Qt::QueuedConnection);
+    });
+}
+
 
 
 QString DatabaseManager::buildShareQuery(
@@ -583,15 +753,18 @@ QString DatabaseManager::buildShareQuery(
     int secondTo, int secondThreshold, bool secondGreaterThan,
     int thirdTo, int thirdThreshold, bool thirdGreaterThan,
     int fourthTo, int fourthThreshold, bool fourthGreaterThan,
-    int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& symbol)
+    int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& symbol, const QString& name)
 {
     bool isSymbolMode = !symbol.isNull() && !symbol.trimmed().isEmpty();
+    bool isNameMode = !isSymbolMode && !name.isNull() && !name.trimmed().isEmpty();
 
     QString sqlTemplate = R"SQL(
             WITH
             ordered_quotes AS (
                 SELECT *, ROW_NUMBER() OVER (PARTITION BY "Symbol" ORDER BY "CloseDate" DESC) AS rn_desc
                 FROM "Quotes"
+                WHERE 1=1
+                %13
             ),
             quotes_q1 AS (SELECT * FROM ordered_quotes WHERE rn_desc <= %1),
             quotes_q2 AS (SELECT * FROM ordered_quotes WHERE rn_desc > %2 AND rn_desc <= %3),
@@ -708,47 +881,66 @@ QString DatabaseManager::buildShareQuery(
         )SQL";
 
     QString filterClause;
+    QString quotesFilterClause;
     if (isSymbolMode) {
-        filterClause = QString(" AND s.\"Symbol\" = '%1' LIMIT 1").arg(symbol);
+        QString escapedSymbol = symbol;
+        escapedSymbol.replace("'", "''");
+        filterClause = QString(" AND s.\"Symbol\" = '%1' LIMIT 1").arg(escapedSymbol);
+        quotesFilterClause = QString(" AND \"Symbol\" = '%1'").arg(escapedSymbol);
 
     } else {
-        //filterClause = QString(" AND (s.\"Symbol\" = 'R9GA.XFRA' OR s.\"Symbol\" = 'H6F.XFRA') AND q1.volumePrice > %1").arg(greaterThanSalesPrice);
-        filterClause = QString(" AND q1.volumePrice > %1").arg(greaterThanSalesPrice);
-        if (firstThreshold > 0)
-            filterClause += QString(" AND q1.daysSuccess %1 %2")
-                                .arg(firstGreaterThan ? ">" : "<")
-                                .arg(firstThreshold);
-        if (secondThreshold > 0)
-            filterClause += QString(" AND q2.daysSuccess %1 %2")
-                                .arg(secondGreaterThan ? ">" : "<")
-                                .arg(secondThreshold);
-        if (thirdThreshold > 0)
-            filterClause += QString(" AND q3.daysSuccess %1 %2")
-                                .arg(thirdGreaterThan ? ">" : "<")
-                                .arg(thirdThreshold);
-        if (fourthThreshold > 0)
-            filterClause += QString(" AND q4.daysSuccess %1 %2")
-                                .arg(fourthGreaterThan ? ">" : "<")
-                                .arg(fourthThreshold);
+        if (isNameMode) {
+            QString escapedName = name.trimmed();
+            escapedName.replace("'", "''");
+            filterClause = QString(" AND s.\"Name\" ILIKE '%%' || '%1' || '%%'").arg(escapedName);
+            quotesFilterClause = QString(R"SQL(
+                AND "Symbol" IN (
+                    SELECT "Symbol"
+                    FROM "Stocks"
+                    WHERE "Name" ILIKE '%%' || '%1' || '%%'
+                )
+            )SQL").arg(escapedName);
+            filterClause += " ORDER BY s.\"Name\" ASC";
+        } else {
 
-        QString orderDirection = sortAsc ? "ASC" : "DESC";
+            //filterClause = QString(" AND (s.\"Symbol\" = 'R9GA.XFRA' OR s.\"Symbol\" = 'H6F.XFRA') AND q1.volumePrice > %1").arg(greaterThanSalesPrice);
+            filterClause += QString(" AND q1.volumePrice > %1").arg(greaterThanSalesPrice);
+            if (firstThreshold > 0)
+                filterClause += QString(" AND q1.daysSuccess %1 %2")
+                                    .arg(firstGreaterThan ? ">" : "<")
+                                    .arg(firstThreshold);
+            if (secondThreshold > 0)
+                filterClause += QString(" AND q2.daysSuccess %1 %2")
+                                    .arg(secondGreaterThan ? ">" : "<")
+                                    .arg(secondThreshold);
+            if (thirdThreshold > 0)
+                filterClause += QString(" AND q3.daysSuccess %1 %2")
+                                    .arg(thirdGreaterThan ? ">" : "<")
+                                    .arg(thirdThreshold);
+            if (fourthThreshold > 0)
+                filterClause += QString(" AND q4.daysSuccess %1 %2")
+                                    .arg(fourthGreaterThan ? ">" : "<")
+                                    .arg(fourthThreshold);
 
-        switch (sortPeriod) {
-        case 1:
-            filterClause += QString(" ORDER BY q1.daysSuccess %1").arg(orderDirection);
-            break;
-        case 2:
-            filterClause += QString(" ORDER BY q2.daysSuccess %1").arg(orderDirection);
-            break;
-        case 3:
-            filterClause += QString(" ORDER BY q3.daysSuccess %1").arg(orderDirection);
-            break;
-        case 4:
-            filterClause += QString(" ORDER BY q4.daysSuccess %1").arg(orderDirection);
-            break;
-        default:
-            filterClause += ""; // keine Sortierung
-            break;
+            QString orderDirection = sortAsc ? "ASC" : "DESC";
+
+            switch (sortPeriod) {
+            case 1:
+                filterClause += QString(" ORDER BY q1.daysSuccess %1").arg(orderDirection);
+                break;
+            case 2:
+                filterClause += QString(" ORDER BY q2.daysSuccess %1").arg(orderDirection);
+                break;
+            case 3:
+                filterClause += QString(" ORDER BY q3.daysSuccess %1").arg(orderDirection);
+                break;
+            case 4:
+                filterClause += QString(" ORDER BY q4.daysSuccess %1").arg(orderDirection);
+                break;
+            default:
+                filterClause += ""; // keine Sortierung
+                break;
+            }
         }
     }
 
@@ -764,7 +956,8 @@ QString DatabaseManager::buildShareQuery(
                       .arg(secondTo)
                       .arg(thirdTo)
                       .arg(fourthTo)
-                      .arg(filterClause);
+                      .arg(filterClause)
+                      .arg(quotesFilterClause);
 
     qDebug().noquote() << "\n[DEBUG] Generiertes SQL:\n" << sql;
     return sql;
