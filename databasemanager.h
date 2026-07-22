@@ -11,6 +11,9 @@
 #include <QSqlQuery>
 #include <QSqlError>
 #include <QDebug>
+#include <QTcpSocket>
+#include <QTimer>
+#include <QProcess>
 
 #include "sharedata.h"
 #include "marketstackclient.h"
@@ -21,6 +24,10 @@
 class DatabaseManager : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(QString ibkrConnectionStatus READ ibkrConnectionStatus NOTIFY ibkrConnectionChanged)
+    Q_PROPERTY(bool ibkrConnected READ ibkrConnected NOTIFY ibkrConnectionChanged)
+    Q_PROPERTY(bool ibkrConnecting READ ibkrConnecting NOTIFY ibkrConnectionChanged)
+    Q_PROPERTY(bool ibkrDataLoading READ ibkrDataLoading NOTIFY ibkrConnectionChanged)
 public:
     explicit DatabaseManager(QObject *parent = nullptr);
     ~DatabaseManager();
@@ -34,6 +41,13 @@ public:
     Q_INVOKABLE void generateQuoteForStock(const QString symbol, const QString exchange);
     Q_INVOKABLE QVariantList getQuoteDetails(const QString &symbol, int fromDay, int toDay);
     Q_INVOKABLE QVariantList getBoughtStocks();
+    Q_INVOKABLE QVariantList getTestPortfolio();
+    Q_INVOKABLE void connectToIbkr();
+    Q_INVOKABLE void getIbkrData(const QString &symbol);
+    QString ibkrConnectionStatus() const;
+    bool ibkrConnected() const;
+    bool ibkrConnecting() const;
+    bool ibkrDataLoading() const;
     Q_INVOKABLE bool isBoughtStock(const QString &symbol);
     Q_INVOKABLE bool deleteBoughtStock(const QString &symbol);
     Q_INVOKABLE bool saveBoughtStock(
@@ -74,11 +88,31 @@ public:
 
 signals:
     Q_SIGNAL void saveComplete(QString symbol);
+    Q_SIGNAL void ibkrConnectionChanged();
+    Q_SIGNAL void ibkrStockDataUpdated(QString symbol);
 
 private:
+    bool ensureSchema();
+    void tryNextIbkrPort();
+    void setIbkrConnectionState(const QString &status, bool connected, bool connecting);
+    void finishIbkrDataRequest(int exitCode, QProcess::ExitStatus exitStatus);
+    bool saveIbkrContractDetails(const QString &symbol, const QVariantMap &details);
     QVariantMap extractStock(const QSqlQuery &query);
     QSqlDatabase db;
     MarketStackClient marketStackClient; // Mitgliedsvariable hinzufügen
+    QTcpSocket m_ibkrSocket;
+    QTimer m_ibkrConnectTimeout;
+    QList<quint16> m_ibkrPorts;
+    qsizetype m_ibkrPortIndex = 0;
+    QString m_ibkrConnectionStatus = QStringLiteral("IBKR-Verbindung wurde noch nicht geprüft.");
+    bool m_ibkrConnected = false;
+    bool m_ibkrConnecting = false;
+    bool m_ibkrPortAdvanceInProgress = false;
+    bool m_ibkrDataLoading = false;
+    quint16 m_ibkrConnectedPort = 0;
+    QProcess m_ibkrProcess;
+    QTimer m_ibkrDataTimeout;
+    QString m_ibkrPendingSymbol;
     QString getISINFromOpenFIGI(const QString &apiKey, const QString &ticker, const QString &exchangeCode);
 
     void updateShare(const ShareData &share);

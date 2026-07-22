@@ -43,6 +43,11 @@ ApplicationWindow {
         id: boughtStockModel
     }
 
+    ListModel {
+        id: portfolioModel
+        dynamicRoles: true
+    }
+
     // Speichert das aktuell selektierte Symbol & Exchange
     property string selectedSymbol: ""
     property string selectedExchange: ""
@@ -60,6 +65,75 @@ ApplicationWindow {
     property int selectedBoughtStockIndex: -1
     property bool detailStockBought: false
     property string pendingDeleteBoughtSymbol: ""
+    property int selectedPortfolioIndex: -1
+    property var portfolioFields: [
+        { heading: true, label: "Position" },
+        { key: "symbol", label: "Symbol" },
+        { key: "name", label: "Name" },
+        { key: "buyDate", label: "Kaufdatum" },
+        { key: "sellDate", label: "Verkaufsdatum" },
+        { key: "currentValue", label: "Aktueller Wert", format: "money" },
+        { key: "entryValue", label: "Einstiegswert", format: "money" },
+        { key: "valueIncreasePercent", label: "Wertentwicklung", format: "percent" },
+        { key: "status", label: "Status", format: "status" },
+        { key: "mic", label: "MIC" },
+        { key: "isin", label: "ISIN" },
+        { key: "exchange", label: "Börse" },
+        { key: "countryCode", label: "Ländercode" },
+        { key: "city", label: "Börsenstadt" },
+
+        { heading: true, label: "IBKR-Stammdaten" },
+        { key: "ibkrConId", label: "IBKR ConId" },
+        { key: "currency", label: "Währung" },
+        { key: "primaryExchange", label: "Primärbörse" },
+        { key: "localSymbol", label: "Lokales Symbol" },
+        { key: "securityType", label: "Wertpapierart" },
+        { key: "tradingClass", label: "Handelsklasse" },
+        { key: "stockType", label: "Aktienart" },
+        { key: "industry", label: "Branche" },
+        { key: "category", label: "Kategorie" },
+        { key: "subcategory", label: "Unterkategorie" },
+        { key: "timeZoneId", label: "Zeitzone" },
+        { key: "tradingHours", label: "Handelszeiten" },
+        { key: "liquidHours", label: "Reguläre Handelszeiten" },
+        { key: "minTick", label: "Minimale Preisstufe", format: "decimal8" },
+        { key: "marketRuleIds", label: "Market-Rule-IDs" },
+        { key: "validExchanges", label: "Gültige Handelsplätze" },
+        { key: "orderTypes", label: "Ordertypen" },
+        { key: "marketName", label: "Marktname" },
+        { key: "cusip", label: "CUSIP" },
+        { key: "ibkrLastSyncAt", label: "Letzte IBKR-Synchronisierung" },
+
+        { heading: true, label: "Kennzahlen" },
+        { key: "asOfDate", label: "Stichtag" },
+        { key: "fundamentalCurrency", label: "Kennzahlenwährung" },
+        { key: "marketCapitalization", label: "Marktkapitalisierung", format: "large" },
+        { key: "enterpriseValue", label: "Unternehmenswert", format: "large" },
+        { key: "peRatio", label: "KGV", format: "decimal2" },
+        { key: "forwardPeRatio", label: "Erwartetes KGV", format: "decimal2" },
+        { key: "priceToBookRatio", label: "KBV", format: "decimal2" },
+        { key: "priceToSalesRatio", label: "KUV", format: "decimal2" },
+        { key: "priceToCashFlowRatio", label: "KCV", format: "decimal2" },
+        { key: "priceToDividendRatio", label: "Kurs-Dividenden-Verhältnis", format: "decimal2" },
+        { key: "eps", label: "Gewinn je Aktie (EPS)", format: "decimal2" },
+        { key: "forwardEps", label: "Erwartetes EPS", format: "decimal2" },
+        { key: "dividendPerShare", label: "Dividende je Aktie", format: "money" },
+        { key: "dividendYield", label: "Dividendenrendite", format: "percent" },
+        { key: "payoutRatio", label: "Ausschüttungsquote", format: "percent" },
+        { key: "beta", label: "Beta", format: "decimal2" },
+        { key: "revenue", label: "Umsatz", format: "large" },
+        { key: "netIncome", label: "Nettogewinn", format: "large" },
+        { key: "ebitda", label: "EBITDA", format: "large" },
+        { key: "returnOnEquity", label: "Eigenkapitalrendite", format: "percent" },
+        { key: "returnOnAssets", label: "Gesamtkapitalrendite", format: "percent" },
+        { key: "debtToEquity", label: "Verschuldungsgrad", format: "decimal2" },
+        { key: "sharesOutstanding", label: "Ausstehende Aktien", format: "large" },
+        { key: "week52High", label: "52-Wochen-Hoch", format: "money" },
+        { key: "week52Low", label: "52-Wochen-Tief", format: "money" },
+        { key: "source", label: "Datenquelle" },
+        { key: "rawData", label: "Rohdaten" },
+        { key: "fundamentalUpdatedAt", label: "Kennzahlen aktualisiert" }
+    ]
 
     Timer {
         id: clipboardTimer
@@ -165,6 +239,9 @@ ApplicationWindow {
                 clipboardPopup.visible = true;
                 clipboardTimer.restart();
             }
+        }
+        function onIbkrStockDataUpdated(symbol) {
+            loadTestPortfolio(symbol)
         }
     }
 
@@ -349,6 +426,56 @@ ApplicationWindow {
 
     function loadBoughtStocks() {
         updateBoughtStockModel(dbManager.getBoughtStocks())
+    }
+
+    function loadTestPortfolio(preferredSymbol) {
+        const data = dbManager.getTestPortfolio()
+        portfolioModel.clear()
+        let preferredIndex = -1
+        data.forEach((item, index) => {
+            portfolioModel.append(item)
+            if (preferredSymbol && item.symbol === preferredSymbol)
+                preferredIndex = index
+        })
+        selectedPortfolioIndex = preferredIndex >= 0
+            ? preferredIndex
+            : (portfolioModel.count > 0 ? 0 : -1)
+    }
+
+    function selectedPortfolioValue(key) {
+        if (selectedPortfolioIndex < 0 || selectedPortfolioIndex >= portfolioModel.count)
+            return ""
+        const row = portfolioModel.get(selectedPortfolioIndex)
+        return row[key] === undefined || row[key] === null ? "" : row[key]
+    }
+
+    function formatPortfolioValue(key, format) {
+        const value = selectedPortfolioValue(key)
+        let displayValue = ""
+        if (value === "")
+            displayValue = "-"
+        else {
+            if (format === "status")
+                displayValue = Number(value) === 10 ? "Verkauft" : "Aktiv"
+            else if (format === "money")
+                displayValue = Number(value).toLocaleString(Qt.locale(), "f", 2)
+            else if (format === "large")
+                displayValue = Number(value).toLocaleString(Qt.locale(), "f", 0)
+            else if (format === "percent")
+                displayValue = Number(value).toLocaleString(Qt.locale(), "f", 2) + " %"
+            else if (format === "decimal2")
+                displayValue = Number(value).toLocaleString(Qt.locale(), "f", 2)
+            else if (format === "decimal8")
+                displayValue = Number(value).toLocaleString(Qt.locale(), "f", 8)
+            else
+                displayValue = String(value)
+        }
+        return displayValue
+    }
+
+    function portfolioFieldLabel(key, label) {
+        const origin = selectedPortfolioValue(key + "Origin")
+        return origin === "" ? label : label + " (" + origin + ")"
     }
 
     function currentIsoDate() {
@@ -1190,7 +1317,7 @@ ApplicationWindow {
 
                 Rectangle {
                     Layout.fillWidth: true
-                    height: 1
+                    Layout.preferredHeight: 1
                     color: "#c9d0d5"
                 }
 
@@ -1233,6 +1360,294 @@ ApplicationWindow {
                             Label { text: model.volume || 0; Layout.preferredWidth: 140; horizontalAlignment: Text.AlignRight }
                             Item { Layout.fillWidth: true }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    Window {
+        id: portfolioWindow
+        title: "Mein Depot (Test)"
+        width: 1360
+        height: 760
+        minimumWidth: 980
+        minimumHeight: 520
+
+        onVisibleChanged: {
+            if (visible)
+                loadTestPortfolio()
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#f4f6f7"
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 10
+
+                RowLayout {
+                    Layout.fillWidth: true
+
+                    Label {
+                        text: "Mein Depot"
+                        font.pixelSize: 22
+                        font.bold: true
+                    }
+
+                    Item { Layout.fillWidth: true }
+
+                    Button {
+                        text: "Connect to IBKR"
+                        enabled: !dbManager.ibkrConnecting && !dbManager.ibkrDataLoading
+                        onClicked: dbManager.connectToIbkr()
+                    }
+
+                    Label {
+                        text: "(IBKR) API   ·   (mock) Testwert   ·   (db) Datenbank"
+                        color: "#475569"
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 1
+                    color: "#c9d0d5"
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 12
+
+                    Rectangle {
+                        Layout.preferredWidth: 360
+                        Layout.fillHeight: true
+                        color: "#ffffff"
+                        border.color: "#c9d0d5"
+                        border.width: 1
+
+                        ColumnLayout {
+                            anchors.fill: parent
+                            anchors.margins: 1
+                            spacing: 0
+
+                            Label {
+                                text: "Positionen"
+                                font.bold: true
+                                padding: 10
+                                Layout.fillWidth: true
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 1
+                                color: "#c9d0d5"
+                            }
+
+                            ListView {
+                                id: portfolioListView
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                clip: true
+                                model: portfolioModel
+                                currentIndex: selectedPortfolioIndex
+                                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                                delegate: Rectangle {
+                                    width: ListView.view.width
+                                    height: 62
+                                    color: selectedPortfolioIndex === index
+                                        ? "#dbeafe"
+                                        : (index % 2 === 0 ? "#ffffff" : "#f8fafc")
+
+                                    ColumnLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+                                        spacing: 2
+
+                                        RowLayout {
+                                            Layout.fillWidth: true
+                                            Label {
+                                                text: model.symbol
+                                                font.bold: true
+                                                Layout.preferredWidth: 105
+                                                elide: Text.ElideRight
+                                            }
+                                            Label {
+                                                text: Number(model.currentValue || 0).toLocaleString(Qt.locale(), "f", 2)
+                                                horizontalAlignment: Text.AlignRight
+                                                Layout.fillWidth: true
+                                            }
+                                        }
+
+                                        Label {
+                                            text: model.name
+                                            color: "#475569"
+                                            Layout.fillWidth: true
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                        onClicked: function(mouse) {
+                                            selectedPortfolioIndex = index
+                                            if (mouse.button === Qt.RightButton)
+                                                portfolioContextMenu.popup()
+                                        }
+                                    }
+
+                                    Menu {
+                                        id: portfolioContextMenu
+
+                                        MenuItem {
+                                            text: "Get Data from IBKR"
+                                            enabled: dbManager.ibkrConnected
+                                                && !dbManager.ibkrDataLoading
+                                            onTriggered: dbManager.getIbkrData(
+                                                portfolioModel.get(index).symbol)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        color: "#ffffff"
+                        border.color: "#c9d0d5"
+                        border.width: 1
+
+                        ColumnLayout {
+                            anchors.fill: parent
+                            anchors.margins: 1
+                            spacing: 0
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 56
+                                Layout.leftMargin: 12
+                                Layout.rightMargin: 12
+
+                                Label {
+                                    text: selectedPortfolioValue("symbol") || "Keine Position"
+                                    font.pixelSize: 18
+                                    font.bold: true
+                                }
+
+                                Label {
+                                    text: selectedPortfolioValue("name")
+                                    color: "#475569"
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 1
+                                color: "#c9d0d5"
+                            }
+
+                            ScrollView {
+                                id: portfolioPropertyScroll
+                                Layout.fillWidth: true
+                                Layout.fillHeight: true
+                                contentWidth: availableWidth
+
+                                Column {
+                                    width: portfolioPropertyScroll.availableWidth
+
+                                    Repeater {
+                                        model: portfolioFields
+
+                                        delegate: Rectangle {
+                                            width: parent.width
+                                            height: modelData.heading ? 40 : 34
+                                            color: modelData.heading
+                                                ? "#e5e7eb"
+                                                : (index % 2 === 0 ? "#ffffff" : "#f8fafc")
+
+                                            Label {
+                                                visible: Boolean(modelData.heading)
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 10
+                                                verticalAlignment: Text.AlignVCenter
+                                                text: modelData.label
+                                                font.bold: true
+                                                color: "#1f2937"
+                                            }
+
+                                            RowLayout {
+                                                visible: !modelData.heading
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 10
+                                                anchors.rightMargin: 10
+                                                spacing: 12
+
+                                                Label {
+                                                    text: portfolioFieldLabel(modelData.key, modelData.label)
+                                                    color: "#475569"
+                                                    Layout.preferredWidth: 280
+                                                    elide: Text.ElideRight
+                                                }
+
+                                                TextField {
+                                                    text: formatPortfolioValue(modelData.key, modelData.format || "")
+                                                    readOnly: true
+                                                    Layout.fillWidth: true
+                                                    horizontalAlignment: Text.AlignLeft
+                                                    selectByMouse: true
+                                                    activeFocusOnTab: true
+                                                    leftPadding: 0
+                                                    rightPadding: 0
+                                                    topPadding: 0
+                                                    bottomPadding: 0
+                                                    background: null
+                                                    clip: true
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+
+                    TextField {
+                        text: dbManager.ibkrConnectionStatus
+                        readOnly: true
+                        selectByMouse: true
+                        color: dbManager.ibkrConnected
+                            ? "#15803d"
+                            : (dbManager.ibkrConnecting
+                                ? "#1d4ed8"
+                                : (dbManager.ibkrConnectionStatus.indexOf("Keine") === 0
+                                    || dbManager.ibkrConnectionStatus.indexOf("getrennt") >= 0
+                                    || dbManager.ibkrConnectionStatus.indexOf("Fehler:") === 0
+                                    ? "#b91c1c"
+                                    : "#475569"))
+                        font.bold: dbManager.ibkrConnected
+                        Layout.fillWidth: true
+                        leftPadding: 0
+                        rightPadding: 0
+                        background: null
+                    }
+
+                    Button {
+                        text: "Schließen"
+                        onClicked: portfolioWindow.close()
                     }
                 }
             }
@@ -1469,6 +1884,11 @@ ApplicationWindow {
                     boughtStockMessage = ""
                     boughtStocksDialog.show()
                 }
+            }
+
+            Button {
+                text: "Mein Depot"
+                onClicked: portfolioWindow.show()
             }
         }
 

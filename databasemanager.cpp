@@ -1,10 +1,123 @@
 #include "databasemanager.h"
 #include <QSqlRecord>
 #include <QDate>
+#include <QDateTime>
+#include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
+#include <QHostAddress>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QStringList>
 #include <QtConcurrent>
+
+namespace {
+quint32 stableSymbolSeed(const QString &symbol)
+{
+    quint32 seed = 2166136261u;
+    for (const QChar character : symbol) {
+        seed ^= character.unicode();
+        seed *= 16777619u;
+    }
+    return seed;
+}
+
+double mockValue(quint32 seed, int shift, double minimum, double maximum)
+{
+    const quint32 part = (seed >> shift) & 0xffu;
+    return minimum + (maximum - minimum) * (double(part) / 255.0);
+}
+
+QString currencyForCountry(const QString &countryCode)
+{
+    static const QHash<QString, QString> currencies = {
+        {QStringLiteral("AT"), QStringLiteral("EUR")},
+        {QStringLiteral("BE"), QStringLiteral("EUR")},
+        {QStringLiteral("CH"), QStringLiteral("CHF")},
+        {QStringLiteral("DE"), QStringLiteral("EUR")},
+        {QStringLiteral("ES"), QStringLiteral("EUR")},
+        {QStringLiteral("FI"), QStringLiteral("EUR")},
+        {QStringLiteral("FR"), QStringLiteral("EUR")},
+        {QStringLiteral("GB"), QStringLiteral("GBP")},
+        {QStringLiteral("IE"), QStringLiteral("EUR")},
+        {QStringLiteral("IT"), QStringLiteral("EUR")},
+        {QStringLiteral("NL"), QStringLiteral("EUR")},
+        {QStringLiteral("NO"), QStringLiteral("NOK")},
+        {QStringLiteral("SE"), QStringLiteral("SEK")},
+        {QStringLiteral("US"), QStringLiteral("USD")}
+    };
+    return currencies.value(countryCode.trimmed().toUpper());
+}
+}
 
 DatabaseManager::DatabaseManager(QObject *parent) : QObject(parent)
 {
+    m_ibkrPorts = {7497, 7496, 4002, 4001};
+    m_ibkrConnectTimeout.setSingleShot(true);
+    m_ibkrConnectTimeout.setInterval(1200);
+    connect(&m_ibkrConnectTimeout, &QTimer::timeout, this, [this]() {
+        m_ibkrPortAdvanceInProgress = true;
+        m_ibkrSocket.abort();
+        ++m_ibkrPortIndex;
+        m_ibkrPortAdvanceInProgress = false;
+        tryNextIbkrPort();
+    });
+    connect(&m_ibkrSocket, &QTcpSocket::connected, this, [this]() {
+        m_ibkrConnectTimeout.stop();
+        m_ibkrConnectedPort = m_ibkrSocket.peerPort();
+        setIbkrConnectionState(
+            QStringLiteral("IBKR TWS/IB Gateway ist auf 127.0.0.1:%1 erreichbar.")
+                .arg(m_ibkrSocket.peerPort()),
+            true,
+            false);
+    });
+    connect(&m_ibkrSocket, &QTcpSocket::errorOccurred, this, [this](QAbstractSocket::SocketError) {
+        if (!m_ibkrConnecting || m_ibkrPortAdvanceInProgress)
+            return;
+        m_ibkrConnectTimeout.stop();
+        ++m_ibkrPortIndex;
+        QTimer::singleShot(0, this, &DatabaseManager::tryNextIbkrPort);
+    });
+    connect(&m_ibkrSocket, &QTcpSocket::disconnected, this, [this]() {
+        if (m_ibkrConnecting || m_ibkrDataLoading)
+            return;
+        if (m_ibkrConnected) {
+            setIbkrConnectionState(
+                QStringLiteral("Die Verbindung zu IBKR TWS/IB Gateway wurde getrennt."),
+                false,
+                false);
+        }
+    });
+
+    m_ibkrDataTimeout.setSingleShot(true);
+    m_ibkrDataTimeout.setInterval(25000);
+    connect(&m_ibkrDataTimeout, &QTimer::timeout, this, [this]() {
+        m_ibkrDataLoading = false;
+        if (m_ibkrProcess.state() != QProcess::NotRunning)
+            m_ibkrProcess.kill();
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: Zeitüberschreitung beim Abruf der IBKR-Daten."),
+            m_ibkrConnected,
+            false);
+    });
+    connect(&m_ibkrProcess,
+            &QProcess::errorOccurred,
+            this,
+            [this](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart)
+            return;
+        m_ibkrDataTimeout.stop();
+        m_ibkrDataLoading = false;
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: Der IBKR-Helfer konnte nicht gestartet werden."),
+            m_ibkrConnected,
+            false);
+    });
+    connect(&m_ibkrProcess,
+            qOverload<int, QProcess::ExitStatus>(&QProcess::finished),
+            this,
+            &DatabaseManager::finishIbkrDataRequest);
+
     db = QSqlDatabase::addDatabase("QPSQL"); // PostgreSQL-Treiber
     db.setHostName("localhost");
     db.setDatabaseName("TotalStocks");
@@ -15,12 +128,280 @@ DatabaseManager::DatabaseManager(QObject *parent) : QObject(parent)
         qDebug() << "Fehler bei der Verbindung zur Datenbank:" << db.lastError().text();
     } else {
         qDebug() << "Erfolgreich mit der Datenbank verbunden!";
+        if (!ensureSchema())
+            qCritical() << "Datenbankschema konnte nicht aktualisiert werden.";
         qDebug() << "Tables:" << db.tables(QSql::Tables);
     }
 }
 
+QString DatabaseManager::ibkrConnectionStatus() const
+{
+    return m_ibkrConnectionStatus;
+}
+
+bool DatabaseManager::ibkrConnected() const
+{
+    return m_ibkrConnected;
+}
+
+bool DatabaseManager::ibkrConnecting() const
+{
+    return m_ibkrConnecting;
+}
+
+bool DatabaseManager::ibkrDataLoading() const
+{
+    return m_ibkrDataLoading;
+}
+
+void DatabaseManager::setIbkrConnectionState(const QString &status,
+                                             bool connected,
+                                             bool connecting)
+{
+    if (m_ibkrConnectionStatus == status
+        && m_ibkrConnected == connected
+        && m_ibkrConnecting == connecting) {
+        return;
+    }
+
+    m_ibkrConnectionStatus = status;
+    m_ibkrConnected = connected;
+    m_ibkrConnecting = connecting;
+    emit ibkrConnectionChanged();
+}
+
+void DatabaseManager::connectToIbkr()
+{
+    if (m_ibkrSocket.state() == QAbstractSocket::ConnectedState) {
+        setIbkrConnectionState(
+            QStringLiteral("IBKR TWS/IB Gateway ist auf 127.0.0.1:%1 erreichbar.")
+                .arg(m_ibkrSocket.peerPort()),
+            true,
+            false);
+        return;
+    }
+
+    m_ibkrConnectTimeout.stop();
+    m_ibkrSocket.abort();
+    m_ibkrPortIndex = 0;
+    setIbkrConnectionState(QStringLiteral("IBKR-Verbindung wird geprüft ..."), false, true);
+    tryNextIbkrPort();
+}
+
+void DatabaseManager::tryNextIbkrPort()
+{
+    if (!m_ibkrConnecting)
+        return;
+
+    if (m_ibkrPortIndex >= m_ibkrPorts.size()) {
+        setIbkrConnectionState(
+            QStringLiteral("Keine IBKR-API erreichbar. TWS oder IB Gateway starten und Socket Clients aktivieren."),
+            false,
+            false);
+        return;
+    }
+
+    const quint16 port = m_ibkrPorts.at(m_ibkrPortIndex);
+    m_ibkrSocket.connectToHost(QHostAddress::LocalHost, port);
+    m_ibkrConnectTimeout.start();
+}
+
+void DatabaseManager::getIbkrData(const QString &symbol)
+{
+    const QString normalizedSymbol = symbol.trimmed();
+    if (normalizedSymbol.isEmpty() || m_ibkrDataLoading)
+        return;
+
+    if (!m_ibkrConnected || m_ibkrConnectedPort == 0) {
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: Zuerst eine Verbindung zu IBKR herstellen."),
+            false,
+            false);
+        return;
+    }
+
+    QSqlQuery stockQuery(db);
+    stockQuery.prepare(R"SQL(
+        SELECT "ISIN", "Currency", "CountryCode"
+        FROM "Stocks"
+        WHERE "Symbol" = :symbol
+    )SQL");
+    stockQuery.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
+    if (!stockQuery.exec() || !stockQuery.next()) {
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: Die ausgewählte Aktie wurde nicht in der Datenbank gefunden."),
+            m_ibkrConnected,
+            false);
+        return;
+    }
+
+    QString currency = stockQuery.value(QStringLiteral("Currency")).toString().trimmed();
+    if (currency.isEmpty())
+        currency = currencyForCountry(stockQuery.value(QStringLiteral("CountryCode")).toString());
+
+    const QString helperPath = QDir(QCoreApplication::applicationDirPath())
+        .filePath(QStringLiteral("ibkr-helper/IbkrHelper.exe"));
+    if (!QFileInfo::exists(helperPath)) {
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: Der IBKR-Helfer fehlt im Build-Verzeichnis."),
+            m_ibkrConnected,
+            false);
+        return;
+    }
+
+    m_ibkrDataLoading = true;
+    m_ibkrPendingSymbol = normalizedSymbol;
+    m_ibkrSocket.abort();
+    setIbkrConnectionState(
+        QStringLiteral("IBKR-Daten für %1 werden abgerufen ...").arg(normalizedSymbol),
+        true,
+        false);
+
+    const QString localSymbol = normalizedSymbol.section(QLatin1Char('.'), 0, 0);
+    QStringList arguments = {
+        QStringLiteral("--host"), QStringLiteral("127.0.0.1"),
+        QStringLiteral("--port"), QString::number(m_ibkrConnectedPort),
+        QStringLiteral("--client-id"), QStringLiteral("23"),
+        QStringLiteral("--symbol"), localSymbol
+    };
+    if (!currency.isEmpty())
+        arguments << QStringLiteral("--currency") << currency;
+    const QString isin = stockQuery.value(QStringLiteral("ISIN")).toString().trimmed();
+    if (!isin.isEmpty())
+        arguments << QStringLiteral("--isin") << isin;
+
+    m_ibkrProcess.setProgram(helperPath);
+    m_ibkrProcess.setArguments(arguments);
+    m_ibkrProcess.setProcessChannelMode(QProcess::SeparateChannels);
+    m_ibkrProcess.start();
+    m_ibkrDataTimeout.start();
+    emit ibkrConnectionChanged();
+}
+
+void DatabaseManager::finishIbkrDataRequest(int exitCode, QProcess::ExitStatus exitStatus)
+{
+    Q_UNUSED(exitCode)
+    m_ibkrDataTimeout.stop();
+    if (!m_ibkrDataLoading)
+        return;
+
+    m_ibkrDataLoading = false;
+    const QString stderrText = QString::fromUtf8(m_ibkrProcess.readAllStandardError()).trimmed();
+    if (!stderrText.isEmpty())
+        qDebug().noquote() << "IBKR-Helfer:" << stderrText;
+
+    const QByteArray output = m_ibkrProcess.readAllStandardOutput().trimmed();
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(output, &parseError);
+    if (exitStatus != QProcess::NormalExit
+        || parseError.error != QJsonParseError::NoError
+        || !document.isObject()) {
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: Ungültige Antwort vom IBKR-Helfer."),
+            m_ibkrConnected,
+            false);
+        return;
+    }
+
+    const QJsonObject result = document.object();
+    const QString message = result.value(QStringLiteral("message")).toString();
+    if (!result.value(QStringLiteral("success")).toBool()) {
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: %1").arg(message),
+            m_ibkrConnected,
+            false);
+        return;
+    }
+
+    const QVariantMap details = result.value(QStringLiteral("data")).toObject().toVariantMap();
+    if (!saveIbkrContractDetails(m_ibkrPendingSymbol, details)) {
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: IBKR-Daten konnten nicht in der Datenbank gespeichert werden."),
+            true,
+            false);
+        return;
+    }
+
+    const QString completedSymbol = m_ibkrPendingSymbol;
+    setIbkrConnectionState(
+        QStringLiteral("%1 Datenbank und Anzeige wurden aktualisiert.").arg(message),
+        true,
+        false);
+    emit ibkrStockDataUpdated(completedSymbol);
+}
+
+bool DatabaseManager::saveIbkrContractDetails(const QString &symbol, const QVariantMap &details)
+{
+    if (!db.transaction()) {
+        qCritical() << "IBKR-Update konnte keine Transaktion starten:" << db.lastError().text();
+        return false;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        UPDATE "Stocks"
+        SET
+            "IBKRConId" = :ibkrConId,
+            "Currency" = COALESCE(NULLIF(:currency, ''), "Currency"),
+            "PrimaryExchange" = COALESCE(NULLIF(:primaryExchange, ''), "PrimaryExchange"),
+            "LocalSymbol" = COALESCE(NULLIF(:localSymbol, ''), "LocalSymbol"),
+            "SecurityType" = COALESCE(NULLIF(:securityType, ''), "SecurityType"),
+            "TradingClass" = COALESCE(NULLIF(:tradingClass, ''), "TradingClass"),
+            "StockType" = COALESCE(NULLIF(:stockType, ''), "StockType"),
+            "Industry" = COALESCE(NULLIF(:industry, ''), "Industry"),
+            "Category" = COALESCE(NULLIF(:category, ''), "Category"),
+            "Subcategory" = COALESCE(NULLIF(:subcategory, ''), "Subcategory"),
+            "TimeZoneId" = COALESCE(NULLIF(:timeZoneId, ''), "TimeZoneId"),
+            "TradingHours" = COALESCE(NULLIF(:tradingHours, ''), "TradingHours"),
+            "LiquidHours" = COALESCE(NULLIF(:liquidHours, ''), "LiquidHours"),
+            "MinTick" = COALESCE(:minTick, "MinTick"),
+            "MarketRuleIds" = COALESCE(NULLIF(:marketRuleIds, ''), "MarketRuleIds"),
+            "ValidExchanges" = COALESCE(NULLIF(:validExchanges, ''), "ValidExchanges"),
+            "OrderTypes" = COALESCE(NULLIF(:orderTypes, ''), "OrderTypes"),
+            "MarketName" = COALESCE(NULLIF(:marketName, ''), "MarketName"),
+            "CUSIP" = COALESCE(NULLIF(:cusip, ''), "CUSIP"),
+            "ISIN" = COALESCE(NULLIF(:isin, ''), "ISIN"),
+            "IBKRLastSyncAt" = CURRENT_TIMESTAMP
+        WHERE "Symbol" = :symbol
+    )SQL");
+
+    const QStringList textFields = {
+        QStringLiteral("currency"), QStringLiteral("primaryExchange"),
+        QStringLiteral("localSymbol"), QStringLiteral("securityType"),
+        QStringLiteral("tradingClass"), QStringLiteral("stockType"),
+        QStringLiteral("industry"), QStringLiteral("category"),
+        QStringLiteral("subcategory"), QStringLiteral("timeZoneId"),
+        QStringLiteral("tradingHours"), QStringLiteral("liquidHours"),
+        QStringLiteral("marketRuleIds"), QStringLiteral("validExchanges"),
+        QStringLiteral("orderTypes"), QStringLiteral("marketName"),
+        QStringLiteral("cusip"), QStringLiteral("isin")
+    };
+    query.bindValue(QStringLiteral(":symbol"), symbol);
+    query.bindValue(QStringLiteral(":ibkrConId"), details.value(QStringLiteral("ibkrConId")));
+    for (const QString &field : textFields)
+        query.bindValue(QLatin1Char(':') + field, details.value(field).toString());
+    const double minTick = details.value(QStringLiteral("minTick")).toDouble();
+    query.bindValue(QStringLiteral(":minTick"), minTick > 0.0 ? QVariant(minTick) : QVariant());
+
+    if (!query.exec() || query.numRowsAffected() != 1) {
+        qCritical() << "IBKR-Stammdaten konnten nicht gespeichert werden:" << query.lastError().text();
+        db.rollback();
+        return false;
+    }
+    if (!db.commit()) {
+        qCritical() << "IBKR-Update konnte nicht abgeschlossen werden:" << db.lastError().text();
+        db.rollback();
+        return false;
+    }
+    return true;
+}
+
 DatabaseManager::~DatabaseManager()
 {
+    if (m_ibkrProcess.state() != QProcess::NotRunning) {
+        m_ibkrProcess.kill();
+        m_ibkrProcess.waitForFinished(2000);
+    }
     if (db.isOpen()) {
         db.close();
     }
@@ -38,6 +419,114 @@ bool DatabaseManager::connectToDatabase(const QString &host, const QString &dbNa
         return false;
     }
     qDebug() << "Erfolgreich mit der Datenbank verbunden!";
+    return ensureSchema();
+}
+
+bool DatabaseManager::ensureSchema()
+{
+    if (!db.isOpen())
+        return false;
+
+    const QStringList statements = {
+        QStringLiteral(R"SQL(
+            ALTER TABLE "Stocks"
+                ADD COLUMN IF NOT EXISTS "IBKRConId" BIGINT,
+                ADD COLUMN IF NOT EXISTS "Currency" VARCHAR(8),
+                ADD COLUMN IF NOT EXISTS "PrimaryExchange" VARCHAR(32),
+                ADD COLUMN IF NOT EXISTS "LocalSymbol" VARCHAR(64),
+                ADD COLUMN IF NOT EXISTS "SecurityType" VARCHAR(16),
+                ADD COLUMN IF NOT EXISTS "TradingClass" VARCHAR(64),
+                ADD COLUMN IF NOT EXISTS "StockType" VARCHAR(32),
+                ADD COLUMN IF NOT EXISTS "Industry" VARCHAR(128),
+                ADD COLUMN IF NOT EXISTS "Category" VARCHAR(128),
+                ADD COLUMN IF NOT EXISTS "Subcategory" VARCHAR(128),
+                ADD COLUMN IF NOT EXISTS "TimeZoneId" VARCHAR(64),
+                ADD COLUMN IF NOT EXISTS "TradingHours" TEXT,
+                ADD COLUMN IF NOT EXISTS "LiquidHours" TEXT,
+                ADD COLUMN IF NOT EXISTS "MinTick" NUMERIC(20, 10),
+                ADD COLUMN IF NOT EXISTS "MarketRuleIds" TEXT,
+                ADD COLUMN IF NOT EXISTS "ValidExchanges" TEXT,
+                ADD COLUMN IF NOT EXISTS "OrderTypes" TEXT,
+                ADD COLUMN IF NOT EXISTS "MarketName" VARCHAR(128),
+                ADD COLUMN IF NOT EXISTS "CUSIP" VARCHAR(32),
+                ADD COLUMN IF NOT EXISTS "IBKRLastSyncAt" TIMESTAMPTZ
+        )SQL"),
+        QStringLiteral(R"SQL(
+            CREATE UNIQUE INDEX IF NOT EXISTS "Stocks_IBKRConId_uidx"
+                ON "Stocks" ("IBKRConId")
+                WHERE "IBKRConId" IS NOT NULL
+        )SQL"),
+        QStringLiteral(R"SQL(
+            CREATE TABLE IF NOT EXISTS "StockFundamentals" (
+                "Id" BIGSERIAL PRIMARY KEY,
+                "Symbol" VARCHAR NOT NULL,
+                "IBKRConId" BIGINT,
+                "AsOfDate" DATE NOT NULL,
+                "Currency" VARCHAR(8),
+                "MarketCapitalization" NUMERIC(24, 4),
+                "EnterpriseValue" NUMERIC(24, 4),
+                "PERatio" NUMERIC(20, 8),
+                "ForwardPERatio" NUMERIC(20, 8),
+                "PriceToBookRatio" NUMERIC(20, 8),
+                "PriceToSalesRatio" NUMERIC(20, 8),
+                "PriceToCashFlowRatio" NUMERIC(20, 8),
+                "PriceToDividendRatio" NUMERIC(20, 8),
+                "EPS" NUMERIC(20, 8),
+                "ForwardEPS" NUMERIC(20, 8),
+                "DividendPerShare" NUMERIC(20, 8),
+                "DividendYield" NUMERIC(20, 8),
+                "PayoutRatio" NUMERIC(20, 8),
+                "Beta" NUMERIC(20, 8),
+                "Revenue" NUMERIC(24, 4),
+                "NetIncome" NUMERIC(24, 4),
+                "EBITDA" NUMERIC(24, 4),
+                "ReturnOnEquity" NUMERIC(20, 8),
+                "ReturnOnAssets" NUMERIC(20, 8),
+                "DebtToEquity" NUMERIC(20, 8),
+                "SharesOutstanding" NUMERIC(24, 4),
+                "Week52High" NUMERIC(20, 8),
+                "Week52Low" NUMERIC(20, 8),
+                "Source" VARCHAR(32) NOT NULL DEFAULT 'IBKR',
+                "RawData" JSONB,
+                "UpdatedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT "StockFundamentals_symbol_date_source_key"
+                    UNIQUE ("Symbol", "AsOfDate", "Source")
+            )
+        )SQL"),
+        QStringLiteral(R"SQL(
+            CREATE INDEX IF NOT EXISTS "StockFundamentals_IBKRConId_idx"
+                ON "StockFundamentals" ("IBKRConId")
+                WHERE "IBKRConId" IS NOT NULL
+        )SQL"),
+        QStringLiteral(R"SQL(
+            CREATE INDEX IF NOT EXISTS "StockFundamentals_Symbol_AsOfDate_idx"
+                ON "StockFundamentals" ("Symbol", "AsOfDate" DESC)
+        )SQL")
+    };
+
+    if (!db.transaction()) {
+        qCritical() << "Schema-Migration konnte keine Transaktion starten:"
+                    << db.lastError().text();
+        return false;
+    }
+
+    QSqlQuery query(db);
+    for (const QString &statement : statements) {
+        if (query.exec(statement))
+            continue;
+
+        qCritical() << "Schema-Migration fehlgeschlagen:" << query.lastError().text();
+        db.rollback();
+        return false;
+    }
+
+    if (!db.commit()) {
+        qCritical() << "Schema-Migration konnte nicht abgeschlossen werden:"
+                    << db.lastError().text();
+        db.rollback();
+        return false;
+    }
+
     return true;
 }
 
@@ -76,6 +565,213 @@ QVariantList DatabaseManager::getBoughtStocks()
             row.insert(query.record().fieldName(i), query.value(i));
         }
         results << row;
+    }
+
+    return results;
+}
+
+QVariantList DatabaseManager::getTestPortfolio()
+{
+    QVariantList results;
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return results;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT
+            b."Symbol",
+            b."Name",
+            TO_CHAR(b."BuyDate", 'YYYY-MM-DD') AS "BuyDate",
+            TO_CHAR(b."SellDate", 'YYYY-MM-DD') AS "SellDate",
+            b."CurrentValue",
+            b."EntryValue",
+            b."ValueIncreasePercent",
+            b."Status",
+            s."MIC",
+            s."ISIN",
+            s."Exchange",
+            s."CountryCode",
+            s."City",
+            s."IBKRConId",
+            s."Currency",
+            s."PrimaryExchange",
+            s."LocalSymbol",
+            s."SecurityType",
+            s."TradingClass",
+            s."StockType",
+            s."Industry",
+            s."Category",
+            s."Subcategory",
+            s."TimeZoneId",
+            s."TradingHours",
+            s."LiquidHours",
+            s."MinTick",
+            s."MarketRuleIds",
+            s."ValidExchanges",
+            s."OrderTypes",
+            s."MarketName",
+            s."CUSIP",
+            s."IBKRLastSyncAt"
+        FROM "BoughtStocks" b
+        LEFT JOIN "Stocks" s ON s."Symbol" = b."Symbol"
+        ORDER BY b."BuyDate" DESC, b."Symbol" ASC
+    )SQL");
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Laden der Depot-Testdaten:" << query.lastError().text();
+        return results;
+    }
+
+    const QStringList industries = {
+        QStringLiteral("Technology"),
+        QStringLiteral("Industrials"),
+        QStringLiteral("Financial"),
+        QStringLiteral("Consumer")
+    };
+    const QStringList categories = {
+        QStringLiteral("Hardware"),
+        QStringLiteral("Manufacturing"),
+        QStringLiteral("Capital Markets"),
+        QStringLiteral("Consumer Products")
+    };
+
+    while (query.next()) {
+        const QString symbol = query.value("Symbol").toString();
+        const QString localSymbol = symbol.section(QLatin1Char('.'), 0, 0);
+        const quint32 seed = stableSymbolSeed(symbol);
+        const double currentValue = query.value("CurrentValue").toDouble();
+        const double price = currentValue > 0.0 ? currentValue : 100.0;
+        const double peRatio = mockValue(seed, 0, 8.0, 32.0);
+        const double priceToSales = mockValue(seed, 8, 0.8, 7.0);
+        const double dividendYield = mockValue(seed, 16, 0.5, 5.0);
+        const double sharesOutstanding = 100000000.0 + (seed % 900u) * 1000000.0;
+        const double marketCapitalization = price * sharesOutstanding;
+        const double revenue = marketCapitalization / priceToSales;
+        const bool isEtf = query.value("Name").toString().contains(
+            QStringLiteral("ETF"), Qt::CaseInsensitive);
+        const QString mic = query.value("MIC").toString();
+
+        auto stringOr = [&query](const char *column, const QString &fallback) {
+            const QString value = query.value(column).toString().trimmed();
+            return value.isEmpty() ? fallback : value;
+        };
+
+        QVariantMap row;
+        row["symbol"] = symbol;
+        row["name"] = query.value("Name");
+        row["buyDate"] = query.value("BuyDate");
+        row["sellDate"] = query.value("SellDate");
+        row["currentValue"] = currentValue;
+        row["entryValue"] = query.value("EntryValue");
+        row["valueIncreasePercent"] = query.value("ValueIncreasePercent");
+        row["status"] = query.value("Status");
+        row["mic"] = mic;
+        row["isin"] = query.value("ISIN");
+        row["exchange"] = query.value("Exchange");
+        row["countryCode"] = query.value("CountryCode");
+        row["city"] = query.value("City");
+
+        const QStringList databaseFields = {
+            QStringLiteral("symbol"), QStringLiteral("name"), QStringLiteral("buyDate"),
+            QStringLiteral("sellDate"), QStringLiteral("currentValue"), QStringLiteral("entryValue"),
+            QStringLiteral("valueIncreasePercent"), QStringLiteral("status"), QStringLiteral("mic"),
+            QStringLiteral("isin"), QStringLiteral("exchange"), QStringLiteral("countryCode"),
+            QStringLiteral("city")
+        };
+        for (const QString &field : databaseFields)
+            row[field + QStringLiteral("Origin")] = QStringLiteral("db");
+
+        auto setIbkrString = [&query, &row](const QString &key,
+                                            const char *column,
+                                            const QString &fallback) {
+            const QString value = query.value(column).toString().trimmed();
+            const bool hasIbkrValue = !value.isEmpty();
+            row[key] = hasIbkrValue ? value : fallback;
+            row[key + QStringLiteral("Origin")] = hasIbkrValue
+                ? QStringLiteral("IBKR")
+                : QStringLiteral("mock");
+        };
+
+        const bool hasConId = !query.value("IBKRConId").isNull();
+        row["ibkrConId"] = hasConId ? query.value("IBKRConId") : QVariant::fromValue(-qint64(seed) - 1);
+        row["ibkrConIdOrigin"] = hasConId ? QStringLiteral("IBKR") : QStringLiteral("mock");
+        setIbkrString(QStringLiteral("currency"), "Currency", QStringLiteral("EUR"));
+        setIbkrString(QStringLiteral("primaryExchange"), "PrimaryExchange", mic);
+        setIbkrString(QStringLiteral("localSymbol"), "LocalSymbol", localSymbol);
+        setIbkrString(QStringLiteral("securityType"), "SecurityType", isEtf ? QStringLiteral("ETF") : QStringLiteral("STK"));
+        setIbkrString(QStringLiteral("tradingClass"), "TradingClass", localSymbol);
+        setIbkrString(QStringLiteral("stockType"), "StockType", isEtf ? QStringLiteral("ETF") : QStringLiteral("COMMON"));
+        setIbkrString(QStringLiteral("industry"), "Industry", industries.at(seed % industries.size()));
+        setIbkrString(QStringLiteral("category"), "Category", categories.at(seed % categories.size()));
+        setIbkrString(QStringLiteral("subcategory"), "Subcategory", QStringLiteral("TEST-%1").arg(seed % 10u));
+        setIbkrString(QStringLiteral("timeZoneId"), "TimeZoneId", QStringLiteral("Europe/Berlin"));
+        setIbkrString(QStringLiteral("tradingHours"), "TradingHours", QStringLiteral("08:00-22:00"));
+        setIbkrString(QStringLiteral("liquidHours"), "LiquidHours", QStringLiteral("09:00-17:30"));
+        const bool hasMinTick = !query.value("MinTick").isNull();
+        row["minTick"] = hasMinTick ? query.value("MinTick") : QVariant::fromValue(0.01);
+        row["minTickOrigin"] = hasMinTick ? QStringLiteral("IBKR") : QStringLiteral("mock");
+        setIbkrString(QStringLiteral("marketRuleIds"), "MarketRuleIds", QStringLiteral("TEST-26"));
+        setIbkrString(QStringLiteral("validExchanges"), "ValidExchanges", QStringLiteral("SMART,%1").arg(mic));
+        setIbkrString(QStringLiteral("orderTypes"), "OrderTypes", QStringLiteral("MKT,LMT,STP,STP LMT"));
+        setIbkrString(QStringLiteral("marketName"), "MarketName", stringOr("Exchange", mic));
+        setIbkrString(QStringLiteral("cusip"), "CUSIP", QStringLiteral("TEST%1").arg(seed % 100000u, 5, 10, QLatin1Char('0')));
+        const bool hasSyncTime = !query.value("IBKRLastSyncAt").isNull();
+        row["ibkrLastSyncAt"] = hasSyncTime
+            ? query.value("IBKRLastSyncAt").toDateTime().toString(Qt::ISODate)
+            : QDateTime::currentDateTime().toString(Qt::ISODate);
+        row["ibkrLastSyncAtOrigin"] = hasSyncTime ? QStringLiteral("IBKR") : QStringLiteral("mock");
+        if (hasSyncTime && !query.value("ISIN").toString().trimmed().isEmpty())
+            row["isinOrigin"] = QStringLiteral("IBKR");
+
+        row["asOfDate"] = QDate::currentDate().toString(Qt::ISODate);
+        row["fundamentalCurrency"] = row["currency"];
+        row["marketCapitalization"] = marketCapitalization;
+        row["enterpriseValue"] = marketCapitalization * mockValue(seed, 4, 0.9, 1.35);
+        row["peRatio"] = peRatio;
+        row["forwardPeRatio"] = peRatio * mockValue(seed, 12, 0.75, 1.05);
+        row["priceToBookRatio"] = mockValue(seed, 4, 0.8, 8.0);
+        row["priceToSalesRatio"] = priceToSales;
+        row["priceToCashFlowRatio"] = mockValue(seed, 12, 4.0, 22.0);
+        row["priceToDividendRatio"] = 100.0 / dividendYield;
+        row["eps"] = price / peRatio;
+        row["forwardEps"] = price / row["forwardPeRatio"].toDouble();
+        row["dividendPerShare"] = price * dividendYield / 100.0;
+        row["dividendYield"] = dividendYield;
+        row["payoutRatio"] = row["dividendPerShare"].toDouble() / row["eps"].toDouble() * 100.0;
+        row["beta"] = mockValue(seed, 20, 0.55, 1.8);
+        row["revenue"] = revenue;
+        row["netIncome"] = revenue * mockValue(seed, 2, 0.05, 0.22);
+        row["ebitda"] = revenue * mockValue(seed, 10, 0.1, 0.3);
+        row["returnOnEquity"] = mockValue(seed, 6, 4.0, 30.0);
+        row["returnOnAssets"] = mockValue(seed, 14, 2.0, 18.0);
+        row["debtToEquity"] = mockValue(seed, 18, 0.1, 2.5);
+        row["sharesOutstanding"] = sharesOutstanding;
+        row["week52High"] = price * mockValue(seed, 3, 1.05, 1.35);
+        row["week52Low"] = price * mockValue(seed, 11, 0.55, 0.9);
+        row["source"] = QStringLiteral("TEST");
+        row["rawData"] = QStringLiteral("{\"environment\":\"mock\"}");
+        row["fundamentalUpdatedAt"] = QDateTime::currentDateTime().toString(Qt::ISODate);
+        const QStringList mockFundamentalFields = {
+            QStringLiteral("asOfDate"), QStringLiteral("fundamentalCurrency"),
+            QStringLiteral("marketCapitalization"), QStringLiteral("enterpriseValue"),
+            QStringLiteral("peRatio"), QStringLiteral("forwardPeRatio"),
+            QStringLiteral("priceToBookRatio"), QStringLiteral("priceToSalesRatio"),
+            QStringLiteral("priceToCashFlowRatio"), QStringLiteral("priceToDividendRatio"),
+            QStringLiteral("eps"), QStringLiteral("forwardEps"),
+            QStringLiteral("dividendPerShare"), QStringLiteral("dividendYield"),
+            QStringLiteral("payoutRatio"), QStringLiteral("beta"),
+            QStringLiteral("revenue"), QStringLiteral("netIncome"),
+            QStringLiteral("ebitda"), QStringLiteral("returnOnEquity"),
+            QStringLiteral("returnOnAssets"), QStringLiteral("debtToEquity"),
+            QStringLiteral("sharesOutstanding"), QStringLiteral("week52High"),
+            QStringLiteral("week52Low"), QStringLiteral("source"),
+            QStringLiteral("rawData"), QStringLiteral("fundamentalUpdatedAt")
+        };
+        for (const QString &field : mockFundamentalFields)
+            row[field + QStringLiteral("Origin")] = QStringLiteral("mock");
+        results.append(row);
     }
 
     return results;
