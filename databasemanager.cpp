@@ -7384,6 +7384,17 @@ QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent)
             WHERE rn_desc <= 90
             GROUP BY "Symbol"
         ),
+        trend_summary AS (
+            SELECT
+                qs."Symbol",
+                AVG(rq."ClosePrice") FILTER (WHERE rq.rn_desc <= LEAST(5, qs.quote_count)) AS newest_average,
+                AVG(rq."ClosePrice") FILTER (WHERE rq.rn_desc > qs.quote_count - LEAST(5, qs.quote_count)) AS oldest_average
+            FROM quote_summary qs
+            INNER JOIN recent_quotes rq
+                ON rq."Symbol" = qs."Symbol"
+               AND rq.rn_desc <= 90
+            GROUP BY qs."Symbol", qs.quote_count
+        ),
         turnover_summary AS (
             SELECT
                 "Symbol",
@@ -7410,8 +7421,8 @@ QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent)
                 WHEN COALESCE(s."IBKRQuoteExchange", '') <> '' THEN 'IBKR'
                 ELSE '-'
             END AS quotesource,
-            ROUND(((last_quote."ClosePrice" - first_quote."ClosePrice")
-                / NULLIF(first_quote."ClosePrice", 0) * 100)::numeric, 2) AS increasepercent,
+            ROUND(((trend_summary.newest_average - trend_summary.oldest_average)
+                / NULLIF(trend_summary.oldest_average, 0) * 100)::numeric, 2) AS increasepercent,
             TO_CHAR(first_quote."CloseDate", 'DD.MM.YYYY') AS firstquotedate,
             first_quote."ClosePrice" AS firstcloseprice,
             TO_CHAR(last_quote."CloseDate", 'DD.MM.YYYY') AS lastquotedate,
@@ -7424,6 +7435,7 @@ QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent)
         FROM quote_summary
         INNER JOIN "Stocks" s ON s."Symbol" = quote_summary."Symbol"
         INNER JOIN turnover_summary ON turnover_summary."Symbol" = quote_summary."Symbol"
+        INNER JOIN trend_summary ON trend_summary."Symbol" = quote_summary."Symbol"
         INNER JOIN "Quotes" first_quote
             ON first_quote."Symbol" = quote_summary."Symbol"
            AND first_quote."CloseDate" = quote_summary.first_date
@@ -7434,8 +7446,8 @@ QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent)
         WHERE quote_summary.quote_count >= 2
           AND NOT COALESCE(s.use_marketstack, false)
           AND COALESCE(s."IBKRQuoteExchange", '') <> ''
-          AND ((last_quote."ClosePrice" - first_quote."ClosePrice")
-                / NULLIF(first_quote."ClosePrice", 0) * 100) >= :minIncreasePercent
+          AND ((trend_summary.newest_average - trend_summary.oldest_average)
+                / NULLIF(trend_summary.oldest_average, 0) * 100) >= :minIncreasePercent
         ORDER BY increasepercent DESC NULLS LAST, periodturnover DESC NULLS LAST
         LIMIT 500
     )SQL");
@@ -7537,6 +7549,17 @@ QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, do
             WHERE rn_desc <= 90
             GROUP BY "Symbol"
         ),
+        trend_summary AS (
+            SELECT
+                qs."Symbol",
+                AVG(rq."ClosePrice") FILTER (WHERE rq.rn_desc <= LEAST(5, qs.quote_count)) AS newest_average,
+                AVG(rq."ClosePrice") FILTER (WHERE rq.rn_desc > qs.quote_count - LEAST(5, qs.quote_count)) AS oldest_average
+            FROM quote_summary qs
+            INNER JOIN recent_quotes rq
+                ON rq."Symbol" = qs."Symbol"
+               AND rq.rn_desc <= 90
+            GROUP BY qs."Symbol", qs.quote_count
+        ),
         turnover_summary AS (
             SELECT
                 "Symbol",
@@ -7560,8 +7583,8 @@ QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, do
             s."Name" AS name,
             s."MIC" AS mic,
             'IBKR' AS quotesource,
-            ROUND(((last_quote."ClosePrice" - first_quote."ClosePrice")
-                / NULLIF(first_quote."ClosePrice", 0) * 100)::numeric, 2) AS increasepercent,
+            ROUND(((trend_summary.newest_average - trend_summary.oldest_average)
+                / NULLIF(trend_summary.oldest_average, 0) * 100)::numeric, 2) AS increasepercent,
             TO_CHAR(first_quote."CloseDate", 'DD.MM.YYYY') AS firstquotedate,
             first_quote."ClosePrice" AS firstcloseprice,
             TO_CHAR(last_quote."CloseDate", 'DD.MM.YYYY') AS lastquotedate,
@@ -7574,6 +7597,7 @@ QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, do
         FROM quote_summary
         INNER JOIN "Stocks" s ON s."Symbol" = quote_summary."Symbol"
         INNER JOIN turnover_summary ON turnover_summary."Symbol" = quote_summary."Symbol"
+        INNER JOIN trend_summary ON trend_summary."Symbol" = quote_summary."Symbol"
         INNER JOIN "Quotes" first_quote
             ON first_quote."Symbol" = quote_summary."Symbol"
            AND first_quote."CloseDate" = quote_summary.first_date
@@ -7584,8 +7608,8 @@ QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, do
         WHERE quote_summary.quote_count >= 2
           AND NOT COALESCE(s.use_marketstack, false)
           AND COALESCE(s."IBKRQuoteExchange", '') <> ''
-          AND ((last_quote."ClosePrice" - first_quote."ClosePrice")
-                / NULLIF(first_quote."ClosePrice", 0) * 100) >= :minIncreasePercent
+          AND ((trend_summary.newest_average - trend_summary.oldest_average)
+                / NULLIF(trend_summary.oldest_average, 0) * 100) >= :minIncreasePercent
         LIMIT 1
     )SQL");
     query.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
