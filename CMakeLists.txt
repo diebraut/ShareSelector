@@ -68,6 +68,7 @@ qt_add_qml_module(appShareSelector
         QML_FILES ExportAktienManager.qml
         SOURCES stockexportcontroller.h stockexportcontroller.cpp
         SOURCES alphavantageclient.h alphavantageclient.cpp
+        SOURCES yahoofinanceclient.h yahoofinanceclient.cpp
         SOURCES marketstackclient.h marketstackclient.cpp
         SOURCES clipboardhelper.h
         SOURCES isinfetcher.h isinfetcher.cpp

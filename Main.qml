@@ -1,6 +1,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.LocalStorage 2.15
 
 ApplicationWindow {
     id: mainWindow
@@ -15,6 +16,10 @@ ApplicationWindow {
     // Fokus-Handler für das Hauptfenster
     // Globaler Fokus-Handler
     onActiveChanged: if (active) listView.forceActiveFocus()
+
+    Component.onCompleted: Qt.callLater(function() {
+        stockAnalysisWindow.show()
+    })
 
     // Fokus-Recovery
     MouseArea {
@@ -48,6 +53,19 @@ ApplicationWindow {
         dynamicRoles: true
     }
 
+    ListModel {
+        id: stockAnalysisConfigModel
+    }
+
+    ListModel {
+        id: stockAnalysisResultModel
+        dynamicRoles: true
+    }
+
+    ListModel {
+        id: stockAnalysisQuoteModel
+    }
+
     // Speichert das aktuell selektierte Symbol & Exchange
     property string selectedSymbol: ""
     property string selectedExchange: ""
@@ -66,6 +84,23 @@ ApplicationWindow {
     property bool detailStockBought: false
     property string pendingDeleteBoughtSymbol: ""
     property int selectedPortfolioIndex: -1
+    property int selectedStockAnalysisConfigIndex: -1
+    property int selectedStockAnalysisIndex: -1
+    property bool stockAnalysisStockSelected: false
+    property string stockAnalysisMessage: ""
+    property real stockAnalysisCorridorPercent: 10
+    property real stockAnalysisCorridorHitPercent: 0
+    property real stockAnalysisCorridorRequiredPercent: 0
+    property bool stockAnalysisScanActive: false
+    property var stockAnalysisScanSymbols: []
+    property int stockAnalysisScanIndex: 0
+    property int stockAnalysisScanFound: 0
+    onStockAnalysisCorridorPercentChanged: {
+        if (stockAnalysisQuoteModel.count > 0) {
+            updateStockAnalysisCorridorStats()
+            stockAnalysisChartRefreshTimer.restart()
+        }
+    }
     property var portfolioFields: [
         { heading: true, label: "Position" },
         { key: "symbol", label: "Symbol" },
@@ -141,6 +176,22 @@ ApplicationWindow {
         running: false
         repeat: false
         onTriggered: clipboardPopup.visible = false
+    }
+
+    Timer {
+        id: stockAnalysisChartRefreshTimer
+        interval: 80
+        running: false
+        repeat: false
+        onTriggered: stockAnalysisChart.requestPaint()
+    }
+
+    Timer {
+        id: stockAnalysisScanTimer
+        interval: 1
+        running: false
+        repeat: true
+        onTriggered: processStockAnalysisScanBatch()
     }
 
     Item {
@@ -241,6 +292,9 @@ ApplicationWindow {
             }
         }
         function onIbkrStockDataUpdated(symbol) {
+            loadTestPortfolio(symbol)
+        }
+        function onFundamentalDataUpdated(symbol) {
             loadTestPortfolio(symbol)
         }
     }
@@ -476,6 +530,14 @@ ApplicationWindow {
     function portfolioFieldLabel(key, label) {
         const origin = selectedPortfolioValue(key + "Origin")
         return origin === "" ? label : label + " (" + origin + ")"
+    }
+
+    function portfolioHeadingLabel(label) {
+        if (label !== "Kennzahlen")
+            return label
+
+        const exchange = selectedPortfolioValue("fundamentalExchange")
+        return exchange === "" ? label : label + " (" + exchange + ")"
     }
 
     function currentIsoDate() {
@@ -861,6 +923,407 @@ ApplicationWindow {
             clipboardPopup.visible = true
             clipboardTimer.restart()
         }
+    }
+
+    function stockAnalysisDb() {
+        return LocalStorage.openDatabaseSync("ShareSelectorStockAnalysis", "1.0", "Stock Analyse", 100000)
+    }
+
+    function ensureStockAnalysisConfigTable() {
+        let localDb = stockAnalysisDb()
+        localDb.transaction(function(tx) {
+            tx.executeSql("CREATE TABLE IF NOT EXISTS configs (name TEXT PRIMARY KEY, increase_percent REAL NOT NULL)")
+            let columns = tx.executeSql("PRAGMA table_info(configs)")
+            let hasCorridorPercent = false
+            for (let i = 0; i < columns.rows.length; i++) {
+                if (columns.rows.item(i).name === "corridor_percent") {
+                    hasCorridorPercent = true
+                    break
+                }
+            }
+            if (!hasCorridorPercent)
+                tx.executeSql("ALTER TABLE configs ADD COLUMN corridor_percent REAL NOT NULL DEFAULT 10")
+            columns = tx.executeSql("PRAGMA table_info(configs)")
+            let hasCorridorRequiredPercent = false
+            for (let j = 0; j < columns.rows.length; j++) {
+                if (columns.rows.item(j).name === "corridor_required_percent") {
+                    hasCorridorRequiredPercent = true
+                    break
+                }
+            }
+            if (!hasCorridorRequiredPercent)
+                tx.executeSql("ALTER TABLE configs ADD COLUMN corridor_required_percent REAL NOT NULL DEFAULT 0")
+            tx.executeSql("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+        })
+    }
+
+    function loadStockAnalysisConfigs() {
+        ensureStockAnalysisConfigTable()
+        let selectedName = ""
+        if (selectedStockAnalysisConfigIndex >= 0
+                && selectedStockAnalysisConfigIndex < stockAnalysisConfigModel.count)
+            selectedName = stockAnalysisConfigModel.get(selectedStockAnalysisConfigIndex).name
+
+        stockAnalysisConfigModel.clear()
+        selectedStockAnalysisConfigIndex = -1
+        let localDb = stockAnalysisDb()
+        localDb.transaction(function(tx) {
+            let rs = tx.executeSql("SELECT name, increase_percent, corridor_percent, corridor_required_percent FROM configs ORDER BY name")
+            for (let i = 0; i < rs.rows.length; i++) {
+                let row = rs.rows.item(i)
+                stockAnalysisConfigModel.append({
+                    name: row.name,
+                    increasePercent: row.increase_percent,
+                    corridorPercent: row.corridor_percent,
+                    corridorRequiredPercent: row.corridor_required_percent
+                })
+                if (row.name === selectedName)
+                    selectedStockAnalysisConfigIndex = i
+            }
+        })
+    }
+
+    function saveLastStockAnalysisConfigName(configName) {
+        if (configName.length === 0)
+            return
+
+        ensureStockAnalysisConfigTable()
+        let localDb = stockAnalysisDb()
+        localDb.transaction(function(tx) {
+            tx.executeSql(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                ["lastConfigName", configName]
+            )
+        })
+    }
+
+    function loadLastStockAnalysisConfig() {
+        ensureStockAnalysisConfigTable()
+        let lastName = ""
+        let localDb = stockAnalysisDb()
+        localDb.transaction(function(tx) {
+            let rs = tx.executeSql("SELECT value FROM meta WHERE key = ?", ["lastConfigName"])
+            if (rs.rows.length > 0)
+                lastName = rs.rows.item(0).value
+        })
+
+        if (lastName.length === 0)
+            return
+
+        for (let i = 0; i < stockAnalysisConfigModel.count; i++) {
+            if (stockAnalysisConfigModel.get(i).name === lastName) {
+                selectStockAnalysisConfig(i, false)
+                return
+            }
+        }
+    }
+
+    function selectStockAnalysisConfig(rowIndex, showMessage) {
+        if (rowIndex < 0 || rowIndex >= stockAnalysisConfigModel.count)
+            return
+
+        if (showMessage === undefined)
+            showMessage = true
+
+        selectedStockAnalysisConfigIndex = rowIndex
+        let cfg = stockAnalysisConfigModel.get(rowIndex)
+        stockAnalysisConfigNameInput.text = cfg.name
+        stockAnalysisIncreaseInput.text = String(cfg.increasePercent)
+        stockAnalysisCorridorPercent = cfg.corridorPercent === undefined ? 10 : cfg.corridorPercent
+        stockAnalysisCorridorRequiredPercent = cfg.corridorRequiredPercent === undefined ? 0 : cfg.corridorRequiredPercent
+        saveLastStockAnalysisConfigName(cfg.name)
+        if (showMessage)
+            stockAnalysisMessage = "Konfiguration geladen"
+    }
+
+    function saveStockAnalysisConfig() {
+        let configName = stockAnalysisConfigNameInput.text.trim()
+        let increasePercent = Number(stockAnalysisIncreaseInput.text.replace(",", "."))
+        let corridorPercent = stockAnalysisCorridorPercent
+        let corridorRequiredPercent = stockAnalysisCorridorRequiredPercent
+        if (configName.length === 0 || isNaN(increasePercent) || isNaN(corridorPercent) || isNaN(corridorRequiredPercent)) {
+            stockAnalysisMessage = "Bitte Name, Steigerung und Korridorwerte eintragen"
+            return
+        }
+
+        ensureStockAnalysisConfigTable()
+        let localDb = stockAnalysisDb()
+        localDb.transaction(function(tx) {
+            tx.executeSql(
+                "INSERT OR REPLACE INTO configs (name, increase_percent, corridor_percent, corridor_required_percent) VALUES (?, ?, ?, ?)",
+                [configName, increasePercent, corridorPercent, corridorRequiredPercent]
+            )
+        })
+        stockAnalysisMessage = "Konfiguration gespeichert"
+        loadStockAnalysisConfigs()
+        saveLastStockAnalysisConfigName(configName)
+        for (let i = 0; i < stockAnalysisConfigModel.count; i++) {
+            if (stockAnalysisConfigModel.get(i).name === configName) {
+                selectStockAnalysisConfig(i, false)
+                break
+            }
+        }
+    }
+
+    function newStockAnalysisConfig() {
+        selectedStockAnalysisConfigIndex = -1
+        stockAnalysisConfigNameInput.text = ""
+        stockAnalysisMessage = "Neue Konfiguration"
+    }
+
+    function runStockAnalysis() {
+        let increasePercent = Number(stockAnalysisIncreaseInput.text.replace(",", "."))
+        if (isNaN(increasePercent)) {
+            stockAnalysisMessage = "Steigerung um % ist ungueltig"
+            return
+        }
+
+        stockAnalysisResultModel.clear()
+        stockAnalysisQuoteModel.clear()
+        selectedStockAnalysisIndex = -1
+        stockAnalysisStockSelected = false
+        stockAnalysisCorridorHitPercent = 0
+        let results = dbManager.getStockAnalysisResults(increasePercent)
+        results.forEach(row => {
+            let quotes = dbManager.getQuoteDetails(row.symbol, 1, 90)
+            let hitPercent = corridorHitPercentForQuotes(quotes)
+            row.corridorhitpercent = hitPercent
+            if (hitPercent >= stockAnalysisCorridorRequiredPercent)
+                stockAnalysisResultModel.append(row)
+        })
+        stockAnalysisMessage = results.length + " Aktien gefunden"
+    }
+
+    function updateStockAnalysisCorridorStats() {
+        let count = stockAnalysisQuoteModel.count
+        if (count === 0) {
+            stockAnalysisCorridorHitPercent = 0
+            return
+        }
+
+        function quoteAt(chartIndex) {
+            return stockAnalysisQuoteModel.get(count - 1 - chartIndex)
+        }
+
+        let averageWindow = Math.min(5, count)
+        let oldestAverage = 0
+        let newestAverage = 0
+        let allAverage = 0
+
+        for (let allAvgIndex = 0; allAvgIndex < count; allAvgIndex++)
+            allAverage += Number(quoteAt(allAvgIndex).closeprice)
+        allAverage /= count
+
+        for (let avgIndex = 0; avgIndex < averageWindow; avgIndex++) {
+            oldestAverage += Number(quoteAt(avgIndex).closeprice)
+            newestAverage += Number(quoteAt(count - averageWindow + avgIndex).closeprice)
+        }
+        oldestAverage /= averageWindow
+        newestAverage /= averageWindow
+
+        let oldestCenterIndex = (averageWindow - 1) / 2
+        let newestCenterIndex = count - averageWindow + (averageWindow - 1) / 2
+        let trendDenominator = Math.max(1, newestCenterIndex - oldestCenterIndex)
+        let trendSlope = (newestAverage - oldestAverage) / trendDenominator
+        let bandOffset = allAverage * stockAnalysisCorridorPercent / 100
+        let insideCount = 0
+
+        for (let i = 0; i < count; i++) {
+            let closePrice = Number(quoteAt(i).closeprice)
+            let trendPrice = oldestAverage + trendSlope * (i - oldestCenterIndex)
+            if (closePrice >= trendPrice - bandOffset && closePrice <= trendPrice + bandOffset)
+                insideCount++
+        }
+
+        stockAnalysisCorridorHitPercent = insideCount / count * 100
+    }
+
+    function corridorHitPercentForQuotes(quotes) {
+        let count = quotes.length
+        if (count === 0)
+            return 0
+
+        function quoteAt(chartIndex) {
+            return quotes[count - 1 - chartIndex]
+        }
+
+        let averageWindow = Math.min(5, count)
+        let oldestAverage = 0
+        let newestAverage = 0
+        let allAverage = 0
+
+        for (let allAvgIndex = 0; allAvgIndex < count; allAvgIndex++)
+            allAverage += Number(quoteAt(allAvgIndex).closeprice)
+        allAverage /= count
+
+        for (let avgIndex = 0; avgIndex < averageWindow; avgIndex++) {
+            oldestAverage += Number(quoteAt(avgIndex).closeprice)
+            newestAverage += Number(quoteAt(count - averageWindow + avgIndex).closeprice)
+        }
+        oldestAverage /= averageWindow
+        newestAverage /= averageWindow
+
+        let oldestCenterIndex = (averageWindow - 1) / 2
+        let newestCenterIndex = count - averageWindow + (averageWindow - 1) / 2
+        let trendDenominator = Math.max(1, newestCenterIndex - oldestCenterIndex)
+        let trendSlope = (newestAverage - oldestAverage) / trendDenominator
+        let bandOffset = allAverage * stockAnalysisCorridorPercent / 100
+        let insideCount = 0
+
+        for (let i = 0; i < count; i++) {
+            let closePrice = Number(quoteAt(i).closeprice)
+            let trendPrice = oldestAverage + trendSlope * (i - oldestCenterIndex)
+            if (closePrice >= trendPrice - bandOffset && closePrice <= trendPrice + bandOffset)
+                insideCount++
+        }
+
+        return insideCount / count * 100
+    }
+
+    function startStockAnalysisScan() {
+        let increasePercent = Number(stockAnalysisIncreaseInput.text.replace(",", "."))
+        if (isNaN(increasePercent)) {
+            stockAnalysisMessage = "Steigerung um % ist ungueltig"
+            return
+        }
+
+        stockAnalysisResultModel.clear()
+        stockAnalysisQuoteModel.clear()
+        selectedStockAnalysisIndex = -1
+        stockAnalysisStockSelected = false
+        stockAnalysisCorridorHitPercent = 0
+        stockAnalysisScanSymbols = dbManager.getStockAnalysisIbkrSymbols()
+        stockAnalysisScanIndex = 0
+        stockAnalysisScanFound = 0
+
+        if (stockAnalysisScanSymbols.length === 0) {
+            stockAnalysisMessage = "Keine IBKR-Stocks mit Quotes gefunden"
+            stockAnalysisScanActive = false
+            return
+        }
+
+        stockAnalysisScanActive = true
+        stockAnalysisMessage = "Stock-Analyse gestartet"
+        processStockAnalysisScanBatch()
+        stockAnalysisScanTimer.restart()
+    }
+
+    function stopStockAnalysisScan() {
+        stockAnalysisScanTimer.stop()
+        stockAnalysisScanActive = false
+        stockAnalysisMessage = "Stock-Analyse gestoppt: " + stockAnalysisScanIndex + "/" + stockAnalysisScanSymbols.length
+            + " geprueft, " + stockAnalysisScanFound + " gefunden"
+    }
+
+    function processStockAnalysisScanBatch() {
+        let increasePercent = Number(stockAnalysisIncreaseInput.text.replace(",", "."))
+        let batchSize = 8
+        let processed = 0
+
+        while (stockAnalysisScanActive
+               && stockAnalysisScanIndex < stockAnalysisScanSymbols.length
+               && processed < batchSize) {
+            let symbol = stockAnalysisScanSymbols[stockAnalysisScanIndex]
+            stockAnalysisScanIndex++
+            processed++
+
+            try {
+                let candidate = dbManager.getStockAnalysisCandidate(symbol, increasePercent)
+                if (candidate.symbol !== undefined && candidate.symbol !== "") {
+                    let quotes = dbManager.getQuoteDetails(candidate.symbol, 1, 90)
+                    let hitPercent = corridorHitPercentForQuotes(quotes)
+                    candidate.corridorhitpercent = hitPercent
+
+                    if (hitPercent >= stockAnalysisCorridorRequiredPercent) {
+                        stockAnalysisResultModel.append(candidate)
+                        stockAnalysisScanFound++
+                    }
+                }
+            } catch (err) {
+                stockAnalysisMessage = "Fehler bei " + symbol + ": " + err
+            }
+        }
+
+        stockAnalysisMessage = "Stock-Analyse laeuft: " + stockAnalysisScanIndex + "/" + stockAnalysisScanSymbols.length
+            + " geprueft, " + stockAnalysisScanFound + " gefunden"
+
+        if (stockAnalysisScanIndex >= stockAnalysisScanSymbols.length) {
+            stockAnalysisScanTimer.stop()
+            stockAnalysisScanActive = false
+            sortStockAnalysisResults()
+            stockAnalysisMessage = "Stock-Analyse abgeschlossen: " + stockAnalysisScanIndex + "/" + stockAnalysisScanSymbols.length
+                + " geprueft, " + stockAnalysisScanFound + " gefunden"
+        }
+    }
+
+    function sortStockAnalysisResults() {
+        let rows = []
+        for (let i = 0; i < stockAnalysisResultModel.count; i++)
+            rows.push(cloneStockAnalysisResult(stockAnalysisResultModel.get(i)))
+
+        rows.sort((a, b) => {
+            let turnoverA = Number(a.periodturnover || 0)
+            let turnoverB = Number(b.periodturnover || 0)
+            if (turnoverA !== turnoverB)
+                return turnoverB - turnoverA
+
+            let increaseA = Number(a.increasepercent || 0)
+            let increaseB = Number(b.increasepercent || 0)
+            if (increaseA !== increaseB)
+                return increaseB - increaseA
+
+            let peA = Number(a.peratio)
+            let peB = Number(b.peratio)
+            let peAValid = !isNaN(peA) && peA > 0
+            let peBValid = !isNaN(peB) && peB > 0
+            if (peAValid && peBValid)
+                return peA - peB
+            if (peAValid)
+                return -1
+            if (peBValid)
+                return 1
+            return String(a.name || "").localeCompare(String(b.name || ""))
+        })
+
+        stockAnalysisResultModel.clear()
+        rows.forEach(row => stockAnalysisResultModel.append(row))
+        selectedStockAnalysisIndex = -1
+        stockAnalysisStockSelected = false
+    }
+
+    function cloneStockAnalysisResult(row) {
+        return {
+            symbol: row.symbol || "",
+            isin: row.isin || "",
+            name: row.name || "",
+            mic: row.mic || "",
+            quotesource: row.quotesource || "",
+            increasepercent: Number(row.increasepercent || 0),
+            firstquotedate: row.firstquotedate || "",
+            firstcloseprice: Number(row.firstcloseprice || 0),
+            lastquotedate: row.lastquotedate || "",
+            lastcloseprice: Number(row.lastcloseprice || 0),
+            periodturnover: Number(row.periodturnover || 0),
+            totalquotecount: Number(row.totalquotecount || 0),
+            quotecount: Number(row.quotecount || 0),
+            revenue: Number(row.revenue || 0),
+            peratio: row.peratio === undefined || row.peratio === null ? "" : row.peratio,
+            corridorhitpercent: Number(row.corridorhitpercent || 0)
+        }
+    }
+
+    function selectStockAnalysisResult(rowIndex) {
+        if (rowIndex < 0 || rowIndex >= stockAnalysisResultModel.count)
+            return
+
+        selectedStockAnalysisIndex = rowIndex
+        stockAnalysisStockSelected = true
+        let stock = stockAnalysisResultModel.get(rowIndex)
+        let quotes = dbManager.getQuoteDetails(stock.symbol, 1, 90)
+        stockAnalysisQuoteModel.clear()
+        quotes.forEach(row => stockAnalysisQuoteModel.append(row))
+        updateStockAnalysisCorridorStats()
+        stockAnalysisChart.requestPaint()
     }
 
     Component {
@@ -1401,8 +1864,128 @@ ApplicationWindow {
 
                     Button {
                         text: "Connect to IBKR"
-                        enabled: !dbManager.ibkrConnecting && !dbManager.ibkrDataLoading
+                        Layout.preferredWidth: 118
+                        font.pixelSize: 11
+                        enabled: !dbManager.ibkrConnecting && !dbManager.ibkrDataLoading && !dbManager.ibkrBatchActive
                         onClicked: dbManager.connectToIbkr()
+                    }
+                }
+
+                GridLayout {
+                    Layout.fillWidth: true
+                    columns: 5
+                    columnSpacing: 6
+                    rowSpacing: 6
+
+                    Button {
+                        text: "IBKR Batch starten"
+                        Layout.preferredWidth: 118
+                        font.pixelSize: 11
+                        enabled: dbManager.ibkrConnected && !dbManager.ibkrDataLoading && !dbManager.ibkrBatchActive
+                        onClicked: dbManager.startIbkrBatch()
+                    }
+
+                    Button {
+                        text: "IBKR Batch stoppen"
+                        Layout.preferredWidth: 118
+                        font.pixelSize: 11
+                        enabled: dbManager.ibkrBatchActive
+                        onClicked: dbManager.stopIbkrBatch()
+                    }
+
+                    Button {
+                        text: "IBKR Get Quotes starten"
+                        Layout.preferredWidth: 132
+                        font.pixelSize: 11
+                        enabled: dbManager.ibkrConnected && !dbManager.ibkrDataLoading
+                            && !dbManager.ibkrBatchActive && !dbManager.ibkrNameCheckBatchActive
+                            && !dbManager.ibkrGetStocksActive
+                        onClicked: dbManager.startIbkrGetStocks()
+                    }
+
+                    Button {
+                        text: "IBKR Get Quotes stoppen"
+                        Layout.preferredWidth: 132
+                        font.pixelSize: 11
+                        enabled: dbManager.ibkrGetStocksActive
+                        onClicked: dbManager.stopIbkrGetStocks()
+                    }
+
+                    Button {
+                        text: "Marketstack Set Exchange starten"
+                        Layout.preferredWidth: 154
+                        font.pixelSize: 11
+                        enabled: !dbManager.yahooFundamentalsBatchActive
+                            && !dbManager.marketstackBatchActive
+                            && !dbManager.marketstackQuotesBatchActive
+                            && !dbManager.marketstackValidationBatchActive
+                        onClicked: dbManager.startMarketstackBatch()
+                    }
+
+                    Button {
+                        text: "Marketstack Set Exchange stoppen"
+                        Layout.preferredWidth: 154
+                        font.pixelSize: 11
+                        enabled: dbManager.marketstackBatchActive
+                        onClicked: dbManager.stopMarketstackBatch()
+                    }
+
+                    Button {
+                        text: "Marketstack Get Quotes starten"
+                        Layout.preferredWidth: 154
+                        font.pixelSize: 11
+                        enabled: !dbManager.yahooFundamentalsBatchActive
+                            && !dbManager.marketstackBatchActive
+                            && !dbManager.marketstackQuotesBatchActive
+                            && !dbManager.marketstackValidationBatchActive
+                        onClicked: dbManager.startMarketstackQuotesBatch()
+                    }
+
+                    Button {
+                        text: "Marketstack Get Quotes stoppen"
+                        Layout.preferredWidth: 154
+                        font.pixelSize: 11
+                        enabled: dbManager.marketstackQuotesBatchActive
+                        onClicked: dbManager.stopMarketstackQuotesBatch()
+                    }
+
+                    Button {
+                        text: "Marketstack Validate starten"
+                        Layout.preferredWidth: 154
+                        font.pixelSize: 11
+                        enabled: !dbManager.yahooFundamentalsBatchActive
+                            && !dbManager.marketstackBatchActive
+                            && !dbManager.marketstackQuotesBatchActive
+                            && !dbManager.marketstackValidationBatchActive
+                        onClicked: dbManager.startMarketstackValidationBatch()
+                    }
+
+                    Button {
+                        text: "Marketstack Validate stoppen"
+                        Layout.preferredWidth: 154
+                        font.pixelSize: 11
+                        enabled: dbManager.marketstackValidationBatchActive
+                        onClicked: dbManager.stopMarketstackValidationBatch()
+                    }
+
+                    Button {
+                        text: "Yahoo Batch starten"
+                        Layout.preferredWidth: 118
+                        font.pixelSize: 11
+                        enabled: !dbManager.fundamentalDataLoading
+                            && !dbManager.yahooFundamentalsBatchActive
+                            && !dbManager.marketstackBatchActive
+                            && !dbManager.marketstackQuotesBatchActive
+                            && !dbManager.marketstackValidationBatchActive
+                        onClicked: dbManager.startYahooFundamentalsBatch()
+                    }
+
+                    Button {
+                        text: "Yahoo Batch stoppen"
+                        Layout.preferredWidth: 118
+                        font.pixelSize: 11
+                        enabled: dbManager.yahooFundamentalsBatchActive
+                        onClicked: dbManager.stopYahooFundamentalsBatch()
                     }
 
                     Label {
@@ -1512,6 +2095,13 @@ ApplicationWindow {
                                             onTriggered: dbManager.getIbkrData(
                                                 portfolioModel.get(index).symbol)
                                         }
+
+                                        MenuItem {
+                                            text: "Get Fundamentals from Yahoo"
+                                            enabled: !dbManager.fundamentalDataLoading
+                                            onTriggered: dbManager.getAlphaVantageFundamentals(
+                                                portfolioModel.get(index).symbol)
+                                        }
                                     }
                                 }
                             }
@@ -1580,7 +2170,7 @@ ApplicationWindow {
                                                 anchors.fill: parent
                                                 anchors.leftMargin: 10
                                                 verticalAlignment: Text.AlignVCenter
-                                                text: modelData.label
+                                                text: portfolioHeadingLabel(modelData.label)
                                                 font.bold: true
                                                 color: "#1f2937"
                                             }
@@ -1622,33 +2212,900 @@ ApplicationWindow {
                     }
                 }
 
-                RowLayout {
+                ColumnLayout {
                     Layout.fillWidth: true
+                    spacing: 4
 
-                    TextField {
-                        text: dbManager.ibkrConnectionStatus
-                        readOnly: true
-                        selectByMouse: true
-                        color: dbManager.ibkrConnected
-                            ? "#15803d"
-                            : (dbManager.ibkrConnecting
-                                ? "#1d4ed8"
-                                : (dbManager.ibkrConnectionStatus.indexOf("Keine") === 0
-                                    || dbManager.ibkrConnectionStatus.indexOf("getrennt") >= 0
-                                    || dbManager.ibkrConnectionStatus.indexOf("Fehler:") === 0
-                                    ? "#b91c1c"
-                                    : "#475569"))
-                        font.bold: dbManager.ibkrConnected
+                    RowLayout {
                         Layout.fillWidth: true
-                        leftPadding: 0
-                        rightPadding: 0
-                        background: null
+
+                        Label {
+                            text: "IBKR " + dbManager.ibkrBatchDone + "/" + dbManager.ibkrBatchTotal
+                            visible: dbManager.ibkrBatchActive || dbManager.ibkrBatchTotal > 0
+                            color: "#475569"
+                            Layout.preferredWidth: 96
+                        }
+
+                        ProgressBar {
+                            visible: dbManager.ibkrBatchActive || dbManager.ibkrBatchTotal > 0
+                            from: 0
+                            to: Math.max(1, dbManager.ibkrBatchTotal)
+                            value: dbManager.ibkrBatchDone
+                            Layout.preferredWidth: 160
+                        }
+
+                        TextField {
+                            text: dbManager.ibkrConnectionStatus
+                            readOnly: true
+                            selectByMouse: true
+                            color: dbManager.ibkrConnected
+                                ? "#15803d"
+                                : (dbManager.ibkrConnecting
+                                    ? "#1d4ed8"
+                                    : (dbManager.ibkrConnectionStatus.indexOf("Keine") === 0
+                                        || dbManager.ibkrConnectionStatus.indexOf("getrennt") >= 0
+                                        || dbManager.ibkrConnectionStatus.indexOf("Fehler:") === 0
+                                        ? "#b91c1c"
+                                        : "#475569"))
+                            font.bold: dbManager.ibkrConnected
+                            Layout.fillWidth: true
+                            leftPadding: 0
+                            rightPadding: 0
+                            background: null
+                        }
                     }
 
-                    Button {
-                        text: "Schließen"
-                        onClicked: portfolioWindow.close()
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: dbManager.ibkrGetStocksActive || dbManager.ibkrGetStocksTotal > 0
+
+                        Label {
+                            text: "Get Quotes " + dbManager.ibkrGetStocksDone + "/" + dbManager.ibkrGetStocksTotal
+                            color: "#475569"
+                            Layout.preferredWidth: 96
+                        }
+
+                        ProgressBar {
+                            from: 0
+                            to: Math.max(1, dbManager.ibkrGetStocksTotal)
+                            value: dbManager.ibkrGetStocksDone
+                            Layout.preferredWidth: 160
+                        }
+
+                        Item {
+                            Layout.fillWidth: true
+                        }
                     }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: dbManager.marketstackBatchActive || dbManager.marketstackBatchTotal > 0
+
+                        Label {
+                            text: "Set Exchange " + dbManager.marketstackBatchDone + "/" + dbManager.marketstackBatchTotal
+                            color: "#475569"
+                            Layout.preferredWidth: 128
+                        }
+
+                        ProgressBar {
+                            from: 0
+                            to: Math.max(1, dbManager.marketstackBatchTotal)
+                            value: dbManager.marketstackBatchDone
+                            Layout.preferredWidth: 160
+                        }
+
+                        Item {
+                            Layout.fillWidth: true
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: dbManager.marketstackQuotesBatchActive || dbManager.marketstackQuotesBatchTotal > 0
+
+                        Label {
+                            text: "MS Quotes " + dbManager.marketstackQuotesBatchDone + "/" + dbManager.marketstackQuotesBatchTotal
+                            color: "#475569"
+                            Layout.preferredWidth: 128
+                        }
+
+                        ProgressBar {
+                            from: 0
+                            to: Math.max(1, dbManager.marketstackQuotesBatchTotal)
+                            value: dbManager.marketstackQuotesBatchDone
+                            Layout.preferredWidth: 160
+                        }
+
+                        Item {
+                            Layout.fillWidth: true
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: dbManager.marketstackValidationBatchActive || dbManager.marketstackValidationBatchTotal > 0
+
+                        Label {
+                            text: "MS Validate " + dbManager.marketstackValidationBatchDone + "/" + dbManager.marketstackValidationBatchTotal
+                            color: "#475569"
+                            Layout.preferredWidth: 128
+                        }
+
+                        ProgressBar {
+                            from: 0
+                            to: Math.max(1, dbManager.marketstackValidationBatchTotal)
+                            value: dbManager.marketstackValidationBatchDone
+                            Layout.preferredWidth: 160
+                        }
+
+                        Item {
+                            Layout.fillWidth: true
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+
+                        Label {
+                            text: "Yahoo " + dbManager.yahooFundamentalsBatchDone + "/" + dbManager.yahooFundamentalsBatchTotal
+                            visible: dbManager.yahooFundamentalsBatchActive || dbManager.yahooFundamentalsBatchTotal > 0
+                            color: "#475569"
+                            Layout.preferredWidth: 96
+                        }
+
+                        ProgressBar {
+                            visible: dbManager.yahooFundamentalsBatchActive || dbManager.yahooFundamentalsBatchTotal > 0
+                            from: 0
+                            to: Math.max(1, dbManager.yahooFundamentalsBatchTotal)
+                            value: dbManager.yahooFundamentalsBatchDone
+                            Layout.preferredWidth: 160
+                        }
+
+                        TextField {
+                            text: dbManager.fundamentalDataStatus
+                            readOnly: true
+                            selectByMouse: true
+                            color: dbManager.fundamentalDataStatus.indexOf("Fehler:") === 0
+                                || dbManager.fundamentalDataStatus.indexOf("Alpha-Vantage-Tageslimit") === 0
+                                ? "#b91c1c"
+                                : (dbManager.fundamentalDataLoading ? "#1d4ed8" : "#475569")
+                            Layout.fillWidth: true
+                            leftPadding: 0
+                            rightPadding: 0
+                            background: null
+                        }
+
+                        Button {
+                            text: "Schließen"
+                            onClicked: portfolioWindow.close()
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: false
+
+                        Label {
+                            text: "Pruefung " + dbManager.ibkrNameCheckBatchDone + "/" + dbManager.ibkrNameCheckBatchTotal
+                            color: "#475569"
+                            Layout.preferredWidth: 96
+                        }
+
+                        ProgressBar {
+                            from: 0
+                            to: Math.max(1, dbManager.ibkrNameCheckBatchTotal)
+                            value: dbManager.ibkrNameCheckBatchDone
+                            Layout.preferredWidth: 160
+                        }
+
+                        TextField {
+                            text: dbManager.ibkrConnectionStatus
+                            readOnly: true
+                            selectByMouse: true
+                            color: dbManager.ibkrConnectionStatus.indexOf("Fehler:") === 0
+                                || dbManager.ibkrConnectionStatus.indexOf("mismatch") >= 0
+                                ? "#b91c1c"
+                                : (dbManager.ibkrNameCheckBatchActive ? "#1d4ed8" : "#475569")
+                            Layout.fillWidth: true
+                            leftPadding: 0
+                            rightPadding: 0
+                            background: null
+                        }
+
+                        Button {
+                            text: "SchlieÃŸen"
+                            onClicked: portfolioWindow.close()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Window {
+        id: stockAnalysisWindow
+        title: "Stock Analyse"
+        width: 1500
+        height: 1160
+        minimumWidth: 980
+        minimumHeight: 1040
+
+        onVisibleChanged: {
+            if (visible) {
+                loadStockAnalysisConfigs()
+                loadLastStockAnalysisConfig()
+            }
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#f4f6f7"
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                anchors.topMargin: 12
+                anchors.bottomMargin: 44
+                spacing: 10
+
+                GroupBox {
+                    title: "Suchparameter"
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 270
+                    Layout.minimumHeight: 270
+                    clip: true
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 4
+                        spacing: 12
+
+                        Rectangle {
+                            Layout.preferredWidth: Math.max(220, stockAnalysisWindow.width * 0.18)
+                            Layout.maximumWidth: Math.max(220, stockAnalysisWindow.width * 0.18)
+                            Layout.fillHeight: true
+                            Layout.alignment: Qt.AlignTop
+                            color: "#ffffff"
+                            border.color: "#c9d0d5"
+                            radius: 4
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                spacing: 4
+
+                                Label {
+                                    text: "Name"
+                                    font.bold: true
+                                    Layout.fillWidth: true
+                                }
+
+                                TextField {
+                                    id: stockAnalysisConfigNameInput
+                                    placeholderText: "Konfigurationsname"
+                                    Layout.fillWidth: true
+                                }
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.preferredHeight: 1
+                                    color: "#c9d0d5"
+                                }
+
+                                Label {
+                                    text: "Gespeicherte Konfigurationen"
+                                    font.bold: true
+                                    Layout.fillWidth: true
+                                }
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    color: "#ffffff"
+                                    border.color: "#d3d8dc"
+                                    radius: 4
+                                    clip: true
+
+                                    ListView {
+                                        id: stockAnalysisConfigListView
+                                        anchors.fill: parent
+                                        anchors.margins: 1
+                                        clip: true
+                                        model: stockAnalysisConfigModel
+                                        currentIndex: selectedStockAnalysisConfigIndex
+                                        boundsBehavior: Flickable.StopAtBounds
+                                        ScrollBar.vertical: ScrollBar {
+                                            policy: stockAnalysisConfigModel.count > stockAnalysisConfigListView.height / 32
+                                                ? ScrollBar.AlwaysOn
+                                                : ScrollBar.AsNeeded
+                                        }
+
+                                        delegate: Rectangle {
+                                            width: ListView.view.width
+                                            height: 32
+                                            color: selectedStockAnalysisConfigIndex === index ? "lightsteelblue" : (index % 2 === 0 ? "#ffffff" : "#eef2f4")
+
+                                            RowLayout {
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 8
+                                                anchors.rightMargin: 8
+                                                spacing: 8
+
+                                                Label {
+                                                    text: model.name
+                                                    Layout.fillWidth: true
+                                                    elide: Text.ElideRight
+                                                }
+
+                                                Label {
+                                                    text: Number(model.increasePercent || 0).toFixed(0) + "% / "
+                                                        + Number(model.corridorPercent === undefined ? 10 : model.corridorPercent).toFixed(0) + "% / "
+                                                        + Number(model.corridorRequiredPercent === undefined ? 0 : model.corridorRequiredPercent).toFixed(0) + "%"
+                                                    Layout.preferredWidth: 104
+                                                    horizontalAlignment: Text.AlignRight
+                                                    color: "#475569"
+                                                }
+                                            }
+
+                                            MouseArea {
+                                                anchors.fill: parent
+                                                onClicked: selectStockAnalysisConfig(index)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            Layout.alignment: Qt.AlignTop
+                            spacing: 8
+
+                            GridLayout {
+                                Layout.fillWidth: true
+                                columns: 2
+                                columnSpacing: 8
+                                rowSpacing: 6
+
+                                Label {
+                                    text: "Steigerung um %"
+                                    Layout.preferredWidth: 230
+                                }
+
+                                TextField {
+                                    id: stockAnalysisIncreaseInput
+                                    text: "10"
+                                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                                    horizontalAlignment: Text.AlignRight
+                                    Layout.preferredWidth: 100
+                                }
+
+                                Label {
+                                    text: "Korridorbreite in % Ø aller Quotes"
+                                    Layout.preferredWidth: 230
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Layout.preferredWidth: 460
+                                    spacing: 8
+
+                                    Slider {
+                                        id: stockAnalysisCorridorSlider
+                                        from: 0
+                                        to: 50
+                                        stepSize: 2
+                                        snapMode: Slider.SnapAlways
+                                        value: stockAnalysisCorridorPercent
+                                        Layout.fillWidth: true
+                                        onMoved: {
+                                            stockAnalysisCorridorPercent = Math.round(value / 2) * 2
+                                        }
+                                    }
+
+                                    Label {
+                                        text: Number(stockAnalysisCorridorPercent || 0).toFixed(0) + "%"
+                                        Layout.preferredWidth: 44
+                                        horizontalAlignment: Text.AlignRight
+                                    }
+                                }
+
+                                Label {
+                                    text: "Werte im Korridor"
+                                    Layout.preferredWidth: 230
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Layout.preferredWidth: 460
+                                    spacing: 8
+
+                                    Slider {
+                                        id: stockAnalysisCorridorRequiredSlider
+                                        from: 0
+                                        to: 100
+                                        stepSize: 2
+                                        snapMode: Slider.SnapAlways
+                                        value: stockAnalysisCorridorRequiredPercent
+                                        Layout.fillWidth: true
+                                        onMoved: {
+                                            stockAnalysisCorridorRequiredPercent = Math.round(value / 2) * 2
+                                        }
+                                    }
+
+                                    Label {
+                                        text: Number(stockAnalysisCorridorRequiredPercent || 0).toFixed(0) + "%"
+                                        Layout.preferredWidth: 44
+                                        horizontalAlignment: Text.AlignRight
+                                    }
+                                }
+
+                            }
+
+                            Item { Layout.preferredHeight: 1 }
+                        }
+
+                        GridLayout {
+                            Layout.preferredWidth: 150
+                            Layout.maximumWidth: 150
+                            Layout.fillHeight: true
+                            Layout.alignment: Qt.AlignTop
+                            columns: 1
+                            rowSpacing: 6
+
+                            Label {
+                                text: "Aktuell"
+                                font.bold: true
+                                Layout.fillWidth: true
+                                horizontalAlignment: Text.AlignLeft
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 1
+                                color: "#c9d0d5"
+                            }
+
+                            Item { Layout.preferredHeight: 42 }
+
+                            Label {
+                                text: stockAnalysisStockSelected ? Number(stockAnalysisCorridorHitPercent || 0).toFixed(1) + "%" : ""
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 32
+                                horizontalAlignment: Text.AlignLeft
+                                verticalAlignment: Text.AlignVCenter
+                                font.bold: true
+                                color: "#475569"
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillHeight: true
+                            Layout.alignment: Qt.AlignRight
+                            spacing: 6
+
+                            Button {
+                                text: stockAnalysisScanActive ? "Stoppen" : "Suchen"
+                                Layout.preferredWidth: 100
+                                onClicked: stockAnalysisScanActive ? stopStockAnalysisScan() : startStockAnalysisScan()
+                            }
+
+                            Item { Layout.fillHeight: true }
+
+                            Button {
+                                text: "Neuanlage"
+                                Layout.preferredWidth: 100
+                                onClicked: newStockAnalysisConfig()
+                            }
+
+                            Button {
+                                text: "Ändern"
+                                Layout.preferredWidth: 100
+                                onClicked: saveStockAnalysisConfig()
+                            }
+                        }
+                    }
+                }
+
+                GroupBox {
+                    title: "Gefundene Stocks (" + stockAnalysisResultModel.count + ")"
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 250
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        spacing: 4
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 1
+                            Label { text: "Nr"; Layout.preferredWidth: 42; font.bold: true; horizontalAlignment: Text.AlignLeft; leftPadding: 4 }
+                            Label { text: "ISIN"; Layout.preferredWidth: 130; font.bold: true }
+                            Label { text: "Name"; Layout.preferredWidth: 340; font.bold: true }
+                            Label { text: "Handelsumsatz"; Layout.preferredWidth: 150; font.bold: true; horizontalAlignment: Text.AlignRight }
+                            Label { text: "KGV"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
+                            Label { text: "Quotes"; Layout.preferredWidth: 80; font.bold: true; horizontalAlignment: Text.AlignRight }
+                            Label { text: "IBKR/MS"; Layout.preferredWidth: 75; font.bold: true; horizontalAlignment: Text.AlignHCenter }
+                            Label { text: "Korridor"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
+                            Label { text: "Steigerung"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignRight }
+                            Label { text: "Symbol"; Layout.preferredWidth: 120; font.bold: true }
+                            Item { Layout.fillWidth: true }
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 1
+                            color: "#c9d0d5"
+                        }
+
+                        ListView {
+                            id: stockAnalysisListView
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            clip: true
+                            model: stockAnalysisResultModel
+                            currentIndex: selectedStockAnalysisIndex
+                            boundsBehavior: Flickable.StopAtBounds
+                            ScrollBar.vertical: ScrollBar {
+                                policy: stockAnalysisResultModel.count > stockAnalysisListView.height / 34
+                                    ? ScrollBar.AlwaysOn
+                                    : ScrollBar.AsNeeded
+                            }
+
+                            delegate: Rectangle {
+                                width: ListView.view.width
+                                height: 34
+                                color: selectedStockAnalysisIndex === index ? "lightsteelblue" : (index % 2 === 0 ? "#ffffff" : "#eef2f4")
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    z: 0
+                                    onClicked: selectStockAnalysisResult(index)
+                                }
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    z: 1
+                                    spacing: 1
+                                    Label { text: index + 1; Layout.preferredWidth: 42; horizontalAlignment: Text.AlignLeft; leftPadding: 4 }
+                                    TextField {
+                                        text: model.isin || ""
+                                        readOnly: true
+                                        selectByMouse: true
+                                        Layout.preferredWidth: 130
+                                        leftPadding: 0
+                                        rightPadding: 0
+                                        background: null
+                                        color: "#111827"
+                                    }
+                                    Label { text: model.name || ""; Layout.preferredWidth: 340; elide: Text.ElideRight }
+                                    Label { text: model.periodturnover ? Number(model.periodturnover).toLocaleString(Qt.locale("de_DE"), "f", 0) : "-"; Layout.preferredWidth: 150; horizontalAlignment: Text.AlignRight }
+                                    Label { text: model.peratio ? Number(model.peratio).toFixed(2) : "-"; Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                    Label { text: model.quotecount || 0; Layout.preferredWidth: 80; horizontalAlignment: Text.AlignRight }
+                                    Label { text: model.quotesource || "-"; Layout.preferredWidth: 75; horizontalAlignment: Text.AlignHCenter }
+                                    Label { text: Number(model.corridorhitpercent || 0).toFixed(1) + "%"; Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                    Label { text: Number(model.increasepercent || 0).toFixed(2) + "%"; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight }
+                                    Label { text: model.symbol || ""; Layout.preferredWidth: 120; elide: Text.ElideRight }
+                                    Item { Layout.fillWidth: true }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                GroupBox {
+                    title: selectedStockAnalysisIndex >= 0
+                        ? "Darstellung: " + stockAnalysisResultModel.get(selectedStockAnalysisIndex).name
+                        : "Darstellung"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Layout.minimumHeight: stockAnalysisWindow.height * 0.5
+
+                    Canvas {
+                        id: stockAnalysisChart
+                        anchors.fill: parent
+                        anchors.margins: 12
+                        property int hoveredQuoteIndex: -1
+
+                        onPaint: {
+                            let ctx = getContext("2d")
+                            ctx.reset()
+                            ctx.clearRect(0, 0, width, height)
+
+                            let count = stockAnalysisQuoteModel.count
+                            if (count === 0) {
+                                ctx.fillStyle = "#66727a"
+                                ctx.font = "14px sans-serif"
+                                ctx.fillText("Bitte einen Stock aus der Liste selektieren", 12, 28)
+                                return
+                            }
+
+                            function quoteAt(chartIndex) {
+                                return stockAnalysisQuoteModel.get(count - 1 - chartIndex)
+                            }
+
+                            let minPrice = Number(quoteAt(0).closeprice)
+                            let maxPrice = minPrice
+                            for (let i = 1; i < count; i++) {
+                                let price = Number(quoteAt(i).closeprice)
+                                minPrice = Math.min(minPrice, price)
+                                maxPrice = Math.max(maxPrice, price)
+                            }
+
+                            let priceRange = maxPrice - minPrice
+                            let leftPad = 68
+                            let rightPad = 24
+                            let topPad = 30
+                            let bottomPad = 72
+                            let plotWidth = Math.max(1, width - leftPad - rightPad)
+                            let plotHeight = Math.max(1, height - topPad - bottomPad)
+
+                            function xForIndex(chartIndex) {
+                                return leftPad + (count === 1 ? plotWidth / 2 : (chartIndex / (count - 1)) * plotWidth)
+                            }
+
+                            function yForPrice(price) {
+                                if (priceRange <= 0)
+                                    return topPad + plotHeight / 2
+
+                                return topPad + (1 - ((price - minPrice) / priceRange)) * plotHeight
+                            }
+
+                            ctx.strokeStyle = "#d7dde1"
+                            ctx.lineWidth = 1
+                            ctx.beginPath()
+                            ctx.moveTo(leftPad, topPad)
+                            ctx.lineTo(leftPad, topPad + plotHeight)
+                            ctx.lineTo(leftPad + plotWidth, topPad + plotHeight)
+                            ctx.stroke()
+
+                            ctx.fillStyle = "#4f5b62"
+                            ctx.font = "12px sans-serif"
+                            ctx.fillText("Schlusskurs", 4, topPad - 10)
+                            for (let grid = 0; grid <= 4; grid++) {
+                                let ratio = grid / 4
+                                let yGrid = topPad + ratio * plotHeight
+                                let gridPrice = priceRange <= 0 ? maxPrice : maxPrice - ratio * priceRange
+                                ctx.strokeStyle = grid === 4 ? "#c9d0d5" : "#edf1f3"
+                                ctx.beginPath()
+                                ctx.moveTo(leftPad, yGrid)
+                                ctx.lineTo(leftPad + plotWidth, yGrid)
+                                ctx.stroke()
+                                ctx.fillText(gridPrice.toFixed(2), 4, yGrid + 4)
+                            }
+
+                            let labelEvery = Math.max(1, Math.ceil(count / Math.max(2, Math.floor(plotWidth / 90))))
+                            ctx.fillStyle = "#4f5b62"
+                            ctx.font = "11px sans-serif"
+                            for (let labelIndex = 0; labelIndex < count; labelIndex++) {
+                                if (labelIndex !== 0 && labelIndex !== count - 1 && labelIndex % labelEvery !== 0)
+                                    continue
+
+                                let labelRow = quoteAt(labelIndex)
+                                let labelText = labelRow.closedate || ""
+                                let labelX = xForIndex(labelIndex)
+                                ctx.strokeStyle = "#d7dde1"
+                                ctx.beginPath()
+                                ctx.moveTo(labelX, topPad + plotHeight)
+                                ctx.lineTo(labelX, topPad + plotHeight + 5)
+                                ctx.stroke()
+
+                                ctx.save()
+                                ctx.translate(labelX - 4, topPad + plotHeight + 58)
+                                ctx.rotate(-Math.PI / 4)
+                                ctx.fillText(labelText, 0, 0)
+                                ctx.restore()
+                            }
+
+                            ctx.strokeStyle = "#2f7d62"
+                            ctx.lineWidth = 2
+                            ctx.beginPath()
+                            for (let j = 0; j < count; j++) {
+                                let row = quoteAt(j)
+                                let x = xForIndex(j)
+                                let y = yForPrice(Number(row.closeprice))
+                                if (j === 0)
+                                    ctx.moveTo(x, y)
+                                else
+                                    ctx.lineTo(x, y)
+                            }
+                            ctx.stroke()
+
+                            let averageWindow = Math.min(5, count)
+                            let oldestAverage = 0
+                            let newestAverage = 0
+                            let allAverage = 0
+                            for (let allAvgIndex = 0; allAvgIndex < count; allAvgIndex++)
+                                allAverage += Number(quoteAt(allAvgIndex).closeprice)
+                            allAverage /= count
+
+                            for (let avgIndex = 0; avgIndex < averageWindow; avgIndex++) {
+                                oldestAverage += Number(quoteAt(avgIndex).closeprice)
+                                newestAverage += Number(quoteAt(count - averageWindow + avgIndex).closeprice)
+                            }
+                            oldestAverage /= averageWindow
+                            newestAverage /= averageWindow
+
+                            let oldestAvgX = xForIndex((averageWindow - 1) / 2)
+                            let newestAvgX = xForIndex(count - averageWindow + (averageWindow - 1) / 2)
+                            let oldestAvgY = yForPrice(oldestAverage)
+                            let newestAvgY = yForPrice(newestAverage)
+                            let corridorPercent = stockAnalysisCorridorPercent
+                            let bandOffset = allAverage * corridorPercent / 100
+                            let oldestCenterIndex = (averageWindow - 1) / 2
+                            let newestCenterIndex = count - averageWindow + (averageWindow - 1) / 2
+                            let trendIndexDenominator = Math.max(1, newestCenterIndex - oldestCenterIndex)
+                            let trendPriceSlope = (newestAverage - oldestAverage) / trendIndexDenominator
+                            function trendPriceAtIndex(chartIndex) {
+                                return oldestAverage + trendPriceSlope * (chartIndex - oldestCenterIndex)
+                            }
+                            let averageSlope = newestAvgX === oldestAvgX ? 0 : (newestAvgY - oldestAvgY) / (newestAvgX - oldestAvgX)
+                            let firstTrendX = xForIndex(0)
+                            let lastTrendX = xForIndex(count - 1)
+                            let firstTrendY = oldestAvgY + averageSlope * (firstTrendX - oldestAvgX)
+                            let lastTrendY = newestAvgY + averageSlope * (lastTrendX - newestAvgX)
+                            let firstTrendPrice = trendPriceAtIndex(0)
+                            let lastTrendPrice = trendPriceAtIndex(count - 1)
+                            let tightBandOffset = 0
+                            for (let tightIndex = 0; tightIndex < count; tightIndex++) {
+                                let tightClose = Number(quoteAt(tightIndex).closeprice)
+                                tightBandOffset = Math.max(tightBandOffset, Math.abs(tightClose - trendPriceAtIndex(tightIndex)))
+                            }
+                            let currentCorridorCoversAll = tightBandOffset <= bandOffset + 0.000001
+
+                            ctx.fillStyle = "rgba(120, 130, 140, 0.18)"
+                            ctx.beginPath()
+                            ctx.moveTo(firstTrendX, yForPrice(firstTrendPrice + bandOffset))
+                            ctx.lineTo(lastTrendX, yForPrice(lastTrendPrice + bandOffset))
+                            ctx.lineTo(lastTrendX, yForPrice(lastTrendPrice - bandOffset))
+                            ctx.lineTo(firstTrendX, yForPrice(firstTrendPrice - bandOffset))
+                            ctx.closePath()
+                            ctx.fill()
+
+                            ctx.strokeStyle = "#ea580c"
+                            ctx.lineWidth = 1
+                            ctx.setLineDash([4, 4])
+                            ctx.beginPath()
+                            ctx.moveTo(firstTrendX, yForPrice(firstTrendPrice + bandOffset))
+                            ctx.lineTo(lastTrendX, yForPrice(lastTrendPrice + bandOffset))
+                            ctx.moveTo(firstTrendX, yForPrice(firstTrendPrice - bandOffset))
+                            ctx.lineTo(lastTrendX, yForPrice(lastTrendPrice - bandOffset))
+                            ctx.stroke()
+
+                            if (currentCorridorCoversAll) {
+                                ctx.strokeStyle = "#111827"
+                                ctx.lineWidth = 1
+                                ctx.setLineDash([2, 4])
+                                ctx.beginPath()
+                                ctx.moveTo(firstTrendX, yForPrice(firstTrendPrice + tightBandOffset))
+                                ctx.lineTo(lastTrendX, yForPrice(lastTrendPrice + tightBandOffset))
+                                ctx.moveTo(firstTrendX, yForPrice(firstTrendPrice - tightBandOffset))
+                                ctx.lineTo(lastTrendX, yForPrice(lastTrendPrice - tightBandOffset))
+                                ctx.stroke()
+                                ctx.setLineDash([])
+
+                                let tightPercent = allAverage > 0 ? tightBandOffset / allAverage * 100 : 0
+                                let tightLabel = "min: " + tightPercent.toFixed(1) + "%"
+                                ctx.fillStyle = "#111827"
+                                ctx.font = "11px sans-serif"
+                                ctx.fillText(tightLabel, Math.max(4, lastTrendX - ctx.measureText(tightLabel).width - 4),
+                                             Math.max(12, yForPrice(lastTrendPrice + tightBandOffset) - 6))
+                            }
+
+                            ctx.strokeStyle = "#c2410c"
+                            ctx.lineWidth = 2
+                            ctx.setLineDash([6, 5])
+                            ctx.beginPath()
+                            ctx.moveTo(firstTrendX, firstTrendY)
+                            ctx.lineTo(oldestAvgX, oldestAvgY)
+                            ctx.moveTo(newestAvgX, newestAvgY)
+                            ctx.lineTo(lastTrendX, lastTrendY)
+                            ctx.stroke()
+                            ctx.setLineDash([])
+
+                            ctx.strokeStyle = "#c2410c"
+                            ctx.lineWidth = 3
+                            ctx.beginPath()
+                            ctx.moveTo(oldestAvgX, oldestAvgY)
+                            ctx.lineTo(newestAvgX, newestAvgY)
+                            ctx.stroke()
+
+                            ctx.fillStyle = "#c2410c"
+                            ctx.beginPath()
+                            ctx.arc(oldestAvgX, oldestAvgY, 5, 0, Math.PI * 2)
+                            ctx.arc(newestAvgX, newestAvgY, 5, 0, Math.PI * 2)
+                            ctx.fill()
+
+                            ctx.font = "11px sans-serif"
+                            ctx.fillText("Ø alt: " + oldestAverage.toFixed(2), oldestAvgX + 8, Math.max(12, oldestAvgY - 8))
+                            let newestLabel = "Ø neu: " + newestAverage.toFixed(2)
+                            let newestLabelX = Math.min(width - ctx.measureText(newestLabel).width - 6, newestAvgX + 8)
+                            ctx.fillText(newestLabel, newestLabelX, Math.max(12, newestAvgY - 8))
+
+                            let pointRadius = count <= 60 ? 3 : 2
+                            let valueEvery = Math.max(1, Math.ceil(count / Math.max(2, Math.floor(plotWidth / 46))))
+                            for (let k = 0; k < count; k++) {
+                                let pointRow = quoteAt(k)
+                                let pointPrice = Number(pointRow.closeprice)
+                                let px = xForIndex(k)
+                                let py = yForPrice(pointPrice)
+
+                                ctx.fillStyle = stockAnalysisChart.hoveredQuoteIndex === k ? "#b45309" : "#2f7d62"
+                                ctx.beginPath()
+                                ctx.arc(px, py, stockAnalysisChart.hoveredQuoteIndex === k ? pointRadius + 2 : pointRadius, 0, Math.PI * 2)
+                                ctx.fill()
+
+                                if (k === 0 || k === count - 1 || k % valueEvery === 0 || stockAnalysisChart.hoveredQuoteIndex === k) {
+                                    ctx.fillStyle = "#374151"
+                                    ctx.font = "10px sans-serif"
+                                    ctx.fillText(pointPrice.toFixed(2), px - 14, Math.max(10, py - 7))
+                                }
+                            }
+
+                            if (stockAnalysisChart.hoveredQuoteIndex >= 0 && stockAnalysisChart.hoveredQuoteIndex < count) {
+                                let hoverRow = quoteAt(stockAnalysisChart.hoveredQuoteIndex)
+                                let hoverPrice = Number(hoverRow.closeprice)
+                                let hoverX = xForIndex(stockAnalysisChart.hoveredQuoteIndex)
+                                let hoverY = yForPrice(hoverPrice)
+                                let tooltipText = (hoverRow.closedate || "") + "  Schlusskurs: " + hoverPrice.toFixed(2)
+                                let tooltipWidth = Math.min(260, ctx.measureText(tooltipText).width + 18)
+                                let tooltipX = Math.min(width - tooltipWidth - 4, Math.max(4, hoverX - tooltipWidth / 2))
+                                let tooltipY = Math.max(4, hoverY - 42)
+
+                                ctx.fillStyle = "#263238"
+                                ctx.fillRect(tooltipX, tooltipY, tooltipWidth, 26)
+                                ctx.fillStyle = "#ffffff"
+                                ctx.font = "12px sans-serif"
+                                ctx.fillText(tooltipText, tooltipX + 9, tooltipY + 17)
+                            }
+                        }
+
+                        MouseArea {
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onPositionChanged: function(mouse) {
+                                let count = stockAnalysisQuoteModel.count
+                                if (count <= 0 || stockAnalysisChart.width <= 92) {
+                                    stockAnalysisChart.hoveredQuoteIndex = -1
+                                    stockAnalysisChart.requestPaint()
+                                    return
+                                }
+
+                                let leftPad = 68
+                                let rightPad = 24
+                                let plotWidth = Math.max(1, stockAnalysisChart.width - leftPad - rightPad)
+                                let ratio = Math.max(0, Math.min(1, (mouse.x - leftPad) / plotWidth))
+                                stockAnalysisChart.hoveredQuoteIndex = Math.round(ratio * (count - 1))
+                                stockAnalysisChart.requestPaint()
+                            }
+                            onExited: {
+                                stockAnalysisChart.hoveredQuoteIndex = -1
+                                stockAnalysisChart.requestPaint()
+                            }
+                        }
+                    }
+                }
+            }
+
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                height: 34
+                color: "#e8edf0"
+                border.color: "#c9d0d5"
+
+                Label {
+                    anchors.fill: parent
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 12
+                    text: stockAnalysisMessage
+                    color: stockAnalysisMessage.indexOf("ungueltig") >= 0 ? "#b91c1c" : "#475569"
+                    elide: Text.ElideRight
+                    verticalAlignment: Text.AlignVCenter
                 }
             }
         }
@@ -1694,7 +3151,7 @@ ApplicationWindow {
 
                 Rectangle {
                     Layout.fillWidth: true
-                    height: 1
+                    Layout.preferredHeight: 1
                     color: "#c9d0d5"
                 }
 
@@ -1889,6 +3346,11 @@ ApplicationWindow {
             Button {
                 text: "Mein Depot"
                 onClicked: portfolioWindow.show()
+            }
+
+            Button {
+                text: "Stock Analyse"
+                onClicked: stockAnalysisWindow.show()
             }
         }
 
@@ -2200,7 +3662,7 @@ ApplicationWindow {
 
                 Rectangle {
                     Layout.fillWidth: true
-                    height: 2
+                    Layout.preferredHeight: 2
                     color: "#aaaaaa"
                 }
 

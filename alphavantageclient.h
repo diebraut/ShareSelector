@@ -7,6 +7,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QStringList>
 #include <QVariantMap>
 
 class AlphaVantageClient : public QObject {
@@ -16,14 +17,22 @@ public:
 
     // 🔥 Methode zum Abrufen historischer Daten mit optionaler Exchange-Angabe
     void fetchHistoricalData(const QString &symbol, const QString &exchange = "");
+    void fetchFundamentalOverview(const QString &symbol);
+    void resolveFundamentalSymbol(const QString &requestSymbol, const QString &keywords);
 
 signals:
     void historicalDataReceived(const QMap<QString, QVariantMap> &data);
+    void fundamentalOverviewReceived(const QString &symbol, const QVariantMap &data);
+    void fundamentalOverviewNotFound(const QString &symbol);
+    void fundamentalSymbolResolved(const QString &requestSymbol, const QStringList &resolvedSymbols);
+    void fundamentalSymbolResolveFailed(const QString &requestSymbol, const QString &message);
     void errorOccurred(const QString &error);
 
 private slots:
     void handleSearchReply(QNetworkReply *reply, const QString &symbol, const QString &exchange);
+    void handleFundamentalSymbolSearchReply(QNetworkReply *reply, const QString &requestSymbol, const QString &keywords);
     void handleTimeSeriesReply(QNetworkReply *reply);
+    void handleFundamentalOverviewReply(QNetworkReply *reply, const QString &symbol);
     void fetchTimeSeries(const QString &symbol);
 
 private:
