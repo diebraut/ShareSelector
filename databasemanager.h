@@ -70,10 +70,21 @@ public:
     Q_INVOKABLE void generateQuotesForAllStocks(); // Neue Methode für alle Stocks
     Q_INVOKABLE void generateQuoteForStock(const QString symbol, const QString exchange);
     Q_INVOKABLE QVariantList getQuoteDetails(const QString &symbol, int fromDay, int toDay);
-    Q_INVOKABLE QVariantList getStockAnalysisResults(double minIncreasePercent);
+    Q_INVOKABLE QVariantList getStockAnalysisResults(double minIncreasePercent, int quoteCount);
+    Q_INVOKABLE QVariantList getStockAnalysisConfigs();
+    Q_INVOKABLE bool saveStockAnalysisConfig(
+        const QString &name,
+        double increasePercent,
+        double corridorPercent,
+        double corridorRequiredPercent,
+        double maxDrawdownPercent,
+        int quoteCount);
+    Q_INVOKABLE QString lastStockAnalysisConfigName();
+    Q_INVOKABLE bool saveLastStockAnalysisConfigName(const QString &name);
     Q_INVOKABLE QVariantList getStockAnalysisIbkrSymbols();
-    Q_INVOKABLE QVariantMap getStockAnalysisCandidate(const QString &symbol, double minIncreasePercent);
+    Q_INVOKABLE QVariantMap getStockAnalysisCandidate(const QString &symbol, double minIncreasePercent, int quoteCount);
     Q_INVOKABLE QVariantList getBoughtStocks();
+    Q_INVOKABLE double closePriceOnOrBefore(const QString &symbol, const QString &date);
     Q_INVOKABLE QVariantList getTestPortfolio();
     Q_INVOKABLE void connectToIbkr();
     Q_INVOKABLE void getIbkrData(const QString &symbol);
@@ -130,7 +141,9 @@ public:
         double currentValue,
         double entryValue,
         double valueIncreasePercent,
-        int status);
+        int status,
+        double quantity,
+        const QString &analysisConfigName);
 
     Q_INVOKABLE QVariantList getShares(
         int firstTo, int firstThreshold, bool firstGreaterThan,

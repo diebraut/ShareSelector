@@ -6380,6 +6380,82 @@ bool DatabaseManager::ensureSchema()
                 ON "StockFundamentals" ("Symbol", "AsOfDate" DESC)
         )SQL"),
         QStringLiteral(R"SQL(
+            CREATE TABLE IF NOT EXISTS "StockAnalysisConfigs" (
+                "Name" TEXT PRIMARY KEY,
+                "IncreasePercent" NUMERIC(10, 4) NOT NULL,
+                "CorridorPercent" NUMERIC(10, 4) NOT NULL DEFAULT 10,
+                "CorridorRequiredPercent" NUMERIC(10, 4) NOT NULL DEFAULT 0,
+                "MaxDrawdownPercent" NUMERIC(10, 4) NOT NULL DEFAULT 10,
+                "QuoteCount" INTEGER NOT NULL DEFAULT 90,
+                "CreatedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                "UpdatedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT "StockAnalysisConfigs_QuoteCount_chk"
+                    CHECK ("QuoteCount" BETWEEN 10 AND 90 AND "QuoteCount" % 10 = 0)
+            )
+        )SQL"),
+        QStringLiteral(R"SQL(
+            INSERT INTO "StockAnalysisConfigs" (
+                "Name", "IncreasePercent", "CorridorPercent",
+                "CorridorRequiredPercent", "MaxDrawdownPercent", "QuoteCount"
+            ) VALUES
+                ('25_Stocks', 25, 10, 92, 10, 90),
+                ('30_Stocks', 30, 10, 86, 10, 90),
+                ('35_Stocks', 35, 36, 92, 10, 90),
+                ('40_Stocks', 40, 10, 92, 10, 90)
+            ON CONFLICT ("Name") DO NOTHING
+        )SQL"),
+        QStringLiteral(R"SQL(
+            CREATE TABLE IF NOT EXISTS "AppSettings" (
+                "Key" TEXT PRIMARY KEY,
+                "Value" TEXT NOT NULL,
+                "UpdatedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        )SQL"),
+        QStringLiteral(R"SQL(
+            CREATE TABLE IF NOT EXISTS "BoughtStocks" (
+                "Symbol" VARCHAR PRIMARY KEY,
+                "Name" TEXT NOT NULL,
+                "BuyDate" DATE NOT NULL,
+                "SellDate" DATE,
+                "CurrentValue" NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                "EntryValue" NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                "ValueIncreasePercent" NUMERIC(20, 8) NOT NULL DEFAULT 0,
+                "Status" INTEGER NOT NULL DEFAULT 0,
+                "AnalysisConfigName" TEXT,
+                "CreatedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                "UpdatedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        )SQL"),
+        QStringLiteral(R"SQL(
+            ALTER TABLE "BoughtStocks"
+                ADD COLUMN IF NOT EXISTS "Quantity" NUMERIC(24, 8) NOT NULL DEFAULT 1,
+                ADD COLUMN IF NOT EXISTS "AnalysisConfigName" TEXT
+        )SQL"),
+        QStringLiteral(R"SQL(
+            INSERT INTO "StockAnalysisConfigs" ("Name", "IncreasePercent")
+            SELECT DISTINCT b."AnalysisConfigName", 0
+            FROM "BoughtStocks" b
+            WHERE COALESCE(b."AnalysisConfigName", '') <> ''
+            ON CONFLICT ("Name") DO NOTHING
+        )SQL"),
+        QStringLiteral(R"SQL(
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname = 'BoughtStocks_AnalysisConfigName_fkey'
+                ) THEN
+                    ALTER TABLE "BoughtStocks"
+                        ADD CONSTRAINT "BoughtStocks_AnalysisConfigName_fkey"
+                        FOREIGN KEY ("AnalysisConfigName")
+                        REFERENCES "StockAnalysisConfigs" ("Name")
+                        ON UPDATE CASCADE
+                        ON DELETE SET NULL;
+                END IF;
+            END $$
+        )SQL"),
+        QStringLiteral(R"SQL(
             CREATE TABLE IF NOT EXISTS "ApiDailyUsage" (
                 "Provider" VARCHAR(64) NOT NULL,
                 "UsageDate" DATE NOT NULL,
@@ -6417,6 +6493,148 @@ bool DatabaseManager::ensureSchema()
     return true;
 }
 
+
+QVariantList DatabaseManager::getStockAnalysisConfigs()
+{
+    QVariantList results;
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return results;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT
+            "Name",
+            "IncreasePercent",
+            "CorridorPercent",
+            "CorridorRequiredPercent",
+            "MaxDrawdownPercent",
+            "QuoteCount"
+        FROM "StockAnalysisConfigs"
+        ORDER BY "Name"
+    )SQL");
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Laden der Stockanalyse-Konfigurationen:" << query.lastError().text();
+        return results;
+    }
+
+    while (query.next()) {
+        QVariantMap row;
+        row["name"] = query.value("Name");
+        row["increasePercent"] = query.value("IncreasePercent");
+        row["corridorPercent"] = query.value("CorridorPercent");
+        row["corridorRequiredPercent"] = query.value("CorridorRequiredPercent");
+        row["maxDrawdownPercent"] = query.value("MaxDrawdownPercent");
+        row["quoteCount"] = query.value("QuoteCount");
+        results << row;
+    }
+
+    return results;
+}
+
+bool DatabaseManager::saveStockAnalysisConfig(
+    const QString &name,
+    double increasePercent,
+    double corridorPercent,
+    double corridorRequiredPercent,
+    double maxDrawdownPercent,
+    int quoteCount)
+{
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return false;
+    }
+
+    const QString trimmedName = name.trimmed();
+    if (trimmedName.isEmpty())
+        return false;
+
+    const int boundedQuoteCount = qBound(10, quoteCount, 90);
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        INSERT INTO "StockAnalysisConfigs" (
+            "Name", "IncreasePercent", "CorridorPercent",
+            "CorridorRequiredPercent", "MaxDrawdownPercent", "QuoteCount"
+        ) VALUES (
+            :name, :increasePercent, :corridorPercent,
+            :corridorRequiredPercent, :maxDrawdownPercent, :quoteCount
+        )
+        ON CONFLICT ("Name") DO UPDATE SET
+            "IncreasePercent" = EXCLUDED."IncreasePercent",
+            "CorridorPercent" = EXCLUDED."CorridorPercent",
+            "CorridorRequiredPercent" = EXCLUDED."CorridorRequiredPercent",
+            "MaxDrawdownPercent" = EXCLUDED."MaxDrawdownPercent",
+            "QuoteCount" = EXCLUDED."QuoteCount",
+            "UpdatedAt" = CURRENT_TIMESTAMP
+    )SQL");
+    query.bindValue(":name", trimmedName);
+    query.bindValue(":increasePercent", increasePercent);
+    query.bindValue(":corridorPercent", corridorPercent);
+    query.bindValue(":corridorRequiredPercent", corridorRequiredPercent);
+    query.bindValue(":maxDrawdownPercent", maxDrawdownPercent);
+    query.bindValue(":quoteCount", qRound(boundedQuoteCount / 10.0) * 10);
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Speichern der Stockanalyse-Konfiguration:" << query.lastError().text();
+        return false;
+    }
+
+    return true;
+}
+
+QString DatabaseManager::lastStockAnalysisConfigName()
+{
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return QString();
+    }
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT "Value"
+        FROM "AppSettings"
+        WHERE "Key" = 'lastStockAnalysisConfigName'
+        LIMIT 1
+    )SQL");
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Laden der letzten Stockanalyse-Konfiguration:" << query.lastError().text();
+        return QString();
+    }
+
+    return query.next() ? query.value(0).toString() : QString();
+}
+
+bool DatabaseManager::saveLastStockAnalysisConfigName(const QString &name)
+{
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return false;
+    }
+
+    if (name.trimmed().isEmpty())
+        return false;
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        INSERT INTO "AppSettings" ("Key", "Value", "UpdatedAt")
+        VALUES ('lastStockAnalysisConfigName', :name, CURRENT_TIMESTAMP)
+        ON CONFLICT ("Key") DO UPDATE SET
+            "Value" = EXCLUDED."Value",
+            "UpdatedAt" = CURRENT_TIMESTAMP
+    )SQL");
+    query.bindValue(":name", name.trimmed());
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Speichern der letzten Stockanalyse-Konfiguration:" << query.lastError().text();
+        return false;
+    }
+
+    return true;
+}
+
 QVariantList DatabaseManager::getBoughtStocks()
 {
     QVariantList results;
@@ -6436,7 +6654,9 @@ QVariantList DatabaseManager::getBoughtStocks()
             "CurrentValue",
             "EntryValue",
             "ValueIncreasePercent",
-            "Status"
+            "Status",
+            COALESCE("Quantity", 1) AS "Quantity",
+            COALESCE("AnalysisConfigName", '') AS "AnalysisConfigName"
         FROM "BoughtStocks"
         ORDER BY "BuyDate" DESC, "Symbol" ASC
     )SQL");
@@ -6476,6 +6696,8 @@ QVariantList DatabaseManager::getTestPortfolio()
             b."EntryValue",
             b."ValueIncreasePercent",
             b."Status",
+            COALESCE(b."Quantity", 1) AS "Quantity",
+            COALESCE(b."AnalysisConfigName", '') AS "AnalysisConfigName",
             s."MIC",
             s."ISIN",
             s."Exchange",
@@ -6528,7 +6750,11 @@ QVariantList DatabaseManager::getTestPortfolio()
             f."Week52Low" AS "FundamentalWeek52Low",
             f."Source" AS "FundamentalSource",
             f."RawData"::text AS "FundamentalRawData",
-            TO_CHAR(f."UpdatedAt", 'YYYY-MM-DD HH24:MI:SS') AS "FundamentalUpdatedAt"
+            TO_CHAR(f."UpdatedAt", 'YYYY-MM-DD HH24:MI:SS') AS "FundamentalUpdatedAt",
+            ROUND(((qp.latest_close - qp.close_20) / NULLIF(qp.close_20, 0) * 100)::numeric, 2) AS "Days20ValueInc",
+            ROUND(((qp.latest_close - qp.close_40) / NULLIF(qp.close_40, 0) * 100)::numeric, 2) AS "Days40ValueInc",
+            ROUND(((qp.latest_close - qp.close_60) / NULLIF(qp.close_60, 0) * 100)::numeric, 2) AS "Days60ValueInc",
+            ROUND(((qp.latest_close - qp.close_90) / NULLIF(qp.close_90, 0) * 100)::numeric, 2) AS "Days90ValueInc"
         FROM "BoughtStocks" b
         LEFT JOIN "Stocks" s ON s."Symbol" = b."Symbol"
         LEFT JOIN LATERAL (
@@ -6542,6 +6768,25 @@ QVariantList DatabaseManager::getTestPortfolio()
                 CASE sf."Source" WHEN 'Yahoo' THEN 0 ELSE 1 END
             LIMIT 1
         ) f ON true
+        LEFT JOIN LATERAL (
+            WITH ordered_quotes AS (
+                SELECT
+                    q."ClosePrice",
+                    ROW_NUMBER() OVER (ORDER BY q."CloseDate" DESC) AS rn_desc
+                FROM "Quotes" q
+                WHERE q."Symbol" = b."Symbol"
+                  AND COALESCE(q."ClosePrice", 0) > 0
+                  AND COALESCE(q."Volume", 0) > 0
+            )
+            SELECT
+                MAX("ClosePrice") FILTER (WHERE rn_desc = 1) AS latest_close,
+                MAX("ClosePrice") FILTER (WHERE rn_desc = 20) AS close_20,
+                MAX("ClosePrice") FILTER (WHERE rn_desc = 40) AS close_40,
+                MAX("ClosePrice") FILTER (WHERE rn_desc = 60) AS close_60,
+                MAX("ClosePrice") FILTER (WHERE rn_desc = 90) AS close_90
+            FROM ordered_quotes
+            WHERE rn_desc <= 90
+        ) qp ON true
         ORDER BY b."BuyDate" DESC, b."Symbol" ASC
     )SQL");
 
@@ -6592,6 +6837,12 @@ QVariantList DatabaseManager::getTestPortfolio()
         row["currentValue"] = currentValue;
         row["entryValue"] = query.value("EntryValue");
         row["valueIncreasePercent"] = query.value("ValueIncreasePercent");
+        row["quantity"] = query.value("Quantity");
+        row["analysisConfigName"] = query.value("AnalysisConfigName");
+        row["days20ValueInc"] = query.value("Days20ValueInc");
+        row["days40ValueInc"] = query.value("Days40ValueInc");
+        row["days60ValueInc"] = query.value("Days60ValueInc");
+        row["days90ValueInc"] = query.value("Days90ValueInc");
         row["status"] = query.value("Status");
         row["mic"] = mic;
         row["isin"] = query.value("ISIN");
@@ -6602,7 +6853,7 @@ QVariantList DatabaseManager::getTestPortfolio()
         const QStringList databaseFields = {
             QStringLiteral("symbol"), QStringLiteral("name"), QStringLiteral("buyDate"),
             QStringLiteral("sellDate"), QStringLiteral("currentValue"), QStringLiteral("entryValue"),
-            QStringLiteral("valueIncreasePercent"), QStringLiteral("status"), QStringLiteral("mic"),
+            QStringLiteral("valueIncreasePercent"), QStringLiteral("quantity"), QStringLiteral("analysisConfigName"), QStringLiteral("status"), QStringLiteral("mic"),
             QStringLiteral("isin"), QStringLiteral("exchange"), QStringLiteral("countryCode"),
             QStringLiteral("city")
         };
@@ -6751,6 +7002,37 @@ QVariantList DatabaseManager::getTestPortfolio()
     return results;
 }
 
+double DatabaseManager::closePriceOnOrBefore(const QString &symbol, const QString &date)
+{
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return 0.0;
+    }
+
+    if (symbol.trimmed().isEmpty() || date.trimmed().isEmpty())
+        return 0.0;
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT "ClosePrice"
+        FROM "Quotes"
+        WHERE "Symbol" = :symbol
+          AND "CloseDate" <= CAST(:closeDate AS date)
+          AND COALESCE("ClosePrice", 0) > 0
+        ORDER BY "CloseDate" DESC
+        LIMIT 1
+    )SQL");
+    query.bindValue(":symbol", symbol.trimmed());
+    query.bindValue(":closeDate", date.trimmed());
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Laden des Schlusskurses:" << query.lastError().text();
+        return 0.0;
+    }
+
+    return query.next() ? query.value(0).toDouble() : 0.0;
+}
+
 bool DatabaseManager::isBoughtStock(const QString &symbol)
 {
     if (!db.isOpen()) {
@@ -6797,7 +7079,9 @@ bool DatabaseManager::saveBoughtStock(
     double currentValue,
     double entryValue,
     double valueIncreasePercent,
-    int status)
+    int status,
+    double quantity,
+    const QString &analysisConfigName)
 {
     if (!db.isOpen()) {
         qWarning() << "Datenbank nicht verbunden!";
@@ -6819,7 +7103,9 @@ bool DatabaseManager::saveBoughtStock(
             "CurrentValue",
             "EntryValue",
             "ValueIncreasePercent",
-            "Status"
+            "Status",
+            "Quantity",
+            "AnalysisConfigName"
         )
         VALUES (
             :symbol,
@@ -6829,7 +7115,9 @@ bool DatabaseManager::saveBoughtStock(
             :currentValue,
             :entryValue,
             :valueIncreasePercent,
-            :status
+            :status,
+            :quantity,
+            NULLIF(:analysisConfigName, '')
         )
         ON CONFLICT ("Symbol") DO UPDATE SET
             "Name" = EXCLUDED."Name",
@@ -6838,7 +7126,9 @@ bool DatabaseManager::saveBoughtStock(
             "CurrentValue" = EXCLUDED."CurrentValue",
             "EntryValue" = EXCLUDED."EntryValue",
             "ValueIncreasePercent" = EXCLUDED."ValueIncreasePercent",
-            "Status" = EXCLUDED."Status"
+            "Status" = EXCLUDED."Status",
+            "Quantity" = EXCLUDED."Quantity",
+            "AnalysisConfigName" = EXCLUDED."AnalysisConfigName"
     )SQL");
     query.bindValue(":symbol", symbol.trimmed());
     query.bindValue(":name", name.trimmed());
@@ -6848,6 +7138,8 @@ bool DatabaseManager::saveBoughtStock(
     query.bindValue(":entryValue", entryValue);
     query.bindValue(":valueIncreasePercent", valueIncreasePercent);
     query.bindValue(":status", status);
+    query.bindValue(":quantity", quantity > 0.0 ? quantity : 1.0);
+    query.bindValue(":analysisConfigName", analysisConfigName.trimmed());
 
     if (!query.exec()) {
         qCritical() << "Fehler beim Speichern der gekauften Aktie:" << query.lastError().text();
@@ -7343,7 +7635,7 @@ QVariantList DatabaseManager::getQuoteDetails(const QString &symbol, int fromDay
     return results;
 }
 
-QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent)
+QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent, int quoteCount)
 {
     QVariantList results;
 
@@ -7351,6 +7643,8 @@ QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent)
         qWarning() << "Datenbank ist nicht verbunden!";
         return results;
     }
+
+    const int boundedQuoteCount = qBound(10, quoteCount, 90);
 
     QSqlQuery query(db);
     query.prepare(R"SQL(
@@ -7381,7 +7675,7 @@ QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent)
                 MAX("CloseDate") AS last_date,
                 COUNT(*) AS quote_count
             FROM recent_quotes
-            WHERE rn_desc <= 90
+            WHERE rn_desc <= :quoteCount
             GROUP BY "Symbol"
         ),
         trend_summary AS (
@@ -7392,7 +7686,7 @@ QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent)
             FROM quote_summary qs
             INNER JOIN recent_quotes rq
                 ON rq."Symbol" = qs."Symbol"
-               AND rq.rn_desc <= 90
+               AND rq.rn_desc <= :quoteCount
             GROUP BY qs."Symbol", qs.quote_count
         ),
         turnover_summary AS (
@@ -7452,6 +7746,7 @@ QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent)
         LIMIT 500
     )SQL");
     query.bindValue(QStringLiteral(":minIncreasePercent"), minIncreasePercent);
+    query.bindValue(QStringLiteral(":quoteCount"), boundedQuoteCount);
 
     if (!query.exec()) {
         qCritical() << "SQL-Fehler bei Stock-Analyse:" << query.lastError().text();
@@ -7505,7 +7800,7 @@ QVariantList DatabaseManager::getStockAnalysisIbkrSymbols()
     return results;
 }
 
-QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, double minIncreasePercent)
+QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, double minIncreasePercent, int quoteCount)
 {
     QVariantMap result;
 
@@ -7517,6 +7812,8 @@ QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, do
     const QString normalizedSymbol = symbol.trimmed();
     if (normalizedSymbol.isEmpty())
         return result;
+
+    const int boundedQuoteCount = qBound(10, quoteCount, 90);
 
     QSqlQuery query(db);
     query.prepare(R"SQL(
@@ -7546,7 +7843,7 @@ QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, do
                 MAX("CloseDate") AS last_date,
                 COUNT(*) AS quote_count
             FROM recent_quotes
-            WHERE rn_desc <= 90
+            WHERE rn_desc <= :quoteCount
             GROUP BY "Symbol"
         ),
         trend_summary AS (
@@ -7557,7 +7854,7 @@ QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, do
             FROM quote_summary qs
             INNER JOIN recent_quotes rq
                 ON rq."Symbol" = qs."Symbol"
-               AND rq.rn_desc <= 90
+               AND rq.rn_desc <= :quoteCount
             GROUP BY qs."Symbol", qs.quote_count
         ),
         turnover_summary AS (
@@ -7614,6 +7911,7 @@ QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, do
     )SQL");
     query.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
     query.bindValue(QStringLiteral(":minIncreasePercent"), minIncreasePercent);
+    query.bindValue(QStringLiteral(":quoteCount"), boundedQuoteCount);
 
     if (!query.exec()) {
         qCritical() << "SQL-Fehler bei Stock-Analyse-Kandidat:" << query.lastError().text() << normalizedSymbol;

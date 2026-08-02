@@ -18,7 +18,7 @@ ApplicationWindow {
     onActiveChanged: if (active) listView.forceActiveFocus()
 
     Component.onCompleted: Qt.callLater(function() {
-        stockAnalysisWindow.show()
+        portfolioWindow.show()
     })
 
     // Fokus-Recovery
@@ -86,6 +86,8 @@ ApplicationWindow {
     property int selectedPortfolioIndex: -1
     property int selectedStockAnalysisConfigIndex: -1
     property int selectedStockAnalysisIndex: -1
+    property var selectedStockAnalysisRows: []
+    property int stockAnalysisSelectionAnchor: -1
     property bool stockAnalysisStockSelected: false
     property string stockAnalysisMessage: ""
     property real stockAnalysisCorridorPercent: 10
@@ -95,6 +97,8 @@ ApplicationWindow {
     property real stockAnalysisMaxDrawdownPercent: 10
     property real stockAnalysisActualMaxDrawdownPercent: 0
     property real stockAnalysisCorridorRequiredPercent: 0
+    property int stockAnalysisQuoteCount: 90
+    property string stockAnalysisQuoteDateRangeText: ""
     property bool stockAnalysisScanActive: false
     property var stockAnalysisScanSymbols: []
     property int stockAnalysisScanIndex: 0
@@ -105,13 +109,48 @@ ApplicationWindow {
             stockAnalysisChartRefreshTimer.restart()
         }
     }
+    function normalizedStockAnalysisQuoteCount(value) {
+        return Math.max(10, Math.min(90, Math.round(Number(value) / 10) * 10))
+    }
+
+    function reloadSelectedStockAnalysisQuotes() {
+        if (stockAnalysisStockSelected && selectedStockAnalysisIndex >= 0)
+            selectStockAnalysisResult(selectedStockAnalysisIndex)
+    }
+
+    function setStockAnalysisQuoteCount(value, forceReload) {
+        let normalizedQuoteCount = normalizedStockAnalysisQuoteCount(value)
+        if (stockAnalysisQuoteCount !== normalizedQuoteCount) {
+            stockAnalysisQuoteCount = normalizedQuoteCount
+        } else if (forceReload) {
+            reloadSelectedStockAnalysisQuotes()
+        }
+    }
+
+    function updateStockAnalysisQuoteDateRangeText() {
+        let count = stockAnalysisQuoteModel.count
+        if (count === 0) {
+            stockAnalysisQuoteDateRangeText = ""
+            return
+        }
+
+        let newestDate = stockAnalysisQuoteModel.get(0).closedate || ""
+        let oldestDate = stockAnalysisQuoteModel.get(count - 1).closedate || ""
+        stockAnalysisQuoteDateRangeText = oldestDate.length > 0 && newestDate.length > 0
+            ? oldestDate + " - " + newestDate
+            : ""
+    }
+
+    onStockAnalysisQuoteCountChanged: reloadSelectedStockAnalysisQuotes()
     property var portfolioFields: [
         { heading: true, label: "Position" },
         { key: "symbol", label: "Symbol" },
         { key: "name", label: "Name" },
         { key: "buyDate", label: "Kaufdatum" },
+        { key: "analysisConfigName", label: "Analyse-Konfiguration" },
         { key: "sellDate", label: "Verkaufsdatum" },
         { key: "currentValue", label: "Aktueller Wert", format: "money" },
+        { key: "quantity", label: "Anzahl Positionen", format: "quantity" },
         { key: "entryValue", label: "Einstiegswert", format: "money" },
         { key: "valueIncreasePercent", label: "Wertentwicklung", format: "percent" },
         { key: "status", label: "Status", format: "status" },
@@ -133,12 +172,9 @@ ApplicationWindow {
         { key: "category", label: "Kategorie" },
         { key: "subcategory", label: "Unterkategorie" },
         { key: "timeZoneId", label: "Zeitzone" },
-        { key: "tradingHours", label: "Handelszeiten" },
-        { key: "liquidHours", label: "RegulÃ¤re Handelszeiten" },
         { key: "minTick", label: "Minimale Preisstufe", format: "decimal8" },
         { key: "marketRuleIds", label: "Market-Rule-IDs" },
         { key: "validExchanges", label: "GÃ¼ltige HandelsplÃ¤tze" },
-        { key: "orderTypes", label: "Ordertypen" },
         { key: "marketName", label: "Marktname" },
         { key: "cusip", label: "CUSIP" },
         { key: "ibkrLastSyncAt", label: "Letzte IBKR-Synchronisierung" },
@@ -170,7 +206,6 @@ ApplicationWindow {
         { key: "week52High", label: "52-Wochen-Hoch", format: "money" },
         { key: "week52Low", label: "52-Wochen-Tief", format: "money" },
         { key: "source", label: "Datenquelle" },
-        { key: "rawData", label: "Rohdaten" },
         { key: "fundamentalUpdatedAt", label: "Kennzahlen aktualisiert" }
     ]
 
@@ -476,6 +511,8 @@ ApplicationWindow {
                 currentValue: fieldValue(stock, ["CurrentValue", "currentValue"], 0),
                 entryValue: fieldValue(stock, ["EntryValue", "entryValue"], 0),
                 valueIncreasePercent: fieldValue(stock, ["ValueIncreasePercent", "valueIncreasePercent"], 0),
+                quantity: fieldValue(stock, ["Quantity", "quantity"], 1),
+                analysisConfigName: fieldValue(stock, ["AnalysisConfigName", "analysisConfigName"], ""),
                 status: fieldValue(stock, ["Status", "status"], 0)
             })
         })
@@ -500,11 +537,87 @@ ApplicationWindow {
             : (portfolioModel.count > 0 ? 0 : -1)
     }
 
+    function cleanDisplayText(value) {
+        let text = String(value)
+        return text
+            .replace(/\u00c3\u00a4/g, "\u00e4")
+            .replace(/\u00c3\u00b6/g, "\u00f6")
+            .replace(/\u00c3\u00bc/g, "\u00fc")
+            .replace(/\u00c3\u0084/g, "\u00c4")
+            .replace(/\u00c3\u0096/g, "\u00d6")
+            .replace(/\u00c3\u009c/g, "\u00dc")
+            .replace(/\u00c3\u009f/g, "\u00df")
+            .replace(/\u00c2\u00b7/g, "\u00b7")
+            .replace(/\u00e2\u0080\u0093/g, "-")
+            .replace(/\u00e2\u0080\u0094/g, "-")
+            .replace(/\u00e2\u0080\u0099/g, "'")
+            .replace(/\u00e2\u0080\u009e/g, "\u201e")
+            .replace(/\u00e2\u0080\u009c/g, "\u201c")
+            .replace(/\u00e2\u0080\u009d/g, "\u201d")
+    }
+
     function selectedPortfolioValue(key) {
         if (selectedPortfolioIndex < 0 || selectedPortfolioIndex >= portfolioModel.count)
             return ""
         const row = portfolioModel.get(selectedPortfolioIndex)
         return row[key] === undefined || row[key] === null ? "" : row[key]
+    }
+
+    function portfolioTotalCurrentValue() {
+        let total = 0
+        for (let i = 0; i < portfolioModel.count; i++) {
+            let row = portfolioModel.get(i)
+            total += portfolioPositionQuantity(row) * Number(row.currentValue || 0)
+        }
+        return total
+    }
+
+    function portfolioTotalEntryValue() {
+        let total = 0
+        for (let i = 0; i < portfolioModel.count; i++) {
+            let row = portfolioModel.get(i)
+            total += portfolioPositionQuantity(row) * Number(row.entryValue || 0)
+        }
+        return total
+    }
+
+    function portfolioTotalGainValue() {
+        return portfolioTotalCurrentValue() - portfolioTotalEntryValue()
+    }
+
+    function portfolioStatusCount(sold) {
+        let count = 0
+        for (let i = 0; i < portfolioModel.count; i++) {
+            let isSold = Number(portfolioModel.get(i).status || 0) === 10
+            if (isSold === sold)
+                count++
+        }
+        return count
+    }
+
+    function portfolioPerformancePercent() {
+        let entryValue = portfolioTotalEntryValue()
+        let currentValue = portfolioTotalCurrentValue()
+        return entryValue > 0 ? (currentValue - entryValue) / entryValue * 100 : 0
+    }
+
+    function portfolioPositionQuantity(row) {
+        let candidates = ["quantity", "amount", "shares", "count", "anzahl"]
+        for (let i = 0; i < candidates.length; i++) {
+            let value = Number(row[candidates[i]] || 0)
+            if (value > 0)
+                return value
+        }
+        return 1
+    }
+
+    function portfolioPositionTotalValue(row) {
+        return portfolioPositionQuantity(row) * Number(row.currentValue || 0)
+    }
+
+    function formatPercentValue(value) {
+        let numberValue = Number(value)
+        return isNaN(numberValue) ? "-" : numberValue.toLocaleString(Qt.locale(), "f", 2) + " %"
     }
 
     function formatPortfolioValue(key, format) {
@@ -525,23 +638,31 @@ ApplicationWindow {
                 displayValue = Number(value).toLocaleString(Qt.locale(), "f", 2)
             else if (format === "decimal8")
                 displayValue = Number(value).toLocaleString(Qt.locale(), "f", 8)
+            else if (format === "quantity") {
+                let quantityText = Number(value).toLocaleString(Qt.locale(), "f", 6)
+                while ((quantityText.indexOf(",") >= 0 || quantityText.indexOf(".") >= 0) && quantityText.endsWith("0"))
+                    quantityText = quantityText.slice(0, -1)
+                if (quantityText.endsWith(",") || quantityText.endsWith("."))
+                    quantityText = quantityText.slice(0, -1)
+                displayValue = quantityText
+            }
             else
-                displayValue = String(value)
+                displayValue = cleanDisplayText(value)
         }
-        return displayValue
+        return cleanDisplayText(displayValue)
     }
 
     function portfolioFieldLabel(key, label) {
         const origin = selectedPortfolioValue(key + "Origin")
-        return origin === "" ? label : label + " (" + origin + ")"
+        return origin === "" ? cleanDisplayText(label) : cleanDisplayText(label + " (" + origin + ")")
     }
 
     function portfolioHeadingLabel(label) {
         if (label !== "Kennzahlen")
-            return label
+            return cleanDisplayText(label)
 
         const exchange = selectedPortfolioValue("fundamentalExchange")
-        return exchange === "" ? label : label + " (" + exchange + ")"
+        return exchange === "" ? cleanDisplayText(label) : cleanDisplayText(label + " (" + exchange + ")")
     }
 
     function currentIsoDate() {
@@ -566,7 +687,9 @@ ApplicationWindow {
             Number(stock.currentValue || 0),
             Number(stock.entryValue || 0),
             Number(stock.valueIncreasePercent || 0),
-            10
+            10,
+            Number(stock.quantity || 1),
+            stock.analysisConfigName || ""
         )
 
         if (ok) {
@@ -914,7 +1037,9 @@ ApplicationWindow {
             lastPrice,
             lastPrice,
             0,
-            0
+            0,
+            1,
+            ""
         )
 
         if (ok) {
@@ -933,51 +1058,57 @@ ApplicationWindow {
         return LocalStorage.openDatabaseSync("ShareSelectorStockAnalysis", "1.0", "Stock Analyse", 100000)
     }
 
-    function ensureStockAnalysisConfigTable() {
-        let localDb = stockAnalysisDb()
-        localDb.transaction(function(tx) {
-            tx.executeSql("CREATE TABLE IF NOT EXISTS configs (name TEXT PRIMARY KEY, increase_percent REAL NOT NULL)")
-            let columns = tx.executeSql("PRAGMA table_info(configs)")
-            let hasCorridorPercent = false
-            for (let i = 0; i < columns.rows.length; i++) {
-                if (columns.rows.item(i).name === "corridor_percent") {
-                    hasCorridorPercent = true
-                    break
+    function migrateLocalStockAnalysisConfigsToPostgres() {
+        let markerKey = "postgresConfigMigrationDone"
+        let alreadyMigrated = false
+        try {
+            let localDb = stockAnalysisDb()
+            localDb.transaction(function(tx) {
+                tx.executeSql("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
+                let migrated = tx.executeSql("SELECT value FROM meta WHERE key = ?", [markerKey])
+                alreadyMigrated = migrated.rows.length > 0
+                if (alreadyMigrated)
+                    return
+
+                tx.executeSql("CREATE TABLE IF NOT EXISTS configs (name TEXT PRIMARY KEY, increase_percent REAL NOT NULL)")
+                let columns = tx.executeSql("PRAGMA table_info(configs)")
+                let columnNames = []
+                for (let i = 0; i < columns.rows.length; i++)
+                    columnNames.push(columns.rows.item(i).name)
+                if (columnNames.indexOf("corridor_percent") < 0)
+                    tx.executeSql("ALTER TABLE configs ADD COLUMN corridor_percent REAL NOT NULL DEFAULT 10")
+                if (columnNames.indexOf("corridor_required_percent") < 0)
+                    tx.executeSql("ALTER TABLE configs ADD COLUMN corridor_required_percent REAL NOT NULL DEFAULT 0")
+                if (columnNames.indexOf("max_drawdown_percent") < 0)
+                    tx.executeSql("ALTER TABLE configs ADD COLUMN max_drawdown_percent REAL NOT NULL DEFAULT 10")
+                if (columnNames.indexOf("quote_count") < 0)
+                    tx.executeSql("ALTER TABLE configs ADD COLUMN quote_count INTEGER NOT NULL DEFAULT 90")
+
+                let rs = tx.executeSql("SELECT name, increase_percent, corridor_percent, corridor_required_percent, max_drawdown_percent, quote_count FROM configs")
+                for (let rowIndex = 0; rowIndex < rs.rows.length; rowIndex++) {
+                    let row = rs.rows.item(rowIndex)
+                    dbManager.saveStockAnalysisConfig(
+                        row.name,
+                        Number(row.increase_percent || 0),
+                        Number(row.corridor_percent || 10),
+                        Number(row.corridor_required_percent || 0),
+                        Number(row.max_drawdown_percent || 10),
+                        Number(row.quote_count || 90)
+                    )
                 }
-            }
-            if (!hasCorridorPercent)
-                tx.executeSql("ALTER TABLE configs ADD COLUMN corridor_percent REAL NOT NULL DEFAULT 10")
-            columns = tx.executeSql("PRAGMA table_info(configs)")
-            let hasCorridorRequiredPercent = false
-            for (let j = 0; j < columns.rows.length; j++) {
-                if (columns.rows.item(j).name === "corridor_required_percent") {
-                    hasCorridorRequiredPercent = true
-                    break
-                }
-            }
-            if (!hasCorridorRequiredPercent)
-                tx.executeSql("ALTER TABLE configs ADD COLUMN corridor_required_percent REAL NOT NULL DEFAULT 0")
-            columns = tx.executeSql("PRAGMA table_info(configs)")
-            let hasMaxDrawdownPercent = false
-            for (let k = 0; k < columns.rows.length; k++) {
-                if (columns.rows.item(k).name === "max_drawdown_percent") {
-                    hasMaxDrawdownPercent = true
-                    break
-                }
-            }
-            if (!hasMaxDrawdownPercent)
-                tx.executeSql("ALTER TABLE configs ADD COLUMN max_drawdown_percent REAL NOT NULL DEFAULT 10")
-            tx.executeSql("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
-            let migratedDrawdownDefault = tx.executeSql("SELECT value FROM meta WHERE key = ?", ["maxDrawdownDefault10Migrated"])
-            if (migratedDrawdownDefault.rows.length === 0) {
-                tx.executeSql("UPDATE configs SET max_drawdown_percent = 10 WHERE max_drawdown_percent = 100")
-                tx.executeSql("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", ["maxDrawdownDefault10Migrated", "1"])
-            }
-        })
+
+                let last = tx.executeSql("SELECT value FROM meta WHERE key = ?", ["lastConfigName"])
+                if (last.rows.length > 0)
+                    dbManager.saveLastStockAnalysisConfigName(last.rows.item(0).value)
+                tx.executeSql("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", [markerKey, "1"])
+            })
+        } catch (err) {
+            console.log("Migration lokaler Stockanalyse-Konfigurationen fehlgeschlagen:", err)
+        }
     }
 
     function loadStockAnalysisConfigs() {
-        ensureStockAnalysisConfigTable()
+        migrateLocalStockAnalysisConfigsToPostgres()
         let selectedName = ""
         if (selectedStockAnalysisConfigIndex >= 0
                 && selectedStockAnalysisConfigIndex < stockAnalysisConfigModel.count)
@@ -985,48 +1116,28 @@ ApplicationWindow {
 
         stockAnalysisConfigModel.clear()
         selectedStockAnalysisConfigIndex = -1
-        let localDb = stockAnalysisDb()
-        localDb.transaction(function(tx) {
-            let rs = tx.executeSql("SELECT name, increase_percent, corridor_percent, corridor_required_percent, max_drawdown_percent FROM configs ORDER BY name")
-            for (let i = 0; i < rs.rows.length; i++) {
-                let row = rs.rows.item(i)
-                stockAnalysisConfigModel.append({
-                    name: row.name,
-                    increasePercent: row.increase_percent,
-                    corridorPercent: row.corridor_percent,
-                    corridorRequiredPercent: row.corridor_required_percent,
-                    maxDrawdownPercent: row.max_drawdown_percent
-                })
-                if (row.name === selectedName)
-                    selectedStockAnalysisConfigIndex = i
-            }
+        let rows = dbManager.getStockAnalysisConfigs()
+        rows.forEach(row => {
+            stockAnalysisConfigModel.append({
+                name: row.name || "",
+                increasePercent: Number(row.increasePercent || 0),
+                corridorPercent: Number(row.corridorPercent || 10),
+                corridorRequiredPercent: Number(row.corridorRequiredPercent || 0),
+                maxDrawdownPercent: Number(row.maxDrawdownPercent || 10),
+                quoteCount: Number(row.quoteCount || 90)
+            })
+            if (row.name === selectedName)
+                selectedStockAnalysisConfigIndex = stockAnalysisConfigModel.count - 1
         })
     }
 
     function saveLastStockAnalysisConfigName(configName) {
-        if (configName.length === 0)
-            return
-
-        ensureStockAnalysisConfigTable()
-        let localDb = stockAnalysisDb()
-        localDb.transaction(function(tx) {
-            tx.executeSql(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
-                ["lastConfigName", configName]
-            )
-        })
+        if (configName.length > 0)
+            dbManager.saveLastStockAnalysisConfigName(configName)
     }
 
     function loadLastStockAnalysisConfig() {
-        ensureStockAnalysisConfigTable()
-        let lastName = ""
-        let localDb = stockAnalysisDb()
-        localDb.transaction(function(tx) {
-            let rs = tx.executeSql("SELECT value FROM meta WHERE key = ?", ["lastConfigName"])
-            if (rs.rows.length > 0)
-                lastName = rs.rows.item(0).value
-        })
-
+        let lastName = dbManager.lastStockAnalysisConfigName()
         if (lastName.length === 0)
             return
 
@@ -1034,6 +1145,42 @@ ApplicationWindow {
             if (stockAnalysisConfigModel.get(i).name === lastName) {
                 selectStockAnalysisConfig(i, false)
                 return
+            }
+        }
+    }
+
+    function saveStockAnalysisConfig() {
+        let configName = stockAnalysisConfigNameInput.text.trim()
+        let increasePercent = Number(stockAnalysisIncreaseInput.text.replace(",", "."))
+        let corridorPercent = stockAnalysisCorridorPercent
+        let corridorRequiredPercent = stockAnalysisCorridorRequiredPercent
+        let maxDrawdownPercent = stockAnalysisMaxDrawdownPercent
+        let quoteCount = stockAnalysisQuoteCount
+        if (configName.length === 0 || isNaN(increasePercent) || isNaN(corridorPercent) || isNaN(corridorRequiredPercent) || isNaN(maxDrawdownPercent) || isNaN(quoteCount)) {
+            stockAnalysisMessage = "Bitte Name, Steigerung und Korridorwerte eintragen"
+            return
+        }
+
+        let ok = dbManager.saveStockAnalysisConfig(
+            configName,
+            increasePercent,
+            corridorPercent,
+            corridorRequiredPercent,
+            maxDrawdownPercent,
+            quoteCount
+        )
+        if (!ok) {
+            stockAnalysisMessage = "Konfiguration speichern fehlgeschlagen"
+            return
+        }
+
+        stockAnalysisMessage = "Konfiguration gespeichert"
+        loadStockAnalysisConfigs()
+        saveLastStockAnalysisConfigName(configName)
+        for (let i = 0; i < stockAnalysisConfigModel.count; i++) {
+            if (stockAnalysisConfigModel.get(i).name === configName) {
+                selectStockAnalysisConfig(i, false)
+                break
             }
         }
     }
@@ -1052,39 +1199,10 @@ ApplicationWindow {
         stockAnalysisCorridorPercent = cfg.corridorPercent === undefined ? 10 : cfg.corridorPercent
         stockAnalysisCorridorRequiredPercent = cfg.corridorRequiredPercent === undefined ? 0 : cfg.corridorRequiredPercent
         stockAnalysisMaxDrawdownPercent = cfg.maxDrawdownPercent === undefined ? 10 : cfg.maxDrawdownPercent
+        stockAnalysisQuoteCount = cfg.quoteCount === undefined ? 90 : cfg.quoteCount
         saveLastStockAnalysisConfigName(cfg.name)
         if (showMessage)
             stockAnalysisMessage = "Konfiguration geladen"
-    }
-
-    function saveStockAnalysisConfig() {
-        let configName = stockAnalysisConfigNameInput.text.trim()
-        let increasePercent = Number(stockAnalysisIncreaseInput.text.replace(",", "."))
-        let corridorPercent = stockAnalysisCorridorPercent
-        let corridorRequiredPercent = stockAnalysisCorridorRequiredPercent
-        let maxDrawdownPercent = stockAnalysisMaxDrawdownPercent
-        if (configName.length === 0 || isNaN(increasePercent) || isNaN(corridorPercent) || isNaN(corridorRequiredPercent) || isNaN(maxDrawdownPercent)) {
-            stockAnalysisMessage = "Bitte Name, Steigerung und Korridorwerte eintragen"
-            return
-        }
-
-        ensureStockAnalysisConfigTable()
-        let localDb = stockAnalysisDb()
-        localDb.transaction(function(tx) {
-            tx.executeSql(
-                "INSERT OR REPLACE INTO configs (name, increase_percent, corridor_percent, corridor_required_percent, max_drawdown_percent) VALUES (?, ?, ?, ?, ?)",
-                [configName, increasePercent, corridorPercent, corridorRequiredPercent, maxDrawdownPercent]
-            )
-        })
-        stockAnalysisMessage = "Konfiguration gespeichert"
-        loadStockAnalysisConfigs()
-        saveLastStockAnalysisConfigName(configName)
-        for (let i = 0; i < stockAnalysisConfigModel.count; i++) {
-            if (stockAnalysisConfigModel.get(i).name === configName) {
-                selectStockAnalysisConfig(i, false)
-                break
-            }
-        }
     }
 
     function newStockAnalysisConfig() {
@@ -1102,16 +1220,19 @@ ApplicationWindow {
 
         stockAnalysisResultModel.clear()
         stockAnalysisQuoteModel.clear()
+        stockAnalysisQuoteDateRangeText = ""
         selectedStockAnalysisIndex = -1
+        selectedStockAnalysisRows = []
+        stockAnalysisSelectionAnchor = -1
         stockAnalysisStockSelected = false
         stockAnalysisCorridorHitPercent = 0
         stockAnalysisActualIncreasePercent = 0
         stockAnalysisRequiredCorridorPercent = 0
         stockAnalysisActualMaxDrawdownPercent = 0
-        let results = dbManager.getStockAnalysisResults(increasePercent)
+        let results = dbManager.getStockAnalysisResults(increasePercent, stockAnalysisQuoteCount)
         let found = 0
         results.forEach(row => {
-            let quotes = dbManager.getQuoteDetails(row.symbol, 1, 90)
+            let quotes = dbManager.getQuoteDetails(row.symbol, 1, stockAnalysisQuoteCount)
             let trendIncreasePercent = trendIncreasePercentForQuotes(quotes)
             let hitPercent = corridorHitPercentForQuotes(quotes)
             let maxDrawdown = maxDrawdownForQuotes(quotes).percent
@@ -1366,7 +1487,10 @@ ApplicationWindow {
 
         stockAnalysisResultModel.clear()
         stockAnalysisQuoteModel.clear()
+        stockAnalysisQuoteDateRangeText = ""
         selectedStockAnalysisIndex = -1
+        selectedStockAnalysisRows = []
+        stockAnalysisSelectionAnchor = -1
         stockAnalysisStockSelected = false
         stockAnalysisCorridorHitPercent = 0
         stockAnalysisActualIncreasePercent = 0
@@ -1408,9 +1532,9 @@ ApplicationWindow {
             processed++
 
             try {
-                let candidate = dbManager.getStockAnalysisCandidate(symbol, increasePercent)
+                let candidate = dbManager.getStockAnalysisCandidate(symbol, increasePercent, stockAnalysisQuoteCount)
                 if (candidate.symbol !== undefined && candidate.symbol !== "") {
-                    let quotes = dbManager.getQuoteDetails(candidate.symbol, 1, 90)
+                    let quotes = dbManager.getQuoteDetails(candidate.symbol, 1, stockAnalysisQuoteCount)
                     let trendIncreasePercent = trendIncreasePercentForQuotes(quotes)
                     let hitPercent = corridorHitPercentForQuotes(quotes)
                     let maxDrawdown = maxDrawdownForQuotes(quotes).percent
@@ -1474,6 +1598,8 @@ ApplicationWindow {
         stockAnalysisResultModel.clear()
         rows.forEach(row => stockAnalysisResultModel.append(row))
         selectedStockAnalysisIndex = -1
+        selectedStockAnalysisRows = []
+        stockAnalysisSelectionAnchor = -1
         stockAnalysisStockSelected = false
         stockAnalysisCorridorHitPercent = 0
         stockAnalysisActualIncreasePercent = 0
@@ -1503,6 +1629,148 @@ ApplicationWindow {
         }
     }
 
+
+
+    function stockAnalysisIndexSelected(rowIndex) {
+        return selectedStockAnalysisRows.indexOf(rowIndex) >= 0
+    }
+
+    function sortedStockAnalysisSelection() {
+        let rows = selectedStockAnalysisRows.slice()
+        rows.sort((a, b) => a - b)
+        return rows
+    }
+
+    function selectSingleStockAnalysisRow(rowIndex) {
+        selectedStockAnalysisRows = [rowIndex]
+        stockAnalysisSelectionAnchor = rowIndex
+        selectStockAnalysisResult(rowIndex)
+    }
+
+    function toggleStockAnalysisRow(rowIndex) {
+        let rows = selectedStockAnalysisRows.slice()
+        let pos = rows.indexOf(rowIndex)
+        if (pos >= 0)
+            rows.splice(pos, 1)
+        else
+            rows.push(rowIndex)
+        rows.sort((a, b) => a - b)
+        selectedStockAnalysisRows = rows
+        stockAnalysisSelectionAnchor = rowIndex
+        selectStockAnalysisResult(rowIndex)
+    }
+
+    function selectStockAnalysisRange(rowIndex, keepExisting) {
+        if (stockAnalysisSelectionAnchor < 0) {
+            selectSingleStockAnalysisRow(rowIndex)
+            return
+        }
+
+        let from = Math.min(stockAnalysisSelectionAnchor, rowIndex)
+        let to = Math.max(stockAnalysisSelectionAnchor, rowIndex)
+        let rows = keepExisting ? selectedStockAnalysisRows.slice() : []
+        for (let i = from; i <= to; i++) {
+            if (rows.indexOf(i) < 0)
+                rows.push(i)
+        }
+        rows.sort((a, b) => a - b)
+        selectedStockAnalysisRows = rows
+        selectStockAnalysisResult(rowIndex)
+    }
+
+    function stockAnalysisSelectedRowsData() {
+        let rows = []
+        sortedStockAnalysisSelection().forEach(rowIndex => {
+            if (rowIndex >= 0 && rowIndex < stockAnalysisResultModel.count)
+                rows.push(cloneStockAnalysisResult(stockAnalysisResultModel.get(rowIndex)))
+        })
+        return rows
+    }
+
+    function stockAnalysisDateToIso(dateText) {
+        let text = String(dateText || "").trim()
+        if (/^\d{4}-\d{2}-\d{2}$/.test(text))
+            return text
+        let match = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(text)
+        if (!match)
+            return ""
+        return match[3] + "-" + match[2].padStart(2, "0") + "-" + match[1].padStart(2, "0")
+    }
+
+    function stockAnalysisOldestCommonBuyDate(rows) {
+        let commonDate = ""
+        rows.forEach(row => {
+            let iso = stockAnalysisDateToIso(row.firstquotedate)
+            if (iso.length > 0 && (commonDate.length === 0 || iso > commonDate))
+                commonDate = iso
+        })
+        return commonDate.length > 0 ? commonDate : currentIsoDate()
+    }
+
+    function openStockAnalysisBuyDialog() {
+        let rows = stockAnalysisSelectedRowsData()
+        if (rows.length === 0) {
+            stockAnalysisMessage = "Keine Aktie ausgewaehlt"
+            return
+        }
+        stockAnalysisBuyDialog.stocks = rows
+        stockAnalysisBuyAmountInput.text = "1000"
+        stockAnalysisBuyDateInput.text = stockAnalysisOldestCommonBuyDate(rows)
+        stockAnalysisBuyError.text = ""
+        stockAnalysisBuyDialog.open()
+    }
+
+
+    function currentStockAnalysisConfigName() {
+        if (selectedStockAnalysisConfigIndex >= 0
+                && selectedStockAnalysisConfigIndex < stockAnalysisConfigModel.count)
+            return stockAnalysisConfigModel.get(selectedStockAnalysisConfigIndex).name || ""
+        return stockAnalysisConfigNameInput.text.trim()
+    }
+
+    function buySelectedStockAnalysisStocks() {
+        let amount = parseDecimal(stockAnalysisBuyAmountInput.text)
+        let buyDate = stockAnalysisBuyDateInput.text.trim()
+        if (amount <= 0) {
+            stockAnalysisBuyError.text = "Bitte einen Betrag groesser 0 eintragen"
+            return
+        }
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(buyDate)) {
+            stockAnalysisBuyError.text = "Datum bitte als JJJJ-MM-TT eintragen"
+            return
+        }
+
+        let saved = 0
+        let analysisConfigName = currentStockAnalysisConfigName()
+        stockAnalysisBuyDialog.stocks.forEach(stock => {
+            let entryPrice = Number(dbManager.closePriceOnOrBefore(stock.symbol, buyDate) || 0)
+            if (entryPrice <= 0)
+                entryPrice = Number(stock.firstcloseprice || stock.lastcloseprice || 0)
+            let currentPrice = Number(stock.lastcloseprice || entryPrice)
+            let quantity = entryPrice > 0 ? amount / entryPrice : 0
+            let gainPercent = entryPrice > 0 ? (currentPrice - entryPrice) / entryPrice * 100 : 0
+            let ok = dbManager.saveBoughtStock(
+                stock.symbol,
+                stock.name,
+                buyDate,
+                "",
+                currentPrice,
+                entryPrice,
+                gainPercent,
+                0,
+                quantity,
+                analysisConfigName
+            )
+            if (ok)
+                saved++
+        })
+
+        stockAnalysisBuyDialog.close()
+        stockAnalysisMessage = saved + " von " + stockAnalysisBuyDialog.stocks.length + " Positionen gekauft"
+        loadBoughtStocks()
+        loadTestPortfolio("")
+    }
+
     function selectStockAnalysisResult(rowIndex) {
         if (rowIndex < 0 || rowIndex >= stockAnalysisResultModel.count)
             return
@@ -1510,9 +1778,10 @@ ApplicationWindow {
         selectedStockAnalysisIndex = rowIndex
         stockAnalysisStockSelected = true
         let stock = stockAnalysisResultModel.get(rowIndex)
-        let quotes = dbManager.getQuoteDetails(stock.symbol, 1, 90)
+        let quotes = dbManager.getQuoteDetails(stock.symbol, 1, stockAnalysisQuoteCount)
         stockAnalysisQuoteModel.clear()
         quotes.forEach(row => stockAnalysisQuoteModel.append(row))
+        updateStockAnalysisQuoteDateRangeText()
         updateStockAnalysisCorridorStats()
         stockAnalysisChart.requestPaint()
     }
@@ -2062,126 +2331,60 @@ ApplicationWindow {
                     }
                 }
 
-                GridLayout {
+                GroupBox {
+                    title: "Depotstammdaten"
                     Layout.fillWidth: true
-                    columns: 5
-                    columnSpacing: 6
-                    rowSpacing: 6
+                    Layout.preferredHeight: 150
 
-                    Button {
-                        text: "IBKR Batch starten"
-                        Layout.preferredWidth: 118
-                        font.pixelSize: 11
-                        enabled: dbManager.ibkrConnected && !dbManager.ibkrDataLoading && !dbManager.ibkrBatchActive
-                        onClicked: dbManager.startIbkrBatch()
-                    }
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 4
+                        spacing: 18
 
-                    Button {
-                        text: "IBKR Batch stoppen"
-                        Layout.preferredWidth: 118
-                        font.pixelSize: 11
-                        enabled: dbManager.ibkrBatchActive
-                        onClicked: dbManager.stopIbkrBatch()
-                    }
+                        GridLayout {
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignTop
+                            columns: 4
+                            columnSpacing: 18
+                            rowSpacing: 6
 
-                    Button {
-                        text: "IBKR Get Quotes starten"
-                        Layout.preferredWidth: 132
-                        font.pixelSize: 11
-                        enabled: dbManager.ibkrConnected && !dbManager.ibkrDataLoading
-                            && !dbManager.ibkrBatchActive && !dbManager.ibkrNameCheckBatchActive
-                            && !dbManager.ibkrGetStocksActive
-                        onClicked: dbManager.startIbkrGetStocks()
-                    }
+                            Label { text: "Depot"; color: "#475569"; Layout.preferredWidth: 130 }
+                            Label { text: "Gekaufte Positionen"; font.bold: true; Layout.preferredWidth: 180 }
+                            Label { text: "Positionen"; color: "#475569"; Layout.preferredWidth: 130 }
+                            Label { text: portfolioModel.count + " gesamt, " + portfolioStatusCount(false) + " aktiv"; font.bold: true; Layout.preferredWidth: 180 }
 
-                    Button {
-                        text: "IBKR Get Quotes stoppen"
-                        Layout.preferredWidth: 132
-                        font.pixelSize: 11
-                        enabled: dbManager.ibkrGetStocksActive
-                        onClicked: dbManager.stopIbkrGetStocks()
-                    }
+                            Label { text: "Depotwert"; color: "#475569"; Layout.preferredWidth: 130 }
+                            Label { text: portfolioTotalCurrentValue().toLocaleString(Qt.locale(), "f", 2); font.bold: true; Layout.preferredWidth: 180 }
+                            Label { text: "Investiert"; color: "#475569"; Layout.preferredWidth: 130 }
+                            Label { text: portfolioTotalEntryValue().toLocaleString(Qt.locale(), "f", 2); font.bold: true; Layout.preferredWidth: 180 }
 
-                    Button {
-                        text: "Marketstack Set Exchange starten"
-                        Layout.preferredWidth: 154
-                        font.pixelSize: 11
-                        enabled: !dbManager.yahooFundamentalsBatchActive
-                            && !dbManager.marketstackBatchActive
-                            && !dbManager.marketstackQuotesBatchActive
-                            && !dbManager.marketstackValidationBatchActive
-                        onClicked: dbManager.startMarketstackBatch()
-                    }
+                            Label { text: "Gewinn/Verlust"; color: "#475569"; Layout.preferredWidth: 130 }
+                            Label {
+                                text: portfolioTotalGainValue().toLocaleString(Qt.locale(), "f", 2) + " / " + portfolioPerformancePercent().toLocaleString(Qt.locale(), "f", 2) + " %"
+                                font.bold: true
+                                color: portfolioTotalGainValue() >= 0 ? "#15803d" : "#b91c1c"
+                                Layout.preferredWidth: 180
+                            }
+                            Label { text: "Datenstatus"; color: "#475569"; Layout.preferredWidth: 130 }
+                            Label {
+                                text: dbManager.ibkrConnected ? "IBKR verbunden" : cleanDisplayText(dbManager.ibkrConnectionStatus || "IBKR getrennt")
+                                font.bold: dbManager.ibkrConnected
+                                color: dbManager.ibkrConnected ? "#15803d" : "#475569"
+                                Layout.preferredWidth: 260
+                                elide: Text.ElideRight
+                            }
+                        }
 
-                    Button {
-                        text: "Marketstack Set Exchange stoppen"
-                        Layout.preferredWidth: 154
-                        font.pixelSize: 11
-                        enabled: dbManager.marketstackBatchActive
-                        onClicked: dbManager.stopMarketstackBatch()
-                    }
+                        ColumnLayout {
+                            Layout.alignment: Qt.AlignRight | Qt.AlignBottom
+                            spacing: 8
 
-                    Button {
-                        text: "Marketstack Get Quotes starten"
-                        Layout.preferredWidth: 154
-                        font.pixelSize: 11
-                        enabled: !dbManager.yahooFundamentalsBatchActive
-                            && !dbManager.marketstackBatchActive
-                            && !dbManager.marketstackQuotesBatchActive
-                            && !dbManager.marketstackValidationBatchActive
-                        onClicked: dbManager.startMarketstackQuotesBatch()
-                    }
-
-                    Button {
-                        text: "Marketstack Get Quotes stoppen"
-                        Layout.preferredWidth: 154
-                        font.pixelSize: 11
-                        enabled: dbManager.marketstackQuotesBatchActive
-                        onClicked: dbManager.stopMarketstackQuotesBatch()
-                    }
-
-                    Button {
-                        text: "Marketstack Validate starten"
-                        Layout.preferredWidth: 154
-                        font.pixelSize: 11
-                        enabled: !dbManager.yahooFundamentalsBatchActive
-                            && !dbManager.marketstackBatchActive
-                            && !dbManager.marketstackQuotesBatchActive
-                            && !dbManager.marketstackValidationBatchActive
-                        onClicked: dbManager.startMarketstackValidationBatch()
-                    }
-
-                    Button {
-                        text: "Marketstack Validate stoppen"
-                        Layout.preferredWidth: 154
-                        font.pixelSize: 11
-                        enabled: dbManager.marketstackValidationBatchActive
-                        onClicked: dbManager.stopMarketstackValidationBatch()
-                    }
-
-                    Button {
-                        text: "Yahoo Batch starten"
-                        Layout.preferredWidth: 118
-                        font.pixelSize: 11
-                        enabled: !dbManager.fundamentalDataLoading
-                            && !dbManager.yahooFundamentalsBatchActive
-                            && !dbManager.marketstackBatchActive
-                            && !dbManager.marketstackQuotesBatchActive
-                            && !dbManager.marketstackValidationBatchActive
-                        onClicked: dbManager.startYahooFundamentalsBatch()
-                    }
-
-                    Button {
-                        text: "Yahoo Batch stoppen"
-                        Layout.preferredWidth: 118
-                        font.pixelSize: 11
-                        enabled: dbManager.yahooFundamentalsBatchActive
-                        onClicked: dbManager.stopYahooFundamentalsBatch()
-                    }
-
-                    Label {
-                        text: "(IBKR) API   Â·   (mock) Testwert   Â·   (db) Datenbank"
-                        color: "#475569"
+                            Button {
+                                text: "Konfiguration Par."
+                                Layout.preferredWidth: 132
+                                onClicked: portfolioBatchWindow.show()
+                            }
+                        }
                     }
                 }
 
@@ -2197,7 +2400,8 @@ ApplicationWindow {
                     spacing: 12
 
                     Rectangle {
-                        Layout.preferredWidth: 360
+                        Layout.fillWidth: true
+                        Layout.preferredWidth: Math.max(1, portfolioWindow.width * 0.75)
                         Layout.fillHeight: true
                         color: "#ffffff"
                         border.color: "#c9d0d5"
@@ -2221,6 +2425,25 @@ ApplicationWindow {
                                 color: "#c9d0d5"
                             }
 
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 1
+                                Label { text: "Name"; Layout.fillWidth: true; font.bold: true; leftPadding: 10 }
+                                Label { text: "Gesamtwert"; Layout.preferredWidth: 120; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { text: "Gewinn (%)"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { text: "Einstiegswert"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { text: "20 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { text: "40 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { text: "60 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { text: "90 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight; rightPadding: 10 }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 1
+                                color: "#c9d0d5"
+                            }
+
                             ListView {
                                 id: portfolioListView
                                 Layout.fillWidth: true
@@ -2232,38 +2455,32 @@ ApplicationWindow {
 
                                 delegate: Rectangle {
                                     width: ListView.view.width
-                                    height: 62
+                                    height: 36
                                     color: selectedPortfolioIndex === index
                                         ? "#dbeafe"
                                         : (index % 2 === 0 ? "#ffffff" : "#f8fafc")
 
-                                    ColumnLayout {
+                                    RowLayout {
                                         anchors.fill: parent
-                                        anchors.leftMargin: 10
-                                        anchors.rightMargin: 10
-                                        spacing: 2
-
-                                        RowLayout {
-                                            Layout.fillWidth: true
-                                            Label {
-                                                text: model.symbol
-                                                font.bold: true
-                                                Layout.preferredWidth: 105
-                                                elide: Text.ElideRight
-                                            }
-                                            Label {
-                                                text: Number(model.currentValue || 0).toLocaleString(Qt.locale(), "f", 2)
-                                                horizontalAlignment: Text.AlignRight
-                                                Layout.fillWidth: true
-                                            }
-                                        }
+                                        spacing: 1
 
                                         Label {
-                                            text: model.name
-                                            color: "#475569"
+                                            text: cleanDisplayText(model.name || model.symbol || "")
                                             Layout.fillWidth: true
+                                            leftPadding: 10
                                             elide: Text.ElideRight
                                         }
+                                        Label {
+                                            text: portfolioPositionTotalValue(model).toLocaleString(Qt.locale(), "f", 2)
+                                            Layout.preferredWidth: 120
+                                            horizontalAlignment: Text.AlignRight
+                                        }
+                                        Label { text: formatPercentValue(model.valueIncreasePercent); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                        Label { text: Number(model.entryValue || 0).toLocaleString(Qt.locale(), "f", 2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
+                                        Label { text: formatPercentValue(model.days20ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                        Label { text: formatPercentValue(model.days40ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                        Label { text: formatPercentValue(model.days60ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                        Label { text: formatPercentValue(model.days90ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight; rightPadding: 10 }
                                     }
 
                                     MouseArea {
@@ -2300,7 +2517,7 @@ ApplicationWindow {
                     }
 
                     Rectangle {
-                        Layout.fillWidth: true
+                        Layout.preferredWidth: Math.max(1, portfolioWindow.width * 0.25)
                         Layout.fillHeight: true
                         color: "#ffffff"
                         border.color: "#c9d0d5"
@@ -2311,21 +2528,46 @@ ApplicationWindow {
                             anchors.margins: 1
                             spacing: 0
 
-                            RowLayout {
+                            ColumnLayout {
                                 Layout.fillWidth: true
-                                Layout.preferredHeight: 56
+                                Layout.preferredHeight: 88
                                 Layout.leftMargin: 12
                                 Layout.rightMargin: 12
+                                Layout.topMargin: 8
+                                Layout.bottomMargin: 7
+                                spacing: 0
 
-                                Label {
-                                    text: selectedPortfolioValue("symbol") || "Keine Position"
-                                    font.pixelSize: 18
+                                TextField {
+                                    text: selectedPortfolioValue("isin") || "Keine ISIN"
+                                    readOnly: true
+                                    selectByMouse: true
+                                    font.pixelSize: 16
                                     font.bold: true
+                                    Layout.fillWidth: true
+                                    leftPadding: 0
+                                    rightPadding: 0
+                                    topPadding: 0
+                                    bottomPadding: 0
+                                    background: null
                                 }
 
                                 Label {
-                                    text: selectedPortfolioValue("name")
+                                    text: cleanDisplayText(selectedPortfolioValue("name"))
+                                    color: "#1f2937"
+                                    font.pixelSize: 14
+                                    font.bold: true
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                }
+
+                                Item { Layout.preferredHeight: 6 }
+
+                                Label {
+                                    text: selectedPortfolioValue("analysisConfigName")
+                                        ? cleanDisplayText("(Analyse:" + selectedPortfolioValue("analysisConfigName") + ")")
+                                        : "(Analyse:-)"
                                     color: "#475569"
+                                    font.italic: true
                                     Layout.fillWidth: true
                                     elide: Text.ElideRight
                                 }
@@ -2351,7 +2593,7 @@ ApplicationWindow {
 
                                         delegate: Rectangle {
                                             width: parent.width
-                                            height: modelData.heading ? 40 : 34
+                                            height: modelData.heading ? 40 : (modelData.key === "name" || modelData.key === "analysisConfigName" ? 46 : 34)
                                             color: modelData.heading
                                                 ? "#e5e7eb"
                                                 : (index % 2 === 0 ? "#ffffff" : "#f8fafc")
@@ -2376,7 +2618,7 @@ ApplicationWindow {
                                                 Label {
                                                     text: portfolioFieldLabel(modelData.key, modelData.label)
                                                     color: "#475569"
-                                                    Layout.preferredWidth: 280
+                                                    Layout.preferredWidth: 135
                                                     elide: Text.ElideRight
                                                 }
 
@@ -2384,7 +2626,9 @@ ApplicationWindow {
                                                     text: formatPortfolioValue(modelData.key, modelData.format || "")
                                                     readOnly: true
                                                     Layout.fillWidth: true
+                                                    Layout.fillHeight: true
                                                     horizontalAlignment: Text.AlignLeft
+                                                    verticalAlignment: Text.AlignVCenter
                                                     selectByMouse: true
                                                     activeFocusOnTab: true
                                                     leftPadding: 0
@@ -2393,6 +2637,9 @@ ApplicationWindow {
                                                     bottomPadding: 0
                                                     background: null
                                                     clip: true
+                                                    wrapMode: modelData.key === "name" || modelData.key === "analysisConfigName" ? TextInput.Wrap : TextInput.NoWrap
+                                                    Component.onCompleted: cursorPosition = 0
+                                                    onTextChanged: cursorPosition = 0
                                                 }
                                             }
                                         }
@@ -2616,10 +2863,10 @@ ApplicationWindow {
     Window {
         id: stockAnalysisWindow
         title: "Stock Analyse"
-        width: 1500
-        height: 1160
-        minimumWidth: 980
-        minimumHeight: 1040
+        width: 1600
+        height: 1220
+        minimumWidth: 1200
+        minimumHeight: 1100
 
         onVisibleChanged: {
             if (visible) {
@@ -2643,9 +2890,9 @@ ApplicationWindow {
                 GroupBox {
                     title: "Suchparameter"
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 270
-                    Layout.minimumHeight: 270
-                    clip: true
+                    Layout.preferredHeight: 310
+                    Layout.minimumHeight: 300
+                    clip: false
 
                     RowLayout {
                         anchors.fill: parent
@@ -2653,8 +2900,8 @@ ApplicationWindow {
                         spacing: 12
 
                         Rectangle {
-                            Layout.preferredWidth: Math.max(220, stockAnalysisWindow.width * 0.18)
-                            Layout.maximumWidth: Math.max(220, stockAnalysisWindow.width * 0.18)
+                            Layout.preferredWidth: Math.max(300, stockAnalysisWindow.width * 0.22)
+                            Layout.maximumWidth: Math.max(300, stockAnalysisWindow.width * 0.22)
                             Layout.fillHeight: true
                             Layout.alignment: Qt.AlignTop
                             color: "#ffffff"
@@ -2692,7 +2939,8 @@ ApplicationWindow {
 
                                 Rectangle {
                                     Layout.fillWidth: true
-                                    Layout.fillHeight: true
+                                    Layout.preferredHeight: 130
+                                    Layout.maximumHeight: 130
                                     color: "#ffffff"
                                     border.color: "#d3d8dc"
                                     radius: 4
@@ -2733,8 +2981,9 @@ ApplicationWindow {
                                                     text: Number(model.increasePercent || 0).toFixed(0) + "% / "
                                                         + Number(model.corridorPercent === undefined ? 10 : model.corridorPercent).toFixed(0) + "% / "
                                                         + Number(model.corridorRequiredPercent === undefined ? 0 : model.corridorRequiredPercent).toFixed(0) + "% / "
+                                                        + Number(model.quoteCount === undefined ? 90 : model.quoteCount).toFixed(0) + " / "
                                                         + Number(model.maxDrawdownPercent === undefined ? 10 : model.maxDrawdownPercent).toFixed(0) + "%"
-                                                    Layout.preferredWidth: 132
+                                                    Layout.preferredWidth: 210
                                                     horizontalAlignment: Text.AlignRight
                                                     color: "#475569"
                                                 }
@@ -2904,6 +3153,54 @@ ApplicationWindow {
                                 }
 
                                 Label {
+                                    text: "Anzahl Kurswerte"
+                                    Layout.preferredWidth: 330
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Layout.preferredWidth: 360
+                                    spacing: 8
+
+                                    Slider {
+                                        id: stockAnalysisQuoteCountSlider
+                                        from: 10
+                                        to: 90
+                                        stepSize: 10
+                                        snapMode: Slider.SnapAlways
+                                        live: true
+                                        value: stockAnalysisQuoteCount
+                                        Layout.fillWidth: true
+                                        onMoved: setStockAnalysisQuoteCount(value, false)
+                                        onValueChanged: {
+                                            if (pressed)
+                                                setStockAnalysisQuoteCount(value, false)
+                                        }
+                                        onPressedChanged: {
+                                            if (!pressed)
+                                                setStockAnalysisQuoteCount(value, true)
+                                        }
+                                    }
+
+                                    Label {
+                                        text: Number(stockAnalysisQuoteCount || 90).toFixed(0)
+                                        Layout.preferredWidth: 44
+                                        horizontalAlignment: Text.AlignRight
+                                    }
+                                }
+
+                                Label {
+                                    text: stockAnalysisStockSelected
+                                        ? stockAnalysisQuoteModel.count + " Werte" + (stockAnalysisQuoteDateRangeText.length > 0 ? " | " + stockAnalysisQuoteDateRangeText : "")
+                                        : "---"
+                                    Layout.preferredWidth: 220
+                                    horizontalAlignment: Text.AlignLeft
+                                    verticalAlignment: Text.AlignVCenter
+                                    font.bold: true
+                                    color: "#475569"
+                                }
+
+                                Label {
                                     text: "Größter Kursrückgang während Laufzeit"
                                     Layout.preferredWidth: 330
                                 }
@@ -2948,9 +3245,9 @@ ApplicationWindow {
                         }
 
                         ColumnLayout {
-                            Layout.fillHeight: true
-                            Layout.alignment: Qt.AlignRight
-                            spacing: 6
+                            Layout.alignment: Qt.AlignRight | Qt.AlignTop
+                            Layout.preferredWidth: 110
+                            spacing: 8
 
                             Button {
                                 text: stockAnalysisScanActive ? "Stoppen" : "Suchen"
@@ -2958,7 +3255,6 @@ ApplicationWindow {
                                 onClicked: stockAnalysisScanActive ? stopStockAnalysisScan() : startStockAnalysisScan()
                             }
 
-                            Item { Layout.fillHeight: true }
 
                             Button {
                                 text: "Neuanlage"
@@ -3019,15 +3315,41 @@ ApplicationWindow {
                                     : ScrollBar.AsNeeded
                             }
 
+                            Menu {
+                                id: stockAnalysisContextMenu
+                                MenuItem {
+                                    text: "Auswahl kaufen..."
+                                    enabled: selectedStockAnalysisRows.length > 0
+                                    onTriggered: openStockAnalysisBuyDialog()
+                                }
+                            }
+
                             delegate: Rectangle {
                                 width: ListView.view.width
                                 height: 34
-                                color: selectedStockAnalysisIndex === index ? "lightsteelblue" : (index % 2 === 0 ? "#ffffff" : "#eef2f4")
+                                color: stockAnalysisIndexSelected(index)
+                                    ? "lightsteelblue"
+                                    : (index % 2 === 0 ? "#ffffff" : "#eef2f4")
 
                                 MouseArea {
                                     anchors.fill: parent
                                     z: 0
-                                    onClicked: selectStockAnalysisResult(index)
+                                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                    onClicked: function(mouse) {
+                                        if (mouse.button === Qt.RightButton) {
+                                            if (!stockAnalysisIndexSelected(index))
+                                                selectSingleStockAnalysisRow(index)
+                                            stockAnalysisContextMenu.popup()
+                                            return
+                                        }
+
+                                        if (mouse.modifiers & Qt.ShiftModifier)
+                                            selectStockAnalysisRange(index, mouse.modifiers & Qt.ControlModifier)
+                                        else if (mouse.modifiers & Qt.ControlModifier)
+                                            toggleStockAnalysisRow(index)
+                                        else
+                                            selectSingleStockAnalysisRow(index)
+                                    }
                                 }
 
                                 RowLayout {
@@ -3045,7 +3367,7 @@ ApplicationWindow {
                                         background: null
                                         color: "#111827"
                                     }
-                                    Label { text: model.name || ""; Layout.preferredWidth: 340; elide: Text.ElideRight }
+                                    Label { text: cleanDisplayText(model.name || ""); Layout.preferredWidth: 340; elide: Text.ElideRight }
                                     Label { text: model.periodturnover ? Number(model.periodturnover).toLocaleString(Qt.locale("de_DE"), "f", 0) : "-"; Layout.preferredWidth: 150; horizontalAlignment: Text.AlignRight }
                                     Label { text: model.peratio ? Number(model.peratio).toFixed(2) : "-"; Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
                                     Label { text: model.quotecount || 0; Layout.preferredWidth: 80; horizontalAlignment: Text.AlignRight }
@@ -3062,10 +3384,11 @@ ApplicationWindow {
                 GroupBox {
                     title: selectedStockAnalysisIndex >= 0
                         ? "Darstellung: " + stockAnalysisResultModel.get(selectedStockAnalysisIndex).name
+                            + (stockAnalysisQuoteDateRangeText.length > 0 ? " (" + stockAnalysisQuoteDateRangeText + ")" : "")
                         : "Darstellung"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    Layout.minimumHeight: stockAnalysisWindow.height * 0.5
+                    Layout.minimumHeight: stockAnalysisWindow.height * 0.42
 
                     Canvas {
                         id: stockAnalysisChart
@@ -3411,6 +3734,140 @@ ApplicationWindow {
                     color: stockAnalysisMessage.indexOf("ungueltig") >= 0 ? "#b91c1c" : "#475569"
                     elide: Text.ElideRight
                     verticalAlignment: Text.AlignVCenter
+                }
+            }
+        }
+    }
+
+
+    Window {
+        id: stockAnalysisBuyDialog
+        title: "Auswahl kaufen"
+        width: 460
+        height: 250
+        minimumWidth: 420
+        minimumHeight: 240
+        flags: Qt.Dialog
+        modality: Qt.ApplicationModal
+        visible: false
+        property var stocks: []
+
+        function open() {
+            x = stockAnalysisWindow.x + Math.max(20, (stockAnalysisWindow.width - width) / 2)
+            y = stockAnalysisWindow.y + Math.max(20, (stockAnalysisWindow.height - height) / 2)
+            show()
+            raise()
+            requestActivate()
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#f4f6f7"
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 14
+                spacing: 10
+
+                Label {
+                    text: stockAnalysisBuyDialog.stocks.length + " Stock(s) ausgewaehlt"
+                    font.bold: true
+                    Layout.fillWidth: true
+                }
+
+                Label { text: "Betrag pro Stock" }
+                TextField {
+                    id: stockAnalysisBuyAmountInput
+                    Layout.fillWidth: true
+                    horizontalAlignment: Text.AlignRight
+                    selectByMouse: true
+                    inputMethodHints: Qt.ImhFormattedNumbersOnly
+                }
+
+                Label { text: "Kaufdatum" }
+                TextField {
+                    id: stockAnalysisBuyDateInput
+                    Layout.fillWidth: true
+                    selectByMouse: true
+                    placeholderText: "JJJJ-MM-TT"
+                }
+
+                Label {
+                    id: stockAnalysisBuyError
+                    Layout.fillWidth: true
+                    color: "#b91c1c"
+                    wrapMode: Text.WordWrap
+                }
+
+                Item { Layout.fillHeight: true }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Item { Layout.fillWidth: true }
+                    Button {
+                        text: "Abbrechen"
+                        onClicked: stockAnalysisBuyDialog.close()
+                    }
+                    Button {
+                        text: "Kaufen"
+                        onClicked: buySelectedStockAnalysisStocks()
+                    }
+                }
+            }
+        }
+    }
+
+
+    Window {
+        id: portfolioBatchWindow
+        title: "Depot-Batchaufrufe"
+        width: 760
+        height: 430
+        minimumWidth: 680
+        minimumHeight: 360
+
+        Rectangle {
+            anchors.fill: parent
+            color: "#f4f6f7"
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 10
+
+                Label {
+                    text: "Batchaufrufe"
+                    font.pixelSize: 20
+                    font.bold: true
+                }
+
+                GridLayout {
+                    Layout.fillWidth: true
+                    columns: 2
+                    columnSpacing: 8
+                    rowSpacing: 8
+
+                    Button { text: "IBKR Batch starten"; Layout.fillWidth: true; enabled: dbManager.ibkrConnected && !dbManager.ibkrDataLoading && !dbManager.ibkrBatchActive; onClicked: dbManager.startIbkrBatch() }
+                    Button { text: "IBKR Batch stoppen"; Layout.fillWidth: true; enabled: dbManager.ibkrBatchActive; onClicked: dbManager.stopIbkrBatch() }
+                    Button { text: "IBKR Get Quotes starten"; Layout.fillWidth: true; enabled: dbManager.ibkrConnected && !dbManager.ibkrDataLoading && !dbManager.ibkrBatchActive && !dbManager.ibkrNameCheckBatchActive && !dbManager.ibkrGetStocksActive; onClicked: dbManager.startIbkrGetStocks() }
+                    Button { text: "IBKR Get Quotes stoppen"; Layout.fillWidth: true; enabled: dbManager.ibkrGetStocksActive; onClicked: dbManager.stopIbkrGetStocks() }
+                    Button { text: "Marketstack Set Exchange starten"; Layout.fillWidth: true; enabled: !dbManager.yahooFundamentalsBatchActive && !dbManager.marketstackBatchActive && !dbManager.marketstackQuotesBatchActive && !dbManager.marketstackValidationBatchActive; onClicked: dbManager.startMarketstackBatch() }
+                    Button { text: "Marketstack Set Exchange stoppen"; Layout.fillWidth: true; enabled: dbManager.marketstackBatchActive; onClicked: dbManager.stopMarketstackBatch() }
+                    Button { text: "Marketstack Get Quotes starten"; Layout.fillWidth: true; enabled: !dbManager.yahooFundamentalsBatchActive && !dbManager.marketstackBatchActive && !dbManager.marketstackQuotesBatchActive && !dbManager.marketstackValidationBatchActive; onClicked: dbManager.startMarketstackQuotesBatch() }
+                    Button { text: "Marketstack Get Quotes stoppen"; Layout.fillWidth: true; enabled: dbManager.marketstackQuotesBatchActive; onClicked: dbManager.stopMarketstackQuotesBatch() }
+                    Button { text: "Marketstack Validate starten"; Layout.fillWidth: true; enabled: !dbManager.yahooFundamentalsBatchActive && !dbManager.marketstackBatchActive && !dbManager.marketstackQuotesBatchActive && !dbManager.marketstackValidationBatchActive; onClicked: dbManager.startMarketstackValidationBatch() }
+                    Button { text: "Marketstack Validate stoppen"; Layout.fillWidth: true; enabled: dbManager.marketstackValidationBatchActive; onClicked: dbManager.stopMarketstackValidationBatch() }
+                    Button { text: "Yahoo Batch starten"; Layout.fillWidth: true; enabled: !dbManager.fundamentalDataLoading && !dbManager.yahooFundamentalsBatchActive && !dbManager.marketstackBatchActive && !dbManager.marketstackQuotesBatchActive && !dbManager.marketstackValidationBatchActive; onClicked: dbManager.startYahooFundamentalsBatch() }
+                    Button { text: "Yahoo Batch stoppen"; Layout.fillWidth: true; enabled: dbManager.yahooFundamentalsBatchActive; onClicked: dbManager.stopYahooFundamentalsBatch() }
+                }
+
+                Label { text: "IBKR API \u00b7 Testwert \u00b7 Datenbank"; color: "#475569" }
+                Item { Layout.fillHeight: true }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Item { Layout.fillWidth: true }
+                    Button { text: "Schlie\u00dfen"; onClicked: portfolioBatchWindow.close() }
                 }
             }
         }
