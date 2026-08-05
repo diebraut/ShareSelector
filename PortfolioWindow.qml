@@ -1,4 +1,3 @@
-pragma ComponentBehavior: Bound
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
@@ -210,18 +209,17 @@ Window {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
                                 clip: true
-                                model: portfolioModel
+                                model: app.sortedPortfolioRows()
                                 currentIndex: app.selectedPortfolioIndex
                                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
                                 delegate: Rectangle {
                                     id: portfolioPositionDelegate
                                     required property int index
-                                    property var rowData: portfolioWindow.portfolioModel && index >= 0 && index < portfolioWindow.portfolioModel.count
-                                        ? portfolioWindow.portfolioModel.get(index)
-                                        : ({})
+                                    required property var modelData
+                                    property var rowData: modelData || ({})
 
-                                    width: portfolioListView.width
+                                    width: ListView.view ? ListView.view.width : 0
                                     height: 36
                                     color: portfolioWindow.app.selectedPortfolioIndex === portfolioPositionDelegate.index
                                         ? "#dbeafe"
@@ -367,38 +365,42 @@ Window {
                                         model: portfolioFields
 
                                         delegate: Rectangle {
+                                            id: portfolioFieldDelegate
+                                            required property int index
+                                            required property var modelData
+
                                             width: parent.width
-                                            height: modelData.heading ? 40 : (modelData.key === "name" || modelData.key === "analysisConfigName" ? 46 : 34)
-                                            color: modelData.heading
+                                            height: portfolioFieldDelegate.modelData.heading ? 40 : (portfolioFieldDelegate.modelData.key === "name" || portfolioFieldDelegate.modelData.key === "analysisConfigName" ? 46 : 34)
+                                            color: portfolioFieldDelegate.modelData.heading
                                                 ? "#e5e7eb"
-                                                : (index % 2 === 0 ? "#ffffff" : "#f8fafc")
+                                                : (portfolioFieldDelegate.index % 2 === 0 ? "#ffffff" : "#f8fafc")
 
                                             Label {
-                                                visible: Boolean(modelData.heading)
+                                                visible: Boolean(portfolioFieldDelegate.modelData.heading)
                                                 anchors.fill: parent
                                                 anchors.leftMargin: 10
                                                 verticalAlignment: Text.AlignVCenter
-                                                text: app.portfolioHeadingLabel(modelData.label)
+                                                text: app.portfolioHeadingLabel(portfolioFieldDelegate.modelData.label)
                                                 font.bold: true
                                                 color: "#1f2937"
                                             }
 
                                             RowLayout {
-                                                visible: !modelData.heading
+                                                visible: !portfolioFieldDelegate.modelData.heading
                                                 anchors.fill: parent
                                                 anchors.leftMargin: 10
                                                 anchors.rightMargin: 10
                                                 spacing: 12
 
                                                 Label {
-                                                    text: app.portfolioFieldLabel(modelData.key, modelData.label)
+                                                    text: app.portfolioFieldLabel(portfolioFieldDelegate.modelData.key, portfolioFieldDelegate.modelData.label)
                                                     color: "#475569"
                                                     Layout.preferredWidth: 135
                                                     elide: Text.ElideRight
                                                 }
 
                                                 TextField {
-                                                    text: app.formatPortfolioValue(modelData.key, modelData.format || "")
+                                                    text: app.formatPortfolioValue(portfolioFieldDelegate.modelData.key, portfolioFieldDelegate.modelData.format || "")
                                                     readOnly: true
                                                     Layout.fillWidth: true
                                                     Layout.fillHeight: true
@@ -413,7 +415,7 @@ Window {
                                                     bottomPadding: 0
                                                     background: null
                                                     clip: true
-                                                    wrapMode: modelData.key === "name" || modelData.key === "analysisConfigName" ? TextInput.Wrap : TextInput.NoWrap
+                                                    wrapMode: portfolioFieldDelegate.modelData.key === "name" || portfolioFieldDelegate.modelData.key === "analysisConfigName" ? TextInput.Wrap : TextInput.NoWrap
                                                     Component.onCompleted: cursorPosition = 0
                                                     onTextChanged: cursorPosition = 0
                                                 }
