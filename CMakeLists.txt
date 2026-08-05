@@ -61,10 +61,22 @@ qt_add_qml_module(appShareSelector
     QML_FILES
         Main.qml  # Groß-/Kleinschreibung prüfen!
         PortfolioChartWindow.qml
+        PortfolioWindow.qml
         StockAnalysisConfigPanel.qml
+        StockAnalysisChartPanel.qml
+        StockAnalysisBuyDialog.qml
+        PortfolioBatchWindow.qml
     SOURCES
         databasemanager.cpp
+        databasemanager_state.cpp
+        databasemanager_ibkr.cpp
+        databasemanager_marketstack.cpp
+        databasemanager_fundamentals.cpp
+        databasemanager_portfolio.cpp
+        databasemanager_stockanalysis.cpp
+        databasemanager_quoteimport.cpp
         databasemanager.h
+        databasemanager_internal.h
         alphavantageclient.h
         alphavantageclient.cpp
         yahoofinanceclient.h
