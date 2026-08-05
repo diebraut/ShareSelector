@@ -137,13 +137,6 @@ Window {
                         Layout.columnSpan: 4
                         Layout.fillWidth: true
                     }
-
-                    Button {
-                        text: "Jetzt ausfÃ¼hren"
-                        Layout.fillWidth: true
-                        enabled: app.canRequestIbkrQuoteBatchStart()
-                        onClicked: app.startIbkrQuoteBatchFromSchedule(true)
-                    }
                 }
 
                 Rectangle {
@@ -164,10 +157,12 @@ Window {
                     columnSpacing: 8
                     rowSpacing: 8
 
-                    Button { text: "IBKR Batch starten"; Layout.fillWidth: true; enabled: dbManager.ibkrConnected && !dbManager.ibkrDataLoading && !dbManager.ibkrBatchActive; onClicked: dbManager.startIbkrBatch() }
-                    Button { text: "IBKR Batch stoppen"; Layout.fillWidth: true; enabled: dbManager.ibkrBatchActive; onClicked: dbManager.stopIbkrBatch() }
-                    Button { text: "IBKR Get Quotes starten"; Layout.fillWidth: true; enabled: app.canStartIbkrQuoteBatch(); onClicked: dbManager.startIbkrGetStocks() }
-                    Button { text: "IBKR Get Quotes stoppen"; Layout.fillWidth: true; enabled: dbManager.ibkrGetStocksActive; onClicked: dbManager.stopIbkrGetStocks() }
+                    Button { text: "Get New Quotes for Depot starten"; Layout.fillWidth: true; enabled: app.canStartIbkrQuoteBatch(); onClicked: dbManager.startIbkrGetStocks() }
+                    Button { text: "Get New Quotes for Depot stoppen"; Layout.fillWidth: true; enabled: dbManager.ibkrGetStocksActive && dbManager.ibkrGetStocksBatchName === "Get New Quotes for Depot"; onClicked: dbManager.stopIbkrGetStocks() }
+                    Button { text: "Get new Quotes for IBKR Data starten"; Layout.fillWidth: true; enabled: app.canStartIbkrQuoteBatch(); onClicked: dbManager.startIbkrGetAllStocks() }
+                    Button { text: "Get new Quotes for IBKR Data stoppen"; Layout.fillWidth: true; enabled: dbManager.ibkrGetStocksActive && dbManager.ibkrGetStocksBatchName === "Get new Quotes for IBKR Data"; onClicked: dbManager.stopIbkrGetStocks() }
+                    Button { text: "IBKR Stammdaten Batch starten"; Layout.fillWidth: true; enabled: dbManager.ibkrConnected && !dbManager.ibkrBatchActive && !dbManager.ibkrNameCheckBatchActive && !dbManager.ibkrGetStocksActive; onClicked: dbManager.startIbkrBatch() }
+                    Button { text: "IBKR Stammdaten Batch stoppen"; Layout.fillWidth: true; enabled: dbManager.ibkrBatchActive; onClicked: dbManager.stopIbkrBatch() }
                     Button { text: "Marketstack Set Exchange starten"; Layout.fillWidth: true; enabled: !dbManager.yahooFundamentalsBatchActive && !dbManager.marketstackBatchActive && !dbManager.marketstackQuotesBatchActive && !dbManager.marketstackValidationBatchActive; onClicked: dbManager.startMarketstackBatch() }
                     Button { text: "Marketstack Set Exchange stoppen"; Layout.fillWidth: true; enabled: dbManager.marketstackBatchActive; onClicked: dbManager.stopMarketstackBatch() }
                     Button { text: "Marketstack Get Quotes starten"; Layout.fillWidth: true; enabled: !dbManager.yahooFundamentalsBatchActive && !dbManager.marketstackBatchActive && !dbManager.marketstackQuotesBatchActive && !dbManager.marketstackValidationBatchActive; onClicked: dbManager.startMarketstackQuotesBatch() }

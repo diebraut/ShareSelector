@@ -49,7 +49,7 @@ function Is-Otc([string]$exchange) {
 $sql = @'
 SELECT "Symbol", "ISIN", "Name", "marketplace_sym", "marketplace_exchange"
 FROM "Stocks"
-WHERE COALESCE("use_marketstack", FALSE) = TRUE
+WHERE COALESCE("from_IBKR", TRUE) = FALSE
   AND COALESCE("marketplace_sym", '') <> ''
 ORDER BY "Symbol";
 '@

@@ -28,7 +28,7 @@ void DatabaseManager::startMarketstackBatch()
     query.prepare(R"SQL(
         SELECT "Symbol"
         FROM "Stocks"
-        WHERE COALESCE("use_marketstack", FALSE) = TRUE
+        WHERE COALESCE("from_IBKR", TRUE) = FALSE
           AND COALESCE("marketplace_sym", '') = ''
         ORDER BY "Symbol"
     )SQL");
@@ -510,7 +510,7 @@ void DatabaseManager::startMarketstackQuotesBatch()
     query.prepare(R"SQL(
         SELECT s."Symbol"
         FROM "Stocks" s
-        WHERE COALESCE(s."use_marketstack", FALSE) = TRUE
+        WHERE COALESCE(s."from_IBKR", TRUE) = FALSE
           AND COALESCE(s."marketplace_sym", '') <> ''
         ORDER BY s."Symbol"
     )SQL");
@@ -841,7 +841,7 @@ void DatabaseManager::startMarketstackValidationBatch()
     query.prepare(R"SQL(
         SELECT "Symbol"
         FROM "Stocks"
-        WHERE COALESCE("use_marketstack", FALSE) = TRUE
+        WHERE COALESCE("from_IBKR", TRUE) = FALSE
           AND COALESCE("marketplace_sym", '') <> ''
         ORDER BY "Symbol"
     )SQL");

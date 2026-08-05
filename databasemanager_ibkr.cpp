@@ -3,7 +3,9 @@
 
 #include <QCoreApplication>
 #include <QDate>
+#include <QDateTime>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QHostAddress>
 #include <QJsonArray>
@@ -13,13 +15,52 @@
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QSqlRecord>
+#include <QTextStream>
 #include <QTimer>
 
 using namespace DatabaseManagerInternal;
 
+namespace {
+QString csvField(QString value)
+{
+    value.replace(QLatin1Char('"'), QStringLiteral("\"\""));
+    return QStringLiteral("\"%1\"").arg(value);
+}
+
+void appendIbkrQuoteTimingLog(const QString &symbol,
+                              const QString &phase,
+                              qint64 elapsedMs,
+                              QProcess::ExitStatus exitStatus,
+                              bool parseOk,
+                              bool success,
+                              const QString &message)
+{
+    const QString logPath = QDir(QCoreApplication::applicationDirPath())
+        .filePath(QStringLiteral("ibkr_quote_timings.csv"));
+    const bool writeHeader = !QFileInfo::exists(logPath) || QFileInfo(logPath).size() == 0;
+    QFile file(logPath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        qWarning() << "IBKR-Timing-Log konnte nicht geschrieben werden:" << logPath << file.errorString();
+        return;
+    }
+
+    QTextStream stream(&file);
+    if (writeHeader)
+        stream << "timestamp,symbol,phase,elapsed_ms,elapsed_s,exit_status,parse_ok,success,message\n";
+    stream << csvField(QDateTime::currentDateTime().toString(Qt::ISODateWithMs)) << ','
+           << csvField(symbol) << ','
+           << csvField(phase) << ','
+           << elapsedMs << ','
+           << QString::number(elapsedMs / 1000.0, 'f', 3) << ','
+           << csvField(exitStatus == QProcess::NormalExit ? QStringLiteral("normal") : QStringLiteral("crash")) << ','
+           << (parseOk ? QStringLiteral("true") : QStringLiteral("false")) << ','
+           << (success ? QStringLiteral("true") : QStringLiteral("false")) << ','
+           << csvField(message.left(500)) << '\n';
+}
+}
 void DatabaseManager::startIbkrBatch()
 {
-    if (m_ibkrBatchActive || m_ibkrDataLoading)
+    if (m_ibkrBatchActive || m_ibkrDataLoading || m_ibkrNameCheckBatchActive)
         return;
 
     if (!m_ibkrConnected || m_ibkrConnectedPort == 0) {
@@ -123,7 +164,17 @@ void DatabaseManager::stopIbkrBatch()
 
 void DatabaseManager::startIbkrGetStocks()
 {
-    if (m_ibkrGetStocksBatchActive || m_ibkrDataLoading || m_ibkrBatchActive || m_ibkrNameCheckBatchActive)
+    startIbkrGetStocksBatch(true);
+}
+
+void DatabaseManager::startIbkrGetAllStocks()
+{
+    startIbkrGetStocksBatch(false);
+}
+
+void DatabaseManager::startIbkrGetStocksBatch(bool depotOnly)
+{
+    if (m_ibkrGetStocksBatchActive || m_ibkrDataLoading || m_ibkrNameCheckBatchActive)
         return;
 
     if (!m_ibkrConnected || m_ibkrConnectedPort == 0) {
@@ -135,20 +186,36 @@ void DatabaseManager::startIbkrGetStocks()
         return;
     }
 
+    m_ibkrGetStocksBatchName = depotOnly
+        ? QStringLiteral("Get New Quotes for Depot")
+        : QStringLiteral("Get new Quotes for IBKR Data");
+
     QSqlQuery query(db);
-    query.prepare(R"SQL(
-        SELECT DISTINCT s."Symbol"
-        FROM "Stocks" s
-        JOIN "BoughtStocks" b ON b."Symbol" = s."Symbol"
-        WHERE COALESCE(s."Symbol", '') <> ''
-          AND s."IBKRConId" IS NOT NULL
-          AND COALESCE(s."use_marketstack", FALSE) = FALSE
-          AND b."SellDate" IS NULL
-        ORDER BY s."Symbol"
-    )SQL");
+    if (depotOnly) {
+        query.prepare(R"SQL(
+            SELECT DISTINCT s."Symbol"
+            FROM "Stocks" s
+            JOIN "BoughtStocks" b ON b."Symbol" = s."Symbol"
+            WHERE COALESCE(s."Symbol", '') <> ''
+              AND s."IBKRConId" IS NOT NULL
+              AND COALESCE(s."from_IBKR", TRUE) = TRUE
+              AND b."SellDate" IS NULL
+            ORDER BY s."Symbol"
+        )SQL");
+    } else {
+        query.prepare(R"SQL(
+            SELECT DISTINCT s."Symbol"
+            FROM "Stocks" s
+            WHERE COALESCE(s."Symbol", '') <> ''
+              AND s."IBKRConId" IS NOT NULL
+              AND COALESCE(s."from_IBKR", TRUE) = TRUE
+            ORDER BY s."Symbol"
+        )SQL");
+    }
     if (!query.exec()) {
         setIbkrConnectionState(
-            QStringLiteral("Fehler: IBKR Get Quotes konnte die Depot-Aktienliste nicht laden: %1")
+            QStringLiteral("Fehler: %1 konnte die Aktienliste nicht laden: %2")
+                .arg(m_ibkrGetStocksBatchName)
                 .arg(query.lastError().text()),
             m_ibkrConnected,
             false);
@@ -160,31 +227,10 @@ void DatabaseManager::startIbkrGetStocks()
         m_ibkrGetStocksSymbols << query.value(0).toString();
 
     if (m_ibkrGetStocksSymbols.isEmpty()) {
-        query.prepare(R"SQL(
-            SELECT "Symbol"
-            FROM "Stocks"
-            WHERE COALESCE("Symbol", '') <> ''
-              AND "IBKRConId" IS NOT NULL
-              AND COALESCE("use_marketstack", FALSE) = FALSE
-              AND "IBKRQuoteExchangeLastSuccessAt" IS NULL
-              AND COALESCE("IBKRQuoteExchange", '') = ''
-            ORDER BY "Symbol"
-        )SQL");
-        if (!query.exec()) {
-            setIbkrConnectionState(
-                QStringLiteral("Fehler: IBKR Get Quotes konnte die Aktienliste nicht laden: %1")
-                    .arg(query.lastError().text()),
-                m_ibkrConnected,
-                false);
-            return;
-        }
-
-        while (query.next())
-            m_ibkrGetStocksSymbols << query.value(0).toString();
-    }
-
-    if (m_ibkrGetStocksSymbols.isEmpty()) {
-        setIbkrConnectionState(QStringLiteral("IBKR Get Quotes: Keine passenden Aktien mit IBKRConId gefunden."), m_ibkrConnected, false);
+        setIbkrConnectionState(
+            QStringLiteral("%1: Keine Aktien mit IBKRConId gefunden.").arg(m_ibkrGetStocksBatchName),
+            m_ibkrConnected,
+            false);
         return;
     }
 
@@ -192,8 +238,10 @@ void DatabaseManager::startIbkrGetStocks()
     m_ibkrGetStocksIndex = 0;
     m_ibkrGetStocksSuccessCount = 0;
     m_ibkrGetStocksFailureCount = 0;
+    m_ibkrGetStocksChangedQuoteCount = 0;
     setIbkrConnectionState(
-        QStringLiteral("IBKR Get Quotes gestartet: Fuer %1 Depot-Aktien werden Boerse und neue Quotes aktualisiert.")
+        QStringLiteral("%1 gestartet: Fuer %2 Aktien werden Quotes aktualisiert.")
+            .arg(m_ibkrGetStocksBatchName)
             .arg(m_ibkrGetStocksSymbols.size()),
         m_ibkrConnected,
         false);
@@ -232,7 +280,8 @@ void DatabaseManager::stopIbkrGetStocks()
     m_ibkrPendingSymbol.clear();
     m_ibkrDataTimeout.setInterval(25000);
     setIbkrConnectionState(
-        QStringLiteral("IBKR Get Quotes gestoppt%1.")
+        QStringLiteral("%1 gestoppt%2.")
+            .arg(m_ibkrGetStocksBatchName)
             .arg(symbol.isEmpty() ? QString() : QStringLiteral(": %1").arg(symbol)),
         m_ibkrConnected,
         false);
@@ -244,11 +293,18 @@ void DatabaseManager::loadNextIbkrGetStocksSymbol()
     if (!m_ibkrGetStocksBatchActive)
         return;
 
+    if (m_ibkrDataLoading) {
+        scheduleNextIbkrGetStocksSymbol(200);
+        return;
+    }
+
     if (m_ibkrGetStocksIndex >= m_ibkrGetStocksSymbols.size()) {
         finishIbkrGetStocksBatch(
-            QStringLiteral("IBKR Get Quotes abgeschlossen: %1 Aktien, %2 mit neuen Quotes gespeichert, %3 fehlgeschlagen.")
+            QStringLiteral("%1 abgeschlossen: %2 Aktien, %3 OK, %4 Quote-Zeilen neu/geaendert, %5 fehlgeschlagen.")
+                .arg(m_ibkrGetStocksBatchName)
                 .arg(m_ibkrGetStocksSymbols.size())
                 .arg(m_ibkrGetStocksSuccessCount)
+                .arg(m_ibkrGetStocksChangedQuoteCount)
                 .arg(m_ibkrGetStocksFailureCount));
         return;
     }
@@ -260,7 +316,8 @@ void DatabaseManager::loadNextIbkrGetStocksSymbol()
     }
 
     setIbkrConnectionState(
-        QStringLiteral("IBKR Get Quotes: %1/%2 %3 - Boerse pruefen und neue Quotes laden. OK: %4, Fehler: %5")
+        QStringLiteral("%1: %2/%3 %4 - Boerse pruefen und neue Quotes laden. Neue Quotes: %5, Fehler: %6")
+            .arg(m_ibkrGetStocksBatchName)
             .arg(m_ibkrGetStocksIndex)
             .arg(m_ibkrGetStocksSymbols.size())
             .arg(symbol)
@@ -304,6 +361,7 @@ void DatabaseManager::finishIbkrGetStocksBatch(const QString &message)
     m_ibkrDataTimeout.setInterval(25000);
     setIbkrConnectionState(message, m_ibkrConnected, false);
     emit ibkrConnectionChanged();
+    emit ibkrStockDataUpdated(QString());
 }
 
 int DatabaseManager::ibkrMissingQuoteDays(const QString &symbol, int fallbackDays)
@@ -353,7 +411,9 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
     if (!stockQuery.exec() || !stockQuery.next()) {
         updateIbkrQuoteExchangeFailure(symbol, QStringLiteral("Stock nicht in der Datenbank gefunden"));
         setIbkrConnectionState(
-            QStringLiteral("IBKR Get Quotes: %1 nicht in der Datenbank gefunden.").arg(symbol),
+            QStringLiteral("%1: %2 nicht in der Datenbank gefunden.")
+                .arg(m_ibkrGetStocksBatchName)
+                .arg(symbol),
             m_ibkrConnected,
             false);
         return false;
@@ -363,7 +423,9 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
     if (conId <= 0) {
         updateIbkrQuoteExchangeFailure(symbol, QStringLiteral("Keine gueltige IBKRConId"));
         setIbkrConnectionState(
-            QStringLiteral("IBKR Get Quotes: %1 hat keine gueltige IBKRConId.").arg(symbol),
+            QStringLiteral("%1: %2 hat keine gueltige IBKRConId.")
+                .arg(m_ibkrGetStocksBatchName)
+                .arg(symbol),
             m_ibkrConnected,
             false);
         return false;
@@ -424,7 +486,9 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
     if (probeExchanges.isEmpty()) {
         updateIbkrQuoteExchangeFailure(symbol, QStringLiteral("Keine pruefbaren Boersen-Kandidaten"));
         setIbkrConnectionState(
-            QStringLiteral("IBKR Get Quotes: %1 hat keine pruefbaren Boersen-Kandidaten.").arg(symbol),
+            QStringLiteral("%1: %2 hat keine pruefbaren Boersen-Kandidaten.")
+                .arg(m_ibkrGetStocksBatchName)
+                .arg(symbol),
             m_ibkrConnected,
             false);
         return false;
@@ -451,7 +515,8 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
         if (!saveIbkrQuoteExchange(symbol.trimmed(), quoteExchange, 0.0, onlyExchange, 0.0)) {
             updateIbkrQuoteExchangeFailure(symbol, QStringLiteral("Quote-Boerse konnte nicht gespeichert werden"));
             setIbkrConnectionState(
-                QStringLiteral("IBKR Get Quotes: Quote-Boerse fuer %1 konnte nicht gespeichert werden.")
+                QStringLiteral("%1: Quote-Boerse fuer %2 konnte nicht gespeichert werden.")
+                    .arg(m_ibkrGetStocksBatchName)
                     .arg(symbol),
                 m_ibkrConnected,
                 false);
@@ -462,7 +527,8 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
         m_pendingIbkrQuotesPrimaryExchange = supportsSmart ? onlyExchange : QString();
         if (m_ibkrGetStocksBatchActive) {
             setIbkrConnectionState(
-                QStringLiteral("IBKR Get Quotes: %1 -> %2, beste Direktboerse %3. Neue Quotes werden geladen ... OK: %4, Fehler: %5.")
+                QStringLiteral("%1: %2 -> %3, beste Direktboerse %4. Neue Quotes werden geladen ... OK: %5, Fehler: %6.")
+                    .arg(m_ibkrGetStocksBatchName)
                     .arg(symbol, quoteExchange, onlyExchange)
                     .arg(m_ibkrGetStocksSuccessCount)
                     .arg(m_ibkrGetStocksFailureCount),
@@ -621,12 +687,14 @@ void DatabaseManager::startIbkrQuoteHelperRequest(bool probeExchange)
     m_ibkrProcess.setArguments(arguments);
     m_ibkrProcess.setProcessChannelMode(QProcess::SeparateChannels);
     m_ibkrDataLoading = true;
+    m_lastIbkrHelperElapsedMs = -1;
+    m_ibkrHelperTimer.restart();
     setIbkrConnectionState(
         probeExchange
-            ? QStringLiteral("IBKR Get Quotes: staerkste Umsatzboerse fuer %1 wird ermittelt ...")
-                  .arg(m_pendingIbkrQuotesSymbol)
-            : QStringLiteral("IBKR Get Quotes: Quotes fuer %1 (%2) werden fuer %3 Tage von %4 abgerufen ...")
-                  .arg(m_pendingIbkrQuotesSymbol, m_pendingIbkrQuotesIsin)
+            ? QStringLiteral("%1: staerkste Umsatzboerse fuer %2 wird ermittelt ...")
+                  .arg(m_ibkrGetStocksBatchName, m_pendingIbkrQuotesSymbol)
+            : QStringLiteral("%1: Quotes fuer %2 (%3) werden fuer %4 Tage von %5 abgerufen ...")
+                  .arg(m_ibkrGetStocksBatchName, m_pendingIbkrQuotesSymbol, m_pendingIbkrQuotesIsin)
                   .arg(m_pendingIbkrQuotesDays)
                   .arg(m_pendingIbkrQuotesExchange),
         true,
@@ -1146,6 +1214,9 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
     const QString symbol = m_pendingIbkrQuotesSymbol;
     const QString isin = m_pendingIbkrQuotesIsin;
     const QString message = result.value(QStringLiteral("message")).toString();
+    const QString apiDurationText = m_lastIbkrHelperElapsedMs >= 0
+        ? QStringLiteral("%1 s").arg(m_lastIbkrHelperElapsedMs / 1000.0, 0, 'f', 2)
+        : QStringLiteral("-");
     const bool getStocksBatchActive = m_ibkrGetStocksBatchActive;
     const QString ibkrSymbol = m_pendingIbkrQuotesIbkrSymbol;
     const QString currency = m_pendingIbkrQuotesCurrency;
@@ -1192,8 +1263,8 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
             m_pendingIbkrProcessIsQuoteExchangeProbe = true;
             m_ibkrDataLoading = true;
             setIbkrConnectionState(
-                QStringLiteral("IBKR Get Quotes: %1 %2 fehlgeschlagen, pruefe direkte Boersen nach Umsatz ...")
-                    .arg(symbol, quoteExchange.isEmpty() ? QStringLiteral("Quote-Abruf") : quoteExchange),
+                QStringLiteral("%1: %2 %3 fehlgeschlagen, pruefe direkte Boersen nach Umsatz ...")
+                    .arg(m_ibkrGetStocksBatchName, symbol, quoteExchange.isEmpty() ? QStringLiteral("Quote-Abruf") : quoteExchange),
                 m_ibkrConnected,
                 false);
             startIbkrQuoteHelperRequest(true);
@@ -1203,10 +1274,10 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
             const QString finalError = message.trimmed().isEmpty()
                 ? QStringLiteral("IBKR lieferte keine Quotes")
                 : message;
-            const bool useMarketstack = shouldUseMarketstackForIbkrQuoteError(finalError);
-            if (useMarketstack) {
+            const bool switchToMarketstack = shouldUseMarketstackForIbkrQuoteError(finalError);
+            if (switchToMarketstack) {
                 ++m_ibkrGetStocksSuccessCount;
-                markStockUseMarketstack(symbol, true);
+                markStockFromIbkr(symbol, false);
             } else {
                 ++m_ibkrGetStocksFailureCount;
                 updateIbkrQuoteExchangeFailure(
@@ -1214,16 +1285,18 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
                     finalError);
             }
             setIbkrConnectionState(
-                QStringLiteral("IBKR Get Quotes: %1 Quote-Abruf %2 (%3). OK: %4, Fehler: %5.")
-                    .arg(symbol,
-                         useMarketstack ? QStringLiteral("an Marketstack uebergeben")
+                QStringLiteral("%1: %2 Quote-Abruf %3 (%4). API: %5. OK: %6, Fehler: %7.")
+                    .arg(m_ibkrGetStocksBatchName,
+                         symbol,
+                         switchToMarketstack ? QStringLiteral("an Marketstack uebergeben")
                                         : QStringLiteral("fehlgeschlagen"),
                          finalError)
+                    .arg(apiDurationText)
                     .arg(m_ibkrGetStocksSuccessCount)
                     .arg(m_ibkrGetStocksFailureCount),
                 m_ibkrConnected,
                 false);
-            scheduleNextIbkrGetStocksSymbol(1000);
+            scheduleNextIbkrGetStocksSymbol(200);
             emit ibkrConnectionChanged();
             return;
         }
@@ -1238,18 +1311,20 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
     }
 
     const QJsonArray bars = result.value(QStringLiteral("data")).toArray();
-    if (!saveIbkrHistoricalQuotes(symbol, bars)) {
+    int changedQuoteCount = 0;
+    if (!saveIbkrHistoricalQuotes(symbol, bars, &changedQuoteCount)) {
         if (getStocksBatchActive) {
             ++m_ibkrGetStocksFailureCount;
             updateIbkrQuoteExchangeFailure(symbol, QStringLiteral("IBKR-Quotes konnten nicht gespeichert werden"));
             setIbkrConnectionState(
-                QStringLiteral("IBKR Get Quotes: Quotes fuer %1 konnten nicht gespeichert werden. OK: %2, Fehler: %3.")
+                QStringLiteral("%1: Quotes fuer %2 konnten nicht gespeichert werden. OK: %3, Fehler: %4.")
+                    .arg(m_ibkrGetStocksBatchName)
                     .arg(symbol)
                     .arg(m_ibkrGetStocksSuccessCount)
                     .arg(m_ibkrGetStocksFailureCount),
                 m_ibkrConnected,
                 false);
-            scheduleNextIbkrGetStocksSymbol(1000);
+            scheduleNextIbkrGetStocksSymbol(200);
             emit ibkrConnectionChanged();
             return;
         }
@@ -1264,8 +1339,10 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
     updateIbkrQuoteExchangeSuccess(symbol);
 
     setIbkrConnectionState(
-        QStringLiteral("IBKR Get Quotes: %1 neue Quotes fuer %2 (%3) gespeichert.")
+        QStringLiteral("%1: %2 empfangen, %3 neu/geaendert fuer %4 (%5) gespeichert.")
+            .arg(m_ibkrGetStocksBatchName)
             .arg(bars.size())
+            .arg(changedQuoteCount)
             .arg(symbol, isin),
         m_ibkrConnected,
         false);
@@ -1273,15 +1350,20 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
     emit ibkrStockDataUpdated(symbol);
     if (getStocksBatchActive) {
         ++m_ibkrGetStocksSuccessCount;
+        m_ibkrGetStocksChangedQuoteCount += changedQuoteCount;
         setIbkrConnectionState(
-            QStringLiteral("IBKR Get Quotes: %1 Quotes fuer %2 gespeichert. OK: %3, Fehler: %4.")
-                .arg(symbol)
+            QStringLiteral("%1: %2 Quotes fuer %3 empfangen, %4 neu/geaendert. API: %5. OK: %6, neu/geaendert gesamt: %7, Fehler: %8.")
+                .arg(m_ibkrGetStocksBatchName)
                 .arg(bars.size())
+                .arg(symbol)
+                .arg(changedQuoteCount)
+                .arg(apiDurationText)
                 .arg(m_ibkrGetStocksSuccessCount)
+                .arg(m_ibkrGetStocksChangedQuoteCount)
                 .arg(m_ibkrGetStocksFailureCount),
             m_ibkrConnected,
             false);
-        scheduleNextIbkrGetStocksSymbol(1000);
+        scheduleNextIbkrGetStocksSymbol(200);
     }
     emit ibkrConnectionChanged();
 }
@@ -1315,7 +1397,8 @@ void DatabaseManager::finishIbkrQuoteExchangeProbe(const QJsonObject &result)
                 m_pendingIbkrQuotesDays = ibkrMissingQuoteDays(m_pendingIbkrQuotesSymbol, 90);
                 m_pendingIbkrProcessIsHistoricalQuotes = true;
                 setIbkrConnectionState(
-                    QStringLiteral("IBKR Get Quotes: %1 -> %2, beste Direktboerse %3 als Fallback. Neue Quotes werden geladen ... OK: %4, Fehler: %5.")
+                    QStringLiteral("%1: %2 -> %3, beste Direktboerse %4 als Fallback. Neue Quotes werden geladen ... OK: %5, Fehler: %6.")
+                        .arg(m_ibkrGetStocksBatchName)
                         .arg(m_pendingIbkrQuotesSymbol, quoteExchange, fallbackExchange)
                         .arg(m_ibkrGetStocksSuccessCount)
                         .arg(m_ibkrGetStocksFailureCount),
@@ -1335,20 +1418,21 @@ void DatabaseManager::finishIbkrQuoteExchangeProbe(const QJsonObject &result)
         const QString finalError = message.trimmed().isEmpty()
             ? QStringLiteral("Keine Umsatzboerse ermittelt")
             : message;
-        const bool useMarketstack = shouldUseMarketstackForIbkrQuoteError(finalError);
-        if (useMarketstack)
-            markStockUseMarketstack(m_pendingIbkrQuotesSymbol, true);
+        const bool switchToMarketstack = shouldUseMarketstackForIbkrQuoteError(finalError);
+        if (switchToMarketstack)
+            markStockFromIbkr(m_pendingIbkrQuotesSymbol, false);
         else
             updateIbkrQuoteExchangeFailure(m_pendingIbkrQuotesSymbol, finalError);
         if (m_ibkrGetStocksBatchActive) {
-            if (useMarketstack)
+            if (switchToMarketstack)
                 ++m_ibkrGetStocksSuccessCount;
             else
                 ++m_ibkrGetStocksFailureCount;
             setIbkrConnectionState(
-                QStringLiteral("IBKR Get Quotes: %1 %2 (%3). OK: %4, Fehler: %5.")
-                    .arg(m_pendingIbkrQuotesSymbol,
-                         useMarketstack ? QStringLiteral("an Marketstack uebergeben")
+                QStringLiteral("%1: %2 %3 (%4). OK: %5, Fehler: %6.")
+                    .arg(m_ibkrGetStocksBatchName,
+                         m_pendingIbkrQuotesSymbol,
+                         switchToMarketstack ? QStringLiteral("an Marketstack uebergeben")
                                         : QStringLiteral("fehlgeschlagen"),
                          finalError)
                     .arg(m_ibkrGetStocksSuccessCount)
@@ -1368,7 +1452,7 @@ void DatabaseManager::finishIbkrQuoteExchangeProbe(const QJsonObject &result)
             m_pendingIbkrQuotesFallbackIndex = 0;
             m_pendingIbkrQuotesSupportsSmart = false;
             m_pendingIbkrQuotesForceDirectProbeResult = false;
-            scheduleNextIbkrGetStocksSymbol(1000);
+            scheduleNextIbkrGetStocksSymbol(200);
             emit ibkrConnectionChanged();
             return;
         }
@@ -1404,13 +1488,14 @@ void DatabaseManager::finishIbkrQuoteExchangeProbe(const QJsonObject &result)
         if (m_ibkrGetStocksBatchActive) {
             ++m_ibkrGetStocksFailureCount;
             setIbkrConnectionState(
-                QStringLiteral("IBKR Get Quotes: Quote-Boerse fuer %1 konnte nicht gespeichert werden. OK: %2, Fehler: %3.")
+                QStringLiteral("%1: Quote-Boerse fuer %2 konnte nicht gespeichert werden. OK: %3, Fehler: %4.")
+                    .arg(m_ibkrGetStocksBatchName)
                     .arg(m_pendingIbkrQuotesSymbol)
                     .arg(m_ibkrGetStocksSuccessCount)
                     .arg(m_ibkrGetStocksFailureCount),
                 m_ibkrConnected,
                 false);
-            scheduleNextIbkrGetStocksSymbol(1000);
+            scheduleNextIbkrGetStocksSymbol(200);
             emit ibkrConnectionChanged();
             return;
         }
@@ -1432,7 +1517,8 @@ void DatabaseManager::finishIbkrQuoteExchangeProbe(const QJsonObject &result)
         m_pendingIbkrQuotesDays = ibkrMissingQuoteDays(m_pendingIbkrQuotesSymbol, 90);
         m_pendingIbkrProcessIsHistoricalQuotes = true;
         setIbkrConnectionState(
-            QStringLiteral("IBKR Get Quotes: %1 -> %2, beste Direktboerse %3 gespeichert. Neue Quotes werden geladen ... OK: %4, Fehler: %5.")
+            QStringLiteral("%1: %2 -> %3, beste Direktboerse %4 gespeichert. Neue Quotes werden geladen ... OK: %5, Fehler: %6.")
+                .arg(m_ibkrGetStocksBatchName)
                 .arg(m_pendingIbkrQuotesSymbol, quoteExchange, exchange)
                 .arg(m_ibkrGetStocksSuccessCount)
                 .arg(m_ibkrGetStocksFailureCount),
@@ -1445,8 +1531,11 @@ void DatabaseManager::finishIbkrQuoteExchangeProbe(const QJsonObject &result)
     startIbkrQuoteHelperRequest(false);
 }
 
-bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol, const QJsonArray &bars)
+bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol, const QJsonArray &bars, int *changedQuoteCount)
 {
+    if (changedQuoteCount)
+        *changedQuoteCount = 0;
+
     const QString normalizedSymbol = symbol.trimmed();
     if (normalizedSymbol.isEmpty() || bars.isEmpty())
         return false;
@@ -1475,7 +1564,22 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol, const QJso
             "Volume" = EXCLUDED."Volume"
     )SQL");
 
+    QSqlQuery existingQuery(db);
+    existingQuery.prepare(R"SQL(
+        SELECT 1
+        FROM "Quotes"
+        WHERE "Symbol" = :symbol
+          AND "CloseDate" = :closeDate
+          AND "ClosePrice" IS NOT DISTINCT FROM :closePrice
+          AND "OpenPrice" IS NOT DISTINCT FROM :openPrice
+          AND "HighestPrice" IS NOT DISTINCT FROM :highestPrice
+          AND "LowestPrice" IS NOT DISTINCT FROM :lowestPrice
+          AND "Volume" IS NOT DISTINCT FROM :volume
+        LIMIT 1
+    )SQL");
+
     int inserted = 0;
+    int changed = 0;
     for (const QJsonValue &value : bars) {
         const QJsonObject bar = value.toObject();
         const QDate closeDate = QDate::fromString(
@@ -1484,13 +1588,35 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol, const QJso
         if (!closeDate.isValid())
             continue;
 
+        const double closePrice = bar.value(QStringLiteral("close")).toDouble();
+        const double openPrice = bar.value(QStringLiteral("open")).toDouble();
+        const double highestPrice = bar.value(QStringLiteral("high")).toDouble();
+        const double lowestPrice = bar.value(QStringLiteral("low")).toDouble();
+        const double volume = bar.value(QStringLiteral("volume")).toDouble();
+
+        existingQuery.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
+        existingQuery.bindValue(QStringLiteral(":closeDate"), closeDate);
+        existingQuery.bindValue(QStringLiteral(":closePrice"), closePrice);
+        existingQuery.bindValue(QStringLiteral(":openPrice"), openPrice);
+        existingQuery.bindValue(QStringLiteral(":highestPrice"), highestPrice);
+        existingQuery.bindValue(QStringLiteral(":lowestPrice"), lowestPrice);
+        existingQuery.bindValue(QStringLiteral(":volume"), volume);
+        if (!existingQuery.exec()) {
+            qCritical() << "IBKR-Quote-Aenderung konnte nicht geprueft werden:"
+                        << existingQuery.lastError().text() << normalizedSymbol << closeDate;
+            db.rollback();
+            return false;
+        }
+        if (!existingQuery.next())
+            ++changed;
+
         insertQuery.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
         insertQuery.bindValue(QStringLiteral(":closeDate"), closeDate);
-        insertQuery.bindValue(QStringLiteral(":closePrice"), bar.value(QStringLiteral("close")).toDouble());
-        insertQuery.bindValue(QStringLiteral(":openPrice"), bar.value(QStringLiteral("open")).toDouble());
-        insertQuery.bindValue(QStringLiteral(":highestPrice"), bar.value(QStringLiteral("high")).toDouble());
-        insertQuery.bindValue(QStringLiteral(":lowestPrice"), bar.value(QStringLiteral("low")).toDouble());
-        insertQuery.bindValue(QStringLiteral(":volume"), bar.value(QStringLiteral("volume")).toDouble());
+        insertQuery.bindValue(QStringLiteral(":closePrice"), closePrice);
+        insertQuery.bindValue(QStringLiteral(":openPrice"), openPrice);
+        insertQuery.bindValue(QStringLiteral(":highestPrice"), highestPrice);
+        insertQuery.bindValue(QStringLiteral(":lowestPrice"), lowestPrice);
+        insertQuery.bindValue(QStringLiteral(":volume"), volume);
         if (!insertQuery.exec()) {
             qCritical() << "IBKR-Quote konnte nicht gespeichert werden:"
                         << insertQuery.lastError().text() << normalizedSymbol << closeDate;
@@ -1525,6 +1651,8 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol, const QJso
         db.rollback();
         return false;
     }
+    if (changedQuoteCount)
+        *changedQuoteCount = changed;
     return true;
 }
 
@@ -1552,7 +1680,7 @@ bool DatabaseManager::saveIbkrQuoteExchange(const QString &symbol,
             "IBKRQuoteExchangeLastSuccessAt" = CURRENT_TIMESTAMP,
             "IBKRQuoteExchangeFailureCount" = 0,
             "IBKRQuoteExchangeLastError" = NULL,
-            "use_marketstack" = FALSE
+            "from_IBKR" = TRUE
         WHERE "Symbol" = :symbol
     )SQL");
     query.bindValue(QStringLiteral(":symbol"), symbol.trimmed());
@@ -1610,7 +1738,7 @@ void DatabaseManager::updateIbkrQuoteExchangeSuccess(const QString &symbol)
             "IBKRQuoteExchangeLastSuccessAt" = CURRENT_TIMESTAMP,
             "IBKRQuoteExchangeFailureCount" = 0,
             "IBKRQuoteExchangeLastError" = NULL,
-            "use_marketstack" = FALSE
+            "from_IBKR" = TRUE
         WHERE "Symbol" = :symbol
     )SQL");
     query.bindValue(QStringLiteral(":symbol"), symbol.trimmed());
@@ -1620,27 +1748,27 @@ void DatabaseManager::updateIbkrQuoteExchangeSuccess(const QString &symbol)
     }
 }
 
-void DatabaseManager::markStockUseMarketstack(const QString &symbol, bool useMarketstack)
+void DatabaseManager::markStockFromIbkr(const QString &symbol, bool fromIbkr)
 {
     QSqlQuery query(db);
     query.prepare(R"SQL(
         UPDATE "Stocks"
-        SET "use_marketstack" = :useMarketstack,
+        SET "from_IBKR" = :fromIbkr,
             "IBKRQuoteExchangeFailureCount" = CASE
-                WHEN :useMarketstack THEN 0
+                WHEN :fromIbkr = FALSE THEN 0
                 ELSE "IBKRQuoteExchangeFailureCount"
             END,
             "IBKRQuoteExchangeLastError" = CASE
-                WHEN :useMarketstack THEN NULL
+                WHEN :fromIbkr = FALSE THEN NULL
                 ELSE "IBKRQuoteExchangeLastError"
             END
         WHERE "Symbol" = :symbol
     )SQL");
     query.bindValue(QStringLiteral(":symbol"), symbol.trimmed());
-    query.bindValue(QStringLiteral(":useMarketstack"), useMarketstack);
+    query.bindValue(QStringLiteral(":fromIbkr"), fromIbkr);
     if (!query.exec()) {
-        qWarning() << "Marketstack-Flag konnte nicht aktualisiert werden:"
-                   << query.lastError().text() << symbol << useMarketstack;
+        qWarning() << "Stock-Datenquelle konnte nicht aktualisiert werden:"
+                   << query.lastError().text() << symbol << fromIbkr;
     }
 }
 
@@ -1652,6 +1780,10 @@ void DatabaseManager::finishIbkrDataRequest(int exitCode, QProcess::ExitStatus e
         return;
 
     m_ibkrDataLoading = false;
+
+    m_lastIbkrHelperElapsedMs = m_ibkrHelperTimer.isValid() ? m_ibkrHelperTimer.elapsed() : -1;
+    if (m_lastIbkrHelperElapsedMs >= 0)
+        qDebug().noquote() << "IBKR-Helfer API-Dauer:" << m_lastIbkrHelperElapsedMs << "ms";
     const QString stderrText = QString::fromUtf8(m_ibkrProcess.readAllStandardError()).trimmed();
     if (!stderrText.isEmpty())
         qDebug().noquote() << "IBKR-Helfer:" << stderrText;
@@ -1659,9 +1791,20 @@ void DatabaseManager::finishIbkrDataRequest(int exitCode, QProcess::ExitStatus e
     const QByteArray output = m_ibkrProcess.readAllStandardOutput().trimmed();
     QJsonParseError parseError;
     const QJsonDocument document = QJsonDocument::fromJson(output, &parseError);
+    const bool parseOk = parseError.error == QJsonParseError::NoError && document.isObject();
+    if (m_pendingIbkrProcessIsHistoricalQuotes || m_pendingIbkrProcessIsQuoteExchangeProbe) {
+        const QJsonObject timingResult = parseOk ? document.object() : QJsonObject();
+        appendIbkrQuoteTimingLog(
+            m_pendingIbkrQuotesSymbol.isEmpty() ? m_ibkrPendingSymbol : m_pendingIbkrQuotesSymbol,
+            m_pendingIbkrProcessIsQuoteExchangeProbe ? QStringLiteral("probe") : QStringLiteral("historical"),
+            m_lastIbkrHelperElapsedMs,
+            exitStatus,
+            parseOk,
+            timingResult.value(QStringLiteral("success")).toBool(false),
+            parseOk ? timingResult.value(QStringLiteral("message")).toString() : QString::fromUtf8(output.left(500)));
+    }
     if (exitStatus != QProcess::NormalExit
-        || parseError.error != QJsonParseError::NoError
-        || !document.isObject()) {
+        || !parseOk) {
         setIbkrConnectionState(
             QStringLiteral("Fehler: Ungültige Antwort vom IBKR-Helfer."),
             m_ibkrConnected,
@@ -1673,7 +1816,8 @@ void DatabaseManager::finishIbkrDataRequest(int exitCode, QProcess::ExitStatus e
             if (m_ibkrGetStocksBatchActive) {
                 ++m_ibkrGetStocksFailureCount;
                 setIbkrConnectionState(
-                    QStringLiteral("IBKR Get Quotes: %1 ungueltige Helper-Antwort. OK: %2, Fehler: %3.")
+                    QStringLiteral("%1: %2 ungueltige Helper-Antwort. OK: %3, Fehler: %4.")
+                        .arg(m_ibkrGetStocksBatchName)
                         .arg(m_ibkrPendingSymbol)
                         .arg(m_ibkrGetStocksSuccessCount)
                         .arg(m_ibkrGetStocksFailureCount),
@@ -1695,7 +1839,7 @@ void DatabaseManager::finishIbkrDataRequest(int exitCode, QProcess::ExitStatus e
             m_ibkrPendingSymbol.clear();
             m_ibkrDataTimeout.setInterval(25000);
             if (m_ibkrGetStocksBatchActive)
-                scheduleNextIbkrGetStocksSymbol(1000);
+                scheduleNextIbkrGetStocksSymbol(200);
             emit ibkrConnectionChanged();
             return;
         }
@@ -2032,6 +2176,11 @@ void DatabaseManager::loadNextIbkrBatchSymbol()
     if (!m_ibkrBatchActive)
         return;
 
+    if (m_ibkrDataLoading) {
+        scheduleNextIbkrBatchSymbol(200);
+        return;
+    }
+
     if (m_ibkrBatchIndex >= m_ibkrBatchSymbols.size()) {
         finishIbkrBatch(
             QStringLiteral("IBKR-Batch abgeschlossen: %1 Aktien, %2 erfolgreich, %3 fehlgeschlagen.")
@@ -2098,6 +2247,7 @@ void DatabaseManager::finishIbkrBatch(const QString &message)
     m_pendingIbkrCurrentDirectExchange.clear();
     setIbkrConnectionState(message, m_ibkrConnected, false);
     emit ibkrConnectionChanged();
+    emit ibkrStockDataUpdated(QString());
 }
 
 void DatabaseManager::loadNextIbkrNameCheckBatchSymbol()
@@ -2269,6 +2419,7 @@ void DatabaseManager::finishIbkrNameCheckBatch(const QString &message)
     m_pendingIbkrNameCheckCandidateIndex = 0;
     setIbkrConnectionState(message, m_ibkrConnected, false);
     emit ibkrConnectionChanged();
+    emit ibkrStockDataUpdated(QString());
 }
 
 void DatabaseManager::prepareIbkrNameCheckCandidates(const QString &symbol,

@@ -86,7 +86,8 @@ DatabaseManager::DatabaseManager(QObject *parent) : QObject(parent)
             if (m_ibkrGetStocksBatchActive) {
                 ++m_ibkrGetStocksFailureCount;
                 setIbkrConnectionState(
-                    QStringLiteral("IBKR Get Quotes: %1 Timeout. OK: %2, Fehler: %3.")
+                    QStringLiteral("%1: %2 Timeout. OK: %3, Fehler: %4.")
+                        .arg(m_ibkrGetStocksBatchName)
                         .arg(timedOutSymbol)
                         .arg(m_ibkrGetStocksSuccessCount)
                         .arg(m_ibkrGetStocksFailureCount),
@@ -163,7 +164,8 @@ DatabaseManager::DatabaseManager(QObject *parent) : QObject(parent)
             if (m_ibkrGetStocksBatchActive) {
                 ++m_ibkrGetStocksFailureCount;
                 setIbkrConnectionState(
-                    QStringLiteral("IBKR Get Quotes: %1 Helper konnte nicht gestartet werden. OK: %2, Fehler: %3.")
+                    QStringLiteral("%1: %2 Helper konnte nicht gestartet werden. OK: %3, Fehler: %4.")
+                        .arg(m_ibkrGetStocksBatchName)
                         .arg(m_ibkrPendingSymbol)
                         .arg(m_ibkrGetStocksSuccessCount)
                         .arg(m_ibkrGetStocksFailureCount),
@@ -608,12 +610,41 @@ bool DatabaseManager::ensureSchema()
                 ADD COLUMN IF NOT EXISTS "IBKRBestDirectExchange" VARCHAR(32),
                 ADD COLUMN IF NOT EXISTS "IBKRBestDirectExchangeTurnover" NUMERIC(28, 4),
                 ADD COLUMN IF NOT EXISTS "IBKRBestDirectExchangeCheckedAt" TIMESTAMPTZ,
-                ADD COLUMN IF NOT EXISTS "use_marketstack" BOOLEAN NOT NULL DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS "from_IBKR" BOOLEAN,
                 ADD COLUMN IF NOT EXISTS "marketplace_sym" VARCHAR(128),
                 ADD COLUMN IF NOT EXISTS "marketplace_exchange" VARCHAR(32),
                 ADD COLUMN IF NOT EXISTS "marketplace_turnover" NUMERIC(28, 4),
                 ADD COLUMN IF NOT EXISTS "marketplace_checked_at" TIMESTAMPTZ,
                 ADD COLUMN IF NOT EXISTS "marketplace_last_error" TEXT
+        )SQL"),
+        QStringLiteral(R"SQL(
+            DO $$
+            BEGIN
+                IF EXISTS (
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = CURRENT_SCHEMA()
+                      AND table_name = 'Stocks'
+                      AND column_name = 'use_marketstack'
+                ) THEN
+                    UPDATE "Stocks"
+                    SET "from_IBKR" = NOT COALESCE("use_marketstack", FALSE)
+                    WHERE "from_IBKR" IS NULL;
+                ELSE
+                    UPDATE "Stocks"
+                    SET "from_IBKR" = TRUE
+                    WHERE "from_IBKR" IS NULL;
+                END IF;
+            END $$
+        )SQL"),
+        QStringLiteral(R"SQL(
+            ALTER TABLE "Stocks"
+                ALTER COLUMN "from_IBKR" SET DEFAULT TRUE,
+                ALTER COLUMN "from_IBKR" SET NOT NULL
+        )SQL"),
+        QStringLiteral(R"SQL(
+            ALTER TABLE "Stocks"
+                DROP COLUMN IF EXISTS "use_marketstack"
         )SQL"),
         QStringLiteral(R"SQL(
             UPDATE "Stocks"

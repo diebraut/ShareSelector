@@ -112,7 +112,6 @@ ApplicationWindow {
 
     function canRequestIbkrQuoteBatchStart() {
         return !dbManager.ibkrDataLoading
-            && !dbManager.ibkrBatchActive
             && !dbManager.ibkrNameCheckBatchActive
             && !dbManager.ibkrGetStocksActive
     }
@@ -124,7 +123,6 @@ ApplicationWindow {
     function canProbeIbkrGateway() {
         return !dbManager.ibkrConnecting
             && !dbManager.ibkrDataLoading
-            && !dbManager.ibkrBatchActive
             && !dbManager.ibkrNameCheckBatchActive
             && !dbManager.ibkrGetStocksActive
     }
@@ -191,7 +189,7 @@ ApplicationWindow {
 
     function startIbkrQuoteBatchFromSchedule(manualStart) {
         if (!canRequestIbkrQuoteBatchStart()) {
-            ibkrQuoteScheduleStatus = "IBKR Get Quotes kann gerade nicht gestartet werden."
+            ibkrQuoteScheduleStatus = "Get New Quotes for Depot kann gerade nicht gestartet werden."
             return false
         }
 
@@ -224,8 +222,8 @@ ApplicationWindow {
         ibkrQuoteSchedulePendingStart = false
         ibkrQuoteScheduleTradingAppStarted = false
         ibkrQuoteScheduleStatus = manualStart
-            ? "IBKR Get Quotes manuell gestartet."
-            : "IBKR Get Quotes automatisch gestartet."
+            ? "Get New Quotes for Depot manuell gestartet."
+            : "Get New Quotes for Depot automatisch gestartet."
         return true
     }
 
@@ -420,6 +418,8 @@ ApplicationWindow {
     Connections {
         target: dbManager
         function onIbkrStockDataUpdated(symbol) {
+            if (dbManager.ibkrGetStocksActive)
+                return
             loadTestPortfolio(symbol)
         }
         function onFundamentalDataUpdated(symbol) {
@@ -432,7 +432,14 @@ ApplicationWindow {
         return isNaN(value) ? 0 : value
     }
 
-    function loadTestPortfolio(preferredSymbol) {
+    function loadTestPortfolio(preferredSymbol, preserveView) {
+        let selectedSymbol = ""
+        if (preserveView && selectedPortfolioIndex >= 0 && selectedPortfolioIndex < portfolioModel.count)
+            selectedSymbol = portfolioModel.get(selectedPortfolioIndex).symbol || ""
+        let previousContentY = -1
+        if (preserveView && portfolioWindow && portfolioWindow.visible)
+            previousContentY = portfolioWindow.portfolioListContentY()
+
         const data = dbManager.getTestPortfolioSummary()
         let rows = []
         data.forEach(item => rows.push(item))
@@ -441,7 +448,10 @@ ApplicationWindow {
         portfolioLoaded = true
         portfolioDetails = ({})
         portfolioDetailsSymbol = ""
-        rebuildPortfolioModel(preferredSymbol, true)
+        rebuildPortfolioModel(preserveView ? selectedSymbol : preferredSymbol, true)
+
+        if (preserveView && previousContentY >= 0)
+            portfolioWindow.restorePortfolioListContentY(previousContentY)
     }
 
     function sortedPortfolioRows() {

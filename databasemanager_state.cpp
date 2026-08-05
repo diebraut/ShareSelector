@@ -88,6 +88,11 @@ bool DatabaseManager::ibkrGetStocksActive() const
         || m_pendingIbkrProcessIsQuoteExchangeProbe;
 }
 
+QString DatabaseManager::ibkrGetStocksBatchName() const
+{
+    return m_ibkrGetStocksBatchName;
+}
+
 int DatabaseManager::ibkrGetStocksTotal() const
 {
     return m_ibkrGetStocksSymbols.size();

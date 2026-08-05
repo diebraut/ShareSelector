@@ -158,7 +158,7 @@ QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent,
             s."Name" AS name,
             s."MIC" AS mic,
             CASE
-                WHEN COALESCE(s.use_marketstack, false) THEN 'MS'
+                WHEN NOT COALESCE(s."from_IBKR", true) THEN 'MS'
                 WHEN COALESCE(s."IBKRQuoteExchange", '') <> '' THEN 'IBKR'
                 ELSE '-'
             END AS quotesource,
@@ -185,7 +185,7 @@ QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent,
            AND last_quote."CloseDate" = quote_summary.last_date
         LEFT JOIN latest_fundamentals ON latest_fundamentals."Symbol" = s."Symbol"
         WHERE quote_summary.quote_count >= 2
-          AND NOT COALESCE(s.use_marketstack, false)
+          AND COALESCE(s."from_IBKR", true)
           AND COALESCE(s."IBKRQuoteExchange", '') <> ''
           AND ((trend_summary.newest_average - trend_summary.oldest_average)
                 / NULLIF(trend_summary.oldest_average, 0) * 100) >= :minIncreasePercent
@@ -224,7 +224,7 @@ QVariantList DatabaseManager::getStockAnalysisIbkrSymbols()
     query.prepare(R"SQL(
         SELECT s."Symbol"
         FROM "Stocks" s
-        WHERE NOT COALESCE(s.use_marketstack, false)
+        WHERE COALESCE(s."from_IBKR", true)
           AND COALESCE(s."IBKRQuoteExchange", '') <> ''
           AND EXISTS (
               SELECT 1
@@ -284,7 +284,7 @@ QVariantList DatabaseManager::findStockAnalysisDirectSearchStocks(const QString 
             s."Name" AS name,
             s."MIC" AS mic,
             CASE
-                WHEN COALESCE(s.use_marketstack, false) THEN 'MS'
+                WHEN NOT COALESCE(s."from_IBKR", true) THEN 'MS'
                 WHEN COALESCE(s."IBKRQuoteExchange", '') <> '' THEN 'IBKR'
                 ELSE '-'
             END AS quotesource
@@ -420,7 +420,7 @@ QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, do
            AND last_quote."CloseDate" = quote_summary.last_date
         LEFT JOIN latest_fundamentals ON latest_fundamentals."Symbol" = s."Symbol"
         WHERE quote_summary.quote_count >= 2
-          AND NOT COALESCE(s.use_marketstack, false)
+          AND COALESCE(s."from_IBKR", true)
           AND COALESCE(s."IBKRQuoteExchange", '') <> ''
           AND ((trend_summary.newest_average - trend_summary.oldest_average)
                 / NULLIF(trend_summary.oldest_average, 0) * 100) >= :minIncreasePercent

@@ -18,6 +18,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QUrl>
+#include <QElapsedTimer>
 
 #include "marketstackclient.h"
 #include "alphavantageclient.h"
@@ -43,6 +44,7 @@ class DatabaseManager : public QObject
     Q_PROPERTY(int ibkrBatchDone READ ibkrBatchDone NOTIFY ibkrConnectionChanged)
     Q_PROPERTY(bool ibkrBatchActive READ ibkrBatchActive NOTIFY ibkrConnectionChanged)
     Q_PROPERTY(bool ibkrGetStocksActive READ ibkrGetStocksActive NOTIFY ibkrConnectionChanged)
+    Q_PROPERTY(QString ibkrGetStocksBatchName READ ibkrGetStocksBatchName NOTIFY ibkrConnectionChanged)
     Q_PROPERTY(int ibkrGetStocksTotal READ ibkrGetStocksTotal NOTIFY ibkrConnectionChanged)
     Q_PROPERTY(int ibkrGetStocksDone READ ibkrGetStocksDone NOTIFY ibkrConnectionChanged)
     Q_PROPERTY(int marketstackBatchTotal READ marketstackBatchTotal NOTIFY fundamentalDataChanged)
@@ -97,6 +99,7 @@ public:
     Q_INVOKABLE void startIbkrBatch();
     Q_INVOKABLE void stopIbkrBatch();
     Q_INVOKABLE void startIbkrGetStocks();
+    Q_INVOKABLE void startIbkrGetAllStocks();
     Q_INVOKABLE void stopIbkrGetStocks();
     Q_INVOKABLE void startMarketstackBatch();
     Q_INVOKABLE void stopMarketstackBatch();
@@ -120,6 +123,7 @@ public:
     int ibkrBatchDone() const;
     bool ibkrBatchActive() const;
     bool ibkrGetStocksActive() const;
+    QString ibkrGetStocksBatchName() const;
     int ibkrGetStocksTotal() const;
     int ibkrGetStocksDone() const;
     int marketstackBatchTotal() const;
@@ -170,6 +174,7 @@ private:
     void scheduleNextIbkrBatchSymbol(int delayMs);
     void finishIbkrBatch(const QString &message);
     void loadNextIbkrGetStocksSymbol();
+    void startIbkrGetStocksBatch(bool depotOnly);
     void scheduleNextIbkrGetStocksSymbol(int delayMs);
     void finishIbkrGetStocksBatch(const QString &message);
     bool startIbkrQuoteExchangeProbeForSymbol(const QString &symbol);
@@ -177,7 +182,7 @@ private:
     void startIbkrQuoteHelperRequest(bool probeExchange);
     void finishIbkrQuotesRequest(const QJsonObject &result);
     void finishIbkrQuoteExchangeProbe(const QJsonObject &result);
-    bool saveIbkrHistoricalQuotes(const QString &symbol, const QJsonArray &bars);
+    bool saveIbkrHistoricalQuotes(const QString &symbol, const QJsonArray &bars, int *changedQuoteCount = nullptr);
     int ibkrMissingQuoteDays(const QString &symbol, int fallbackDays = 90);
     bool saveIbkrQuoteExchange(const QString &symbol,
                                const QString &quoteExchange,
@@ -187,7 +192,7 @@ private:
     void updateIbkrQuoteExchangeAttempt(const QString &symbol);
     void updateIbkrQuoteExchangeFailure(const QString &symbol, const QString &error);
     void updateIbkrQuoteExchangeSuccess(const QString &symbol);
-    void markStockUseMarketstack(const QString &symbol, bool useMarketstack);
+    void markStockFromIbkr(const QString &symbol, bool fromIbkr);
     void loadNextMarketstackBatchSymbol();
     void scheduleNextMarketstackBatchSymbol(int delayMs);
     void finishMarketstackBatch(const QString &message);
@@ -270,6 +275,8 @@ private:
     bool m_ibkrDataLoading = false;
     quint16 m_ibkrConnectedPort = 0;
     QProcess m_ibkrProcess;
+    QElapsedTimer m_ibkrHelperTimer;
+    qint64 m_lastIbkrHelperElapsedMs = -1;
     QTimer m_ibkrDataTimeout;
     QTimer m_ibkrBatchTimer;
     QTimer m_ibkrGetStocksTimer;
@@ -335,10 +342,12 @@ private:
     int m_ibkrBatchSuccessCount = 0;
     int m_ibkrBatchFailureCount = 0;
     bool m_ibkrGetStocksBatchActive = false;
+    QString m_ibkrGetStocksBatchName = QStringLiteral("Get New Quotes for Depot");
     QStringList m_ibkrGetStocksSymbols;
     int m_ibkrGetStocksIndex = 0;
     int m_ibkrGetStocksSuccessCount = 0;
     int m_ibkrGetStocksFailureCount = 0;
+    int m_ibkrGetStocksChangedQuoteCount = 0;
     bool m_marketstackBatchActive = false;
     QStringList m_marketstackBatchSymbols;
     int m_marketstackBatchIndex = 0;

@@ -11,6 +11,17 @@ Window {
     function positionListAtBeginning() {
         portfolioListView.positionViewAtBeginning()
     }
+
+    function portfolioListContentY() {
+        return portfolioListView.contentY
+    }
+
+    function restorePortfolioListContentY(contentY) {
+        Qt.callLater(function() {
+            const maxY = Math.max(0, portfolioListView.contentHeight - portfolioListView.height)
+            portfolioListView.contentY = Math.max(0, Math.min(contentY, maxY))
+        })
+    }
         title: "Mein Depot (Test)"
         width: 1360
         height: 760
@@ -476,9 +487,9 @@ Window {
                         visible: dbManager.ibkrGetStocksActive || dbManager.ibkrGetStocksTotal > 0
 
                         Label {
-                            text: "Get Quotes " + dbManager.ibkrGetStocksDone + "/" + dbManager.ibkrGetStocksTotal
+                            text: dbManager.ibkrGetStocksBatchName + " " + dbManager.ibkrGetStocksDone + "/" + dbManager.ibkrGetStocksTotal
                             color: "#475569"
-                            Layout.preferredWidth: 96
+                            Layout.preferredWidth: 210
                         }
 
                         ProgressBar {
