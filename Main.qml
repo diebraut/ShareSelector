@@ -1,4 +1,4 @@
-﻿import QtQuick 2.15
+import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.LocalStorage 2.15
@@ -6,52 +6,33 @@ import QtQuick.LocalStorage 2.15
 ApplicationWindow {
     id: mainWindow
     visible: true
-    width: 2000
-    height: 800
-    title: "Stock Database Browser"
+    width: 1600
+    height: 1220
+    minimumWidth: 1200
+    minimumHeight: 1100
+    title: "Stock Analyse"
 
     property var dbManager: databaseManager
-    property var expController: exportController
-
-    // Fokus-Handler für das Hauptfenster
-    // Globaler Fokus-Handler
-    onActiveChanged: if (active) listView.forceActiveFocus()
 
     Component.onCompleted: Qt.callLater(function() {
-        portfolioWindow.show()
+        loadIbkrQuoteSchedule()
+        loadStockAnalysisConfigs()
+        loadLastStockAnalysisConfig()
     })
 
-    // Fokus-Recovery
-    MouseArea {
-        anchors.fill: parent
-        onClicked: listView.forceActiveFocus()
-        enabled: !listView.activeFocus
-        z: -1
+    Timer {
+        id: ibkrQuoteScheduleTimer
+        interval: 30000
+        running: true
+        repeat: true
+        onTriggered: checkIbkrQuoteSchedule()
     }
-
     // Datenmodell
-    ListModel {
-        id: stockModel
-        dynamicRoles: true
-        function initSelection() {
-            for (var i = 0; i < count; i++) {
-                get(i).selected = false;
-            }
-        }
-    }
-
-    ListModel {
-        id: detailQuoteModel
-    }
-
-    ListModel {
-        id: boughtStockModel
-    }
-
     ListModel {
         id: portfolioModel
         dynamicRoles: true
     }
+
 
     ListModel {
         id: stockAnalysisConfigModel
@@ -67,23 +48,17 @@ ApplicationWindow {
     }
 
     // Speichert das aktuell selektierte Symbol & Exchange
-    property string selectedSymbol: ""
-    property string selectedExchange: ""
-    property int selectedIndex: -1
-    property int currentListViewIndex:0
 
-    property int currentSortPeriod: 0
-    property bool currentSortAsc: true
-    property var detailStock: ({})
-    property var detailPeriods: []
-    property var detailQuotes: []
-    property int detailFromDay: 1
-    property int detailToDay: 1
-    property string boughtStockMessage: ""
-    property int selectedBoughtStockIndex: -1
-    property bool detailStockBought: false
-    property string pendingDeleteBoughtSymbol: ""
     property int selectedPortfolioIndex: -1
+    property string portfolioSortKey: "gainPercent"
+    property bool portfolioSortAscending: true
+    property var portfolioRows: []
+    property double portfolioTotalCurrentAmount: 0
+    property double portfolioTotalEntryAmount: 0
+    property int portfolioActiveCountValue: 0
+    property bool portfolioLoaded: false
+    property var portfolioDetails: ({})
+    property string portfolioDetailsSymbol: ""
     property int selectedStockAnalysisConfigIndex: -1
     property int selectedStockAnalysisIndex: -1
     property var selectedStockAnalysisRows: []
@@ -103,6 +78,216 @@ ApplicationWindow {
     property var stockAnalysisScanSymbols: []
     property int stockAnalysisScanIndex: 0
     property int stockAnalysisScanFound: 0
+    property bool stockAnalysisHideBoughtStocks: true
+    property bool ibkrQuoteScheduleEnabled: false
+    property string ibkrQuoteScheduleTime: "18:00"
+    property string ibkrQuoteScheduleLastRunDate: ""
+    property string ibkrTradingAppPath: ""
+    property string ibkrQuoteScheduleStatus: "Automatischer IBKR-Quote-Batch ist nicht aktiv."
+    property bool ibkrQuoteSchedulePendingStart: false
+    property bool ibkrQuoteSchedulePendingManualStart: false
+    property bool ibkrQuoteScheduleTradingAppStarted: false
+    property double ibkrQuoteSchedulePendingUntilMs: 0
+
+    function twoDigits(value) {
+        value = Number(value)
+        return value < 10 ? "0" + value : "" + value
+    }
+
+    function todayIsoDate(date) {
+        return date.getFullYear() + "-" + twoDigits(date.getMonth() + 1) + "-" + twoDigits(date.getDate())
+    }
+
+    function parseIbkrQuoteScheduleMinutes(timeText) {
+        let match = /^([01][0-9]|2[0-3]):([0-5][0-9])$/.exec(String(timeText).trim())
+        if (!match)
+            return -1
+        return Number(match[1]) * 60 + Number(match[2])
+    }
+
+    function isActiveTradingDay(date) {
+        let day = date.getDay()
+        return day >= 1 && day <= 5
+    }
+
+    function canRequestIbkrQuoteBatchStart() {
+        return !dbManager.ibkrDataLoading
+            && !dbManager.ibkrBatchActive
+            && !dbManager.ibkrNameCheckBatchActive
+            && !dbManager.ibkrGetStocksActive
+    }
+
+    function canStartIbkrQuoteBatch() {
+        return dbManager.ibkrConnected && canRequestIbkrQuoteBatchStart()
+    }
+
+    function canProbeIbkrGateway() {
+        return !dbManager.ibkrConnecting
+            && !dbManager.ibkrDataLoading
+            && !dbManager.ibkrBatchActive
+            && !dbManager.ibkrNameCheckBatchActive
+            && !dbManager.ibkrGetStocksActive
+    }
+
+    function checkIbkrGatewayOnly() {
+        if (!canProbeIbkrGateway()) {
+            ibkrQuoteScheduleStatus = "Gateway/API-Pruefung kann gerade nicht gestartet werden."
+            return false
+        }
+        ibkrQuoteScheduleStatus = "Prüfe, ob IB Gateway/TWS bereits läuft und per API erreichbar ist ..."
+        dbManager.connectToIbkr()
+        return true
+    }
+
+    function loadIbkrQuoteSchedule() {
+        ibkrQuoteScheduleEnabled = dbManager.appSetting("ibkrQuoteScheduleEnabled") === "1"
+        let savedTime = dbManager.appSetting("ibkrQuoteScheduleTime")
+        if (parseIbkrQuoteScheduleMinutes(savedTime) >= 0)
+            ibkrQuoteScheduleTime = savedTime
+        ibkrQuoteScheduleLastRunDate = dbManager.appSetting("ibkrQuoteScheduleLastRunDate")
+        ibkrTradingAppPath = dbManager.appSetting("ibkrTradingAppPath")
+        if (ibkrTradingAppPath.length === 0)
+            ibkrTradingAppPath = "K:/Jts/ibgateway/1049/ibgateway.exe"
+        updateIbkrQuoteScheduleStatus()
+        checkIbkrQuoteSchedule()
+    }
+
+    function saveIbkrQuoteSchedule() {
+        let minutes = parseIbkrQuoteScheduleMinutes(ibkrQuoteScheduleTime)
+        if (minutes < 0) {
+            ibkrQuoteScheduleStatus = "Bitte Uhrzeit im Format HH:MM eingeben."
+            return false
+        }
+
+        dbManager.saveAppSetting("ibkrQuoteScheduleEnabled", ibkrQuoteScheduleEnabled ? "1" : "0")
+        dbManager.saveAppSetting("ibkrQuoteScheduleTime", ibkrQuoteScheduleTime)
+        dbManager.saveAppSetting("ibkrTradingAppPath", ibkrTradingAppPath)
+        updateIbkrQuoteScheduleStatus()
+        return true
+    }
+
+    function updateIbkrQuoteScheduleStatus() {
+        let minutes = parseIbkrQuoteScheduleMinutes(ibkrQuoteScheduleTime)
+        if (minutes < 0) {
+            ibkrQuoteScheduleStatus = "Bitte Uhrzeit im Format HH:MM eingeben."
+            return
+        }
+
+        if (!ibkrQuoteScheduleEnabled) {
+            ibkrQuoteScheduleStatus = "Automatischer IBKR-Quote-Batch ist nicht aktiv."
+            return
+        }
+
+        let now = new Date()
+        let today = todayIsoDate(now)
+        if (!isActiveTradingDay(now)) {
+            ibkrQuoteScheduleStatus = "Heute kein aktiver Handelstag (Mo-Fr). Geplant: " + ibkrQuoteScheduleTime + " Uhr."
+        } else if (ibkrQuoteScheduleLastRunDate === today) {
+            ibkrQuoteScheduleStatus = "Heute bereits gestartet. Geplant: " + ibkrQuoteScheduleTime + " Uhr."
+        } else {
+            ibkrQuoteScheduleStatus = "Naechster automatischer Start heute um " + ibkrQuoteScheduleTime + " Uhr."
+        }
+    }
+
+    function startIbkrQuoteBatchFromSchedule(manualStart) {
+        if (!canRequestIbkrQuoteBatchStart()) {
+            ibkrQuoteScheduleStatus = "IBKR Get Quotes kann gerade nicht gestartet werden."
+            return false
+        }
+
+        if (!dbManager.ibkrConnected) {
+            if (!ibkrQuoteSchedulePendingStart) {
+                ibkrQuoteScheduleTradingAppStarted = false
+                ibkrQuoteSchedulePendingUntilMs = Date.now() + 30 * 60 * 1000
+            }
+            ibkrQuoteSchedulePendingStart = true
+            ibkrQuoteSchedulePendingManualStart = manualStart
+
+            let programPath = ibkrTradingAppPath.trim()
+            if (programPath.length > 0 && !ibkrQuoteScheduleTradingAppStarted) {
+                ibkrQuoteScheduleTradingAppStarted = dbManager.startIbkrTradingApp(programPath)
+            }
+
+            continuePendingIbkrQuoteBatchStart()
+            return true
+        }
+
+        dbManager.startIbkrGetStocks()
+        Qt.callLater(function() {
+            if (dbManager.ibkrConnectionStatus && dbManager.ibkrConnectionStatus.length > 0)
+                ibkrQuoteScheduleStatus = dbManager.ibkrConnectionStatus
+        })
+        if (!manualStart) {
+            ibkrQuoteScheduleLastRunDate = todayIsoDate(new Date())
+            dbManager.saveAppSetting("ibkrQuoteScheduleLastRunDate", ibkrQuoteScheduleLastRunDate)
+        }
+        ibkrQuoteSchedulePendingStart = false
+        ibkrQuoteScheduleTradingAppStarted = false
+        ibkrQuoteScheduleStatus = manualStart
+            ? "IBKR Get Quotes manuell gestartet."
+            : "IBKR Get Quotes automatisch gestartet."
+        return true
+    }
+
+    function checkIbkrQuoteSchedule() {
+        if (ibkrQuoteSchedulePendingStart) {
+            continuePendingIbkrQuoteBatchStart()
+            return
+        }
+
+        if (!ibkrQuoteScheduleEnabled) {
+            updateIbkrQuoteScheduleStatus()
+            return
+        }
+
+        let minutes = parseIbkrQuoteScheduleMinutes(ibkrQuoteScheduleTime)
+        if (minutes < 0) {
+            updateIbkrQuoteScheduleStatus()
+            return
+        }
+
+        let now = new Date()
+        let today = todayIsoDate(now)
+        if (!isActiveTradingDay(now) || ibkrQuoteScheduleLastRunDate === today) {
+            updateIbkrQuoteScheduleStatus()
+            return
+        }
+
+        let currentMinutes = now.getHours() * 60 + now.getMinutes()
+        if (currentMinutes >= minutes) {
+            startIbkrQuoteBatchFromSchedule(false)
+        } else {
+            updateIbkrQuoteScheduleStatus()
+        }
+    }
+
+    function continuePendingIbkrQuoteBatchStart() {
+        if (!ibkrQuoteSchedulePendingStart)
+            return
+
+        if (dbManager.ibkrConnected) {
+            startIbkrQuoteBatchFromSchedule(ibkrQuoteSchedulePendingManualStart)
+            return
+        }
+
+        if (Date.now() > ibkrQuoteSchedulePendingUntilMs) {
+            ibkrQuoteSchedulePendingStart = false
+            ibkrQuoteScheduleTradingAppStarted = false
+            ibkrQuoteScheduleStatus = "IBKR-Verbindung nach 30 Minuten nicht erreichbar. Anmeldung/API bitte prüfen."
+            return
+        }
+
+        ibkrQuoteScheduleStatus = "Warte auf IB-Gateway-Anmeldung und API-Verbindung ..."
+        if (!dbManager.ibkrConnecting)
+            dbManager.connectToIbkr()
+    }
+
+    Connections {
+        target: dbManager
+        function onIbkrConnectionChanged() {
+            continuePendingIbkrQuoteBatchStart()
+        }
+    }
     onStockAnalysisCorridorPercentChanged: {
         if (stockAnalysisQuoteModel.count > 0) {
             updateStockAnalysisCorridorStats()
@@ -156,14 +341,14 @@ ApplicationWindow {
         { key: "status", label: "Status", format: "status" },
         { key: "mic", label: "MIC" },
         { key: "isin", label: "ISIN" },
-        { key: "exchange", label: "BÃ¶rse" },
-        { key: "countryCode", label: "LÃ¤ndercode" },
-        { key: "city", label: "BÃ¶rsenstadt" },
+        { key: "exchange", label: "Börse" },
+        { key: "countryCode", label: "Ländercode" },
+        { key: "city", label: "Börsenstadt" },
 
         { heading: true, label: "IBKR-Stammdaten" },
         { key: "ibkrConId", label: "IBKR ConId" },
-        { key: "currency", label: "WÃ¤hrung" },
-        { key: "primaryExchange", label: "PrimÃ¤rbÃ¶rse" },
+        { key: "currency", label: "Währung" },
+        { key: "primaryExchange", label: "Primärbörse" },
         { key: "localSymbol", label: "Lokales Symbol" },
         { key: "securityType", label: "Wertpapierart" },
         { key: "tradingClass", label: "Handelsklasse" },
@@ -174,14 +359,14 @@ ApplicationWindow {
         { key: "timeZoneId", label: "Zeitzone" },
         { key: "minTick", label: "Minimale Preisstufe", format: "decimal8" },
         { key: "marketRuleIds", label: "Market-Rule-IDs" },
-        { key: "validExchanges", label: "GÃ¼ltige HandelsplÃ¤tze" },
+        { key: "validExchanges", label: "Gültige Handelsplätze" },
         { key: "marketName", label: "Marktname" },
         { key: "cusip", label: "CUSIP" },
         { key: "ibkrLastSyncAt", label: "Letzte IBKR-Synchronisierung" },
 
         { heading: true, label: "Kennzahlen" },
         { key: "asOfDate", label: "Stichtag" },
-        { key: "fundamentalCurrency", label: "KennzahlenwÃ¤hrung" },
+        { key: "fundamentalCurrency", label: "Kennzahlenwährung" },
         { key: "marketCapitalization", label: "Marktkapitalisierung", format: "large" },
         { key: "enterpriseValue", label: "Unternehmenswert", format: "large" },
         { key: "peRatio", label: "KGV", format: "decimal2" },
@@ -194,7 +379,7 @@ ApplicationWindow {
         { key: "forwardEps", label: "Erwartetes EPS", format: "decimal2" },
         { key: "dividendPerShare", label: "Dividende je Aktie", format: "money" },
         { key: "dividendYield", label: "Dividendenrendite", format: "percent" },
-        { key: "payoutRatio", label: "AusschÃ¼ttungsquote", format: "percent" },
+        { key: "payoutRatio", label: "Ausschüttungsquote", format: "percent" },
         { key: "beta", label: "Beta", format: "decimal2" },
         { key: "revenue", label: "Umsatz", format: "large" },
         { key: "netIncome", label: "Nettogewinn", format: "large" },
@@ -210,19 +395,18 @@ ApplicationWindow {
     ]
 
     Timer {
-        id: clipboardTimer
-        interval: 2000
-        running: false
-        repeat: false
-        onTriggered: clipboardPopup.visible = false
-    }
-
-    Timer {
         id: stockAnalysisChartRefreshTimer
         interval: 80
         running: false
         repeat: false
         onTriggered: stockAnalysisChart.requestPaint()
+    }
+    Timer {
+        id: portfolioDetailsLoadTimer
+        interval: 120
+        running: false
+        repeat: false
+        onTriggered: loadSelectedPortfolioDetails()
     }
 
     Timer {
@@ -233,103 +417,8 @@ ApplicationWindow {
         onTriggered: processStockAnalysisScanBatch()
     }
 
-    Item {
-        id: clipboardPopup
-        anchors.horizontalCenter: parent.horizontalCenter
-        anchors.bottom: parent.bottom
-        anchors.bottomMargin: 30
-        visible: false
-        z: 99999
-
-        Rectangle {
-            color: "#404040"
-            radius: 10
-            opacity: 0.9
-            anchors.centerIn: parent
-            width: textItem.implicitWidth + 20
-            height: textItem.implicitHeight + 10
-
-            Text {
-                id: textItem
-                anchors.centerIn: parent
-                color: "white"
-                font.bold: true
-                font.pixelSize: 16
-                text: ""
-            }
-        }
-    }
-
-
-    Item {
-        id: loadingOverlay
-        anchors.fill: parent
-        visible: running
-        property bool running: false
-        property string message: "Laden..."
-        z: 9999
-
-        Rectangle {
-            anchors.fill: parent
-            color: "#66000000"  // halbtransparenter schwarzer Hintergrund
-        }
-
-        MouseArea {
-            anchors.fill: parent
-            enabled: true
-            preventStealing: true
-            hoverEnabled: true
-            cursorShape: Qt.WaitCursor
-            onClicked: {
-                // Benutzer darf nichts anklicken
-                console.log("â›” Eingabe blockiert wÃ¤hrend des Ladens")
-            }
-        }
-
-        Column {
-            anchors.centerIn: parent
-            spacing: 12
-
-            BusyIndicator {
-                anchors.horizontalCenter: parent.horizontalCenter
-                running: true
-                width: 80
-                height: 80
-            }
-
-            Label {
-                text: loadingOverlay.message
-                color: "white"
-                font.bold: true
-                font.pixelSize: 18
-                horizontalAlignment: Text.AlignHCenter
-                anchors.horizontalCenter: parent.horizontalCenter
-            }
-        }
-    }
-
-    // Entfernen Sie den anderen BusyIndicator (loadingIndicator) komplett
-    // Fehlermeldung
-    Label {
-        id: errorMessage
-        visible: false
-        color: "red"
-        Layout.fillWidth: true
-        wrapMode: Text.Wrap
-    }
-
     Connections {
         target: dbManager
-        function onGetSharesComplete(data) {
-            console.log("ðŸ“¥ SIGNAL getSharesComplete:", data.length)
-            loadingOverlay.running = false
-            updateStockModel(data);
-            if (data.length === 0) {
-                textItem.text = "Keine Aktien fuer die aktuellen Filter gefunden";
-                clipboardPopup.visible = true;
-                clipboardTimer.restart();
-            }
-        }
         function onIbkrStockDataUpdated(symbol) {
             loadTestPortfolio(symbol)
         }
@@ -338,203 +427,101 @@ ApplicationWindow {
         }
     }
 
-    function sortStockModelByField(field, ascending) {
-        const count = stockModel.count;
-
-        // Hole alle EintrÃ¤ge als echte JS-Objekte
-        let data = [];
-        for (let i = 0; i < count; i++) {
-            const raw = stockModel.get(i);
-            data.push(normalizeStockData(raw));  // Jetzt haben wir echte lesbare Properties
-        }
-
-        // Sortiere nach dem gewÃ¼nschten Feld
-        data.sort((a, b) => {
-            let valA = a[field];
-            let valB = b[field];
-            return ascending ? valA - valB : valB - valA;
-        });
-
-        // Liste leeren und neu befÃ¼llen
-        stockModel.clear();
-        data.forEach(item => stockModel.append(item));
-    }
-
-    function fieldValue(raw, names, fallback) {
-        for (let i = 0; i < names.length; i++) {
-            let value = raw[names[i]]
-            if (value !== undefined && value !== null)
-                return value
-        }
-        return fallback
-    }
-
-    function normalizeStockData(raw) {
-        return {
-            symbol: fieldValue(raw, ["symbol", "Symbol"], ""),
-            name: fieldValue(raw, ["name", "Name"], ""),
-            mic: fieldValue(raw, ["mic", "MIC", "exchange"], ""),
-            lastUpdateDate: fieldValue(raw, ["lastUpdateDate", "LastUpdateDate"], ""),
-            lastClosePrice: fieldValue(raw, ["lastClosePrice", "lastcloseprice"], 0),
-            lastClosePriceDate: fieldValue(raw, ["lastClosePriceDate", "lastclosepricedate"], ""),
-
-            daysFirstPeriodSuccess: fieldValue(raw, ["daysFirstPeriodSuccess", "daysfirstperiodsuccess"], 0),
-            daysSecondPeriodSuccess: fieldValue(raw, ["daysSecondPeriodSuccess", "dayssecondperiodsuccess"], 0),
-            daysThirdPeriodSuccess: fieldValue(raw, ["daysThirdPeriodSuccess", "daysthirdperiodsuccess"], 0),
-            daysFourthPeriodSuccess: fieldValue(raw, ["daysFourthPeriodSuccess", "daysfourthperiodsuccess"], 0),
-
-            firstPeriodValueInc: fieldValue(raw, ["firstPeriodValueInc", "firstperiodvalueinc"], 0),
-            secondPeriodValueInc: fieldValue(raw, ["secondPeriodValueInc", "secondperiodvalueinc"], 0),
-            thirdPeriodValueInc: fieldValue(raw, ["thirdPeriodValueInc", "thirdperiodvalueinc"], 0),
-            fourthPeriodValueInc: fieldValue(raw, ["fourthPeriodValueInc", "fourthperiodvalueinc"], 0),
-
-            firstPeriodVolume: fieldValue(raw, ["firstPeriodVolume", "firstperiodvolume"], 0),
-            secondPeriodVolume: fieldValue(raw, ["secondPeriodVolume", "secondperiodvolume"], 0),
-            thirdPeriodVolume: fieldValue(raw, ["thirdPeriodVolume", "thirdperiodvolume"], 0),
-            fourthPeriodVolume: fieldValue(raw, ["fourthPeriodVolume", "fourthperiodvolume"], 0),
-
-            firstPeriodVolumePrice: fieldValue(raw, ["firstPeriodVolumePrice", "firstperiodvolumeprice"], 0),
-            secondPeriodVolumePrice: fieldValue(raw, ["secondPeriodVolumePrice", "secondperiodvolumeprice"], 0),
-            thirdPeriodVolumePrice: fieldValue(raw, ["thirdPeriodVolumePrice", "thirdperiodvolumeprice"], 0),
-            fourthPeriodVolumePrice: fieldValue(raw, ["fourthPeriodVolumePrice", "fourthperiodvolumeprice"], 0),
-
-            selected: fieldValue(raw, ["selected"], false)
-        };
-    }
-
-
-    function updateStockAtIndex(modelIndex, stock) {
-        if (modelIndex < 0 || modelIndex >= stockModel.count) return;
-
-        stockModel.set(modelIndex, {
-            "name": stock.Name,
-            "lastUpdateDate": stock.LastUpdateDate,
-            "lastClosePrice": stock.lastcloseprice,
-            "lastClosePriceDate": stock.lastclosepricedate,
-            "mic": stock.MIC,
-            "daysFirstPeriodSuccess": stock.daysfirstperiodsuccess,
-            "daysSecondPeriodSuccess": stock.dayssecondperiodsuccess,
-            "daysThirdPeriodSuccess": stock.daysthirdperiodsuccess,
-            "daysFourthPeriodSuccess": stock.daysfourthperiodsuccess,
-            "firstPeriodValueInc": stock.firstperiodvalueinc,
-            "secondPeriodValueInc": stock.secondperiodvalueinc,
-            "thirdPeriodValueInc": stock.thirdperiodvalueinc,
-            "fourthPeriodValueInc": stock.fourthperiodvalueinc,
-            "firstPeriodVolume": stock.firstperiodvolume,
-            "secondPeriodVolume": stock.secondperiodvolume,
-            "thirdPeriodVolume": stock.thirdperiodvolume,
-            "fourthPeriodVolume": stock.fourthperiodvolume,
-            "firstPeriodVolumePrice": stock.firstperiodvolumeprice,
-            "secondPeriodVolumePrice": stock.secondperiodvolumeprice,
-            "thirdPeriodVolumePrice": stock.thirdperiodvolumeprice,
-            "fourthPeriodVolumePrice": stock.fourthperiodvolumeprice,
-            "selected": true
-        });
-        listView.positionViewAtIndex(modelIndex, ListView.Contain);
-    }
-
-    function updateStockModel(data) {
-        console.log("Data received, first item:", JSON.stringify(data.length > 0 ? data[0] : {}))
-        stockModel.clear()
-        data.forEach(stock => {
-            stockModel.append(normalizeStockData(stock))
-        })
-        resetSelection();
-        listView.contentY += 1
-        listView.contentY -= 1
-        listView.currentIndex = stockModel.count > 0 ? 0 : -1;
-    }
-
-    function loadAllStocks() {
-        loadingOverlay.running = true
-
-        const data = dbManager.getAllStocks()
-        stockModel.clear()
-        data.forEach(stock => stockModel.append(stock))
-        loadingOverlay.running = false
-        resetSelection()
-    }
-
-    function searchByTickerAndExchange() {
-        loadingOverlay.running = true
-        loadingOverlay.message = "Suche Aktie..."
-
-        let firstItem = firstPeriodLoader.item
-        let secondItem = secondPeriodLoader.item
-        let thirdItem = thirdPeriodLoader.item
-        let fourthItem = fourthPeriodLoader.item
-        let filterItem = filterSelectionLoader.item
-        let tickerText = tickerInput.text.trim()
-        let nameText = nameInput.text.trim()
-        let searchSymbol = tickerText.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")
-        let searchName = nameText.replace(/\\/g, "\\\\").replace(/"/g, "\\\"")
-        let searchByName = tickerText === "" && nameText !== ""
-
-        Qt.callLater(() => {
-            Qt.createQmlObject(`
-                import QtQuick 2.0
-                Timer {
-                    interval: 50
-                    running: true
-                    repeat: false
-                    onTriggered: {
-                        dbManager.${searchByName ? "getSharesByNameAsync" : "getSharesAsync"}(
-                            ${firstItem.toDay}, ${activeThreshold(firstItem)}, ${firstItem.greaterThan},
-                            ${secondItem.toDay}, ${activeThreshold(secondItem)}, ${secondItem.greaterThan},
-                            ${thirdItem.toDay}, ${activeThreshold(thirdItem)}, ${thirdItem.greaterThan},
-                            ${fourthItem.toDay}, ${activeThreshold(fourthItem)}, ${fourthItem.greaterThan},
-                            ${filterItem.salesPriceGreaterThan},
-                            ${getSortPeriodIndex()},
-                            ${filterItem.sortAscCheckBox.checked},
-                            "${searchByName ? searchName : searchSymbol}"
-                        )
-                        timer.start()
-                    }
-                }
-            `, mainWindow)
-        })
-    }
-
     function parseDecimal(text) {
         let value = Number(String(text).replace(",", "."))
         return isNaN(value) ? 0 : value
     }
 
-    function updateBoughtStockModel(data) {
-        boughtStockModel.clear()
-        data.forEach(stock => {
-            boughtStockModel.append({
-                symbol: fieldValue(stock, ["Symbol", "symbol"], ""),
-                name: fieldValue(stock, ["Name", "name"], ""),
-                buyDate: fieldValue(stock, ["BuyDate", "buyDate"], ""),
-                sellDate: fieldValue(stock, ["SellDate", "sellDate"], ""),
-                currentValue: fieldValue(stock, ["CurrentValue", "currentValue"], 0),
-                entryValue: fieldValue(stock, ["EntryValue", "entryValue"], 0),
-                valueIncreasePercent: fieldValue(stock, ["ValueIncreasePercent", "valueIncreasePercent"], 0),
-                quantity: fieldValue(stock, ["Quantity", "quantity"], 1),
-                analysisConfigName: fieldValue(stock, ["AnalysisConfigName", "analysisConfigName"], ""),
-                status: fieldValue(stock, ["Status", "status"], 0)
-            })
-        })
-        selectedBoughtStockIndex = boughtStockModel.count > 0 ? 0 : -1
-    }
-
-    function loadBoughtStocks() {
-        updateBoughtStockModel(dbManager.getBoughtStocks())
-    }
-
     function loadTestPortfolio(preferredSymbol) {
-        const data = dbManager.getTestPortfolio()
+        const data = dbManager.getTestPortfolioSummary()
+        let rows = []
+        data.forEach(item => rows.push(item))
+        portfolioRows = rows
+        updatePortfolioTotals()
+        portfolioLoaded = true
+        portfolioDetails = ({})
+        portfolioDetailsSymbol = ""
+        rebuildPortfolioModel(preferredSymbol, true)
+    }
+
+    function sortedPortfolioRows() {
+        let rows = portfolioRows.slice()
+        if (portfolioSortKey.length === 0)
+            return rows
+
+        rows.sort((a, b) => {
+            let valueA = 0
+            let valueB = 0
+            if (portfolioSortKey === "totalValue") {
+                valueA = portfolioPositionTotalValue(a)
+                valueB = portfolioPositionTotalValue(b)
+            } else if (portfolioSortKey === "gainPercent") {
+                valueA = Number(a.valueIncreasePercent || 0)
+                valueB = Number(b.valueIncreasePercent || 0)
+            }
+
+            if (valueA === valueB)
+                return String(a.name || a.symbol || "").localeCompare(String(b.name || b.symbol || ""))
+            return portfolioSortAscending ? valueA - valueB : valueB - valueA
+        })
+        return rows
+    }
+
+    function rebuildPortfolioModel(preferredSymbol, refreshDetails, scrollToTop) {
         portfolioModel.clear()
         let preferredIndex = -1
-        data.forEach((item, index) => {
+        sortedPortfolioRows().forEach((item, index) => {
             portfolioModel.append(item)
             if (preferredSymbol && item.symbol === preferredSymbol)
                 preferredIndex = index
         })
-        selectedPortfolioIndex = preferredIndex >= 0
-            ? preferredIndex
-            : (portfolioModel.count > 0 ? 0 : -1)
+        selectedPortfolioIndex = scrollToTop && portfolioModel.count > 0
+            ? 0
+            : (preferredIndex >= 0 ? preferredIndex : (portfolioModel.count > 0 ? 0 : -1))
+        if (scrollToTop) {
+            Qt.callLater(function() {
+                portfolioListView.positionViewAtBeginning()
+            })
+        }
+        if (refreshDetails !== false)
+            portfolioDetailsLoadTimer.restart()
+    }
+
+    function loadSelectedPortfolioDetails() {
+        if (selectedPortfolioIndex < 0 || selectedPortfolioIndex >= portfolioModel.count) {
+            portfolioDetails = ({})
+            portfolioDetailsSymbol = ""
+            return
+        }
+
+        const row = portfolioModel.get(selectedPortfolioIndex)
+        const symbol = row.symbol || ""
+        if (symbol === "" || portfolioDetailsSymbol === symbol)
+            return
+
+        const details = dbManager.getPortfolioDetails(symbol)
+        if (selectedPortfolioIndex >= 0
+                && selectedPortfolioIndex < portfolioModel.count
+                && portfolioModel.get(selectedPortfolioIndex).symbol === symbol) {
+            portfolioDetails = details
+            portfolioDetailsSymbol = symbol
+        }
+    }
+
+    function portfolioSortIcon(key) {
+        if (portfolioSortKey !== key)
+            return ""
+        return portfolioSortAscending ? "\u25b2" : "\u25bc"
+    }
+
+    function sortPortfolioBy(key) {
+        if (portfolioSortKey === key)
+            portfolioSortAscending = !portfolioSortAscending
+        else {
+            portfolioSortKey = key
+            portfolioSortAscending = true
+        }
+        rebuildPortfolioModel("", false, true)
     }
 
     function cleanDisplayText(value) {
@@ -556,49 +543,49 @@ ApplicationWindow {
             .replace(/\u00e2\u0080\u009d/g, "\u201d")
     }
 
+    function updatePortfolioTotals() {
+        let currentTotal = 0
+        let entryTotal = 0
+        let activeCount = 0
+        portfolioRows.forEach(row => {
+            const quantity = portfolioPositionQuantity(row)
+            currentTotal += quantity * Number(row.currentValue || 0)
+            entryTotal += quantity * Number(row.entryValue || 0)
+            if (Number(row.status || 0) !== 10)
+                activeCount++
+        })
+        portfolioTotalCurrentAmount = currentTotal
+        portfolioTotalEntryAmount = entryTotal
+        portfolioActiveCountValue = activeCount
+    }
     function selectedPortfolioValue(key) {
         if (selectedPortfolioIndex < 0 || selectedPortfolioIndex >= portfolioModel.count)
             return ""
         const row = portfolioModel.get(selectedPortfolioIndex)
+        if (portfolioDetailsSymbol === row.symbol
+                && portfolioDetails[key] !== undefined
+                && portfolioDetails[key] !== null)
+            return portfolioDetails[key]
         return row[key] === undefined || row[key] === null ? "" : row[key]
     }
-
     function portfolioTotalCurrentValue() {
-        let total = 0
-        for (let i = 0; i < portfolioModel.count; i++) {
-            let row = portfolioModel.get(i)
-            total += portfolioPositionQuantity(row) * Number(row.currentValue || 0)
-        }
-        return total
+        return portfolioTotalCurrentAmount
     }
 
     function portfolioTotalEntryValue() {
-        let total = 0
-        for (let i = 0; i < portfolioModel.count; i++) {
-            let row = portfolioModel.get(i)
-            total += portfolioPositionQuantity(row) * Number(row.entryValue || 0)
-        }
-        return total
+        return portfolioTotalEntryAmount
     }
 
     function portfolioTotalGainValue() {
-        return portfolioTotalCurrentValue() - portfolioTotalEntryValue()
+        return portfolioTotalCurrentAmount - portfolioTotalEntryAmount
     }
 
     function portfolioStatusCount(sold) {
-        let count = 0
-        for (let i = 0; i < portfolioModel.count; i++) {
-            let isSold = Number(portfolioModel.get(i).status || 0) === 10
-            if (isSold === sold)
-                count++
-        }
-        return count
+        return sold ? portfolioRows.length - portfolioActiveCountValue : portfolioActiveCountValue
     }
 
     function portfolioPerformancePercent() {
-        let entryValue = portfolioTotalEntryValue()
-        let currentValue = portfolioTotalCurrentValue()
-        return entryValue > 0 ? (currentValue - entryValue) / entryValue * 100 : 0
+        return portfolioTotalEntryAmount > 0 ? (portfolioTotalCurrentAmount - portfolioTotalEntryAmount) / portfolioTotalEntryAmount * 100 : 0
     }
 
     function portfolioPositionQuantity(row) {
@@ -672,387 +659,7 @@ ApplicationWindow {
                String(now.getDate()).padStart(2, "0")
     }
 
-    function sellSelectedBoughtStock() {
-        if (selectedBoughtStockIndex < 0 || selectedBoughtStockIndex >= boughtStockModel.count) {
-            boughtStockMessage = "Keine Aktie ausgewÃ¤hlt"
-            return
-        }
-
-        let stock = boughtStockModel.get(selectedBoughtStockIndex)
-        let ok = dbManager.saveBoughtStock(
-            stock.symbol,
-            stock.name,
-            stock.buyDate,
-            currentIsoDate(),
-            Number(stock.currentValue || 0),
-            Number(stock.entryValue || 0),
-            Number(stock.valueIncreasePercent || 0),
-            10,
-            Number(stock.quantity || 1),
-            stock.analysisConfigName || ""
-        )
-
-        if (ok) {
-            boughtStockMessage = "Verkauft"
-            loadBoughtStocks()
-        } else {
-            boughtStockMessage = "Verkaufen fehlgeschlagen"
-        }
-    }
-
-    function requestDeleteBoughtStock(index) {
-        if (index < 0 || index >= boughtStockModel.count) {
-            boughtStockMessage = "Keine Aktie ausgewÃ¤hlt"
-            return
-        }
-
-        selectedBoughtStockIndex = index
-        let stock = boughtStockModel.get(index)
-        pendingDeleteBoughtSymbol = stock.symbol
-        deleteBoughtStockDialog.open()
-    }
-
-    function deletePendingBoughtStock() {
-        if (!pendingDeleteBoughtSymbol)
-            return
-
-        let ok = dbManager.deleteBoughtStock(pendingDeleteBoughtSymbol)
-        if (ok) {
-            boughtStockMessage = "Aktie entfernt"
-            pendingDeleteBoughtSymbol = ""
-            loadBoughtStocks()
-        } else {
-            boughtStockMessage = "Entfernen fehlgeschlagen"
-        }
-    }
-
-    function resetSelection() {
-        selectedIndices = [];
-        selectedSymbols = [];
-        selectedExchanges = [];
-        selectionAnchor = -1;
-        loadStockQuotesButton.enabled = false;
-        updateSelectedItems(); // Model aktualisieren
-    }
-
     // Properties für die Mehrfachselektion
-    property var selectedIndices: []
-    property var selectedSymbols: []
-    property var selectedExchanges: []
-    property int selectionAnchor: -1
-
-    function updateSelection(index) {
-        if (selectedIndices.includes(index)) {
-            // Item bereits selektiert - entfernen
-            selectedIndices = selectedIndices.filter(i => i !== index)
-            selectedSymbols = selectedSymbols.filter((_, i) => selectedIndices.includes(i))
-            selectedExchanges = selectedExchanges.filter((_, i) => selectedIndices.includes(i))
-        } else {
-            // Item hinzufÃ¼gen
-            selectedIndices = [...selectedIndices, index]
-            selectedSymbols = [...selectedSymbols, stockModel.get(index).symbol]
-            selectedExchanges = [...selectedExchanges, stockModel.get(index).mic]
-        }
-
-        loadStockQuotesButton.enabled = selectedIndices.length > 0
-        console.log("âœ… Selektion geÃ¤ndert: ", selectedSymbols, selectedExchanges)
-    }
-
-    function selectRange(from, to, isCtrlPressed) {
-        const start = Math.min(from, to);
-        const end = Math.max(from, to);
-
-        let newSelection = [];
-        for (let i = start; i <= end; i++) {
-            newSelection.push(i);
-        }
-
-        if (isCtrlPressed) {
-            if ((to < from && currentListViewIndex < selectionAnchor) ||
-                (to > from && currentListViewIndex > selectionAnchor)) {
-                // Richtungswechsel - deselektiere den Bereich
-                selectedIndices = selectedIndices.filter(i => !newSelection.includes(i));
-            } else {
-                // FÃ¼ge neuen Bereich hinzu
-                selectedIndices = [...new Set([...selectedIndices, ...newSelection])];
-            }
-        } else {
-            selectedIndices = newSelection;
-        }
-
-        selectedIndices.sort((a, b) => a - b);
-        updateSelectedItems();
-    }
-
-
-    function isSelected(index) {
-        return selectedIndices.includes(index);
-    }
-
-    function updateSelectedItems() {
-        // ZurÃ¼cksetzen aller Selektionen im Model
-        for (var i = 0; i < stockModel.count; i++) {
-            stockModel.setProperty(i, "selected", selectedIndices.includes(i));
-        }
-
-        selectedSymbols = selectedIndices.map(i => stockModel.get(i).symbol);
-        selectedExchanges = selectedIndices.map(i => stockModel.get(i).mic);
-        loadStockQuotesButton.enabled = selectedIndices.length > 0;
-    }
-
-    function toggleSelection(index) {
-        if (selectedIndices.includes(index)) {
-            selectedIndices = selectedIndices.filter(i => i !== index);
-        } else {
-            selectedIndices = [...selectedIndices, index];
-        }
-        selectionAnchor = index; // Anchor immer auf die zuletzt angewÃ¤hlte Zeile setzen
-        updateSelectedItems();
-    }
-
-    function isMovingBackward(newIndex) {
-        if (selectionAnchor === -1) return false;
-        return (newIndex < currentIndex && currentIndex <= selectionAnchor) ||
-               (newIndex > currentIndex && currentIndex >= selectionAnchor);
-    }
-
-    function updatePeriods(changedIndex, field) {
-        let periods = [firstPeriodLoader, secondPeriodLoader, thirdPeriodLoader, fourthPeriodLoader]
-        let values = []
-
-        periods.forEach((loader, i) => {
-            const item = loader.item
-            values.push({
-                from: parseInt(item.fromDay),
-                to: parseInt(item.toDay),
-                loader: loader
-            })
-        })
-
-        let changed = values[changedIndex]
-        if (isNaN(changed.from) || isNaN(changed.to)) return
-
-        if (field === "from") {
-            const item = changed.loader.item
-            const oldFrom = parseInt(item.fromDayInput.propertyPreviousValue || changed.from)
-            const delta = changed.from - oldFrom
-            item.fromDayInput.propertyPreviousValue = changed.from.toString()
-            const span = changed.to - oldFrom
-            changed.to = changed.from + span
-            changed.loader.item.toDay = String(changed.to)
-
-            if (changedIndex > 0) {
-                values[changedIndex - 1].to = changed.from - 1
-                values[changedIndex - 1].loader.item.toDay = String(values[changedIndex - 1].to)
-            }
-
-            for (let k = changedIndex + 1; k < values.length; k++) {
-                values[k].from += delta
-                values[k].to += delta
-                values[k].loader.item.fromDay = String(values[k].from)
-                values[k].loader.item.toDay = String(values[k].to)
-            }
-        }
-
-        if (field === "to") {
-            if (changedIndex < values.length - 1) {
-                const next = values[changedIndex + 1]
-                const span = next.to - next.from
-                const newFrom = changed.to + 1
-                const newTo = newFrom + span
-
-                next.from = newFrom
-                next.to = newTo
-                next.loader.item.fromDay = String(newFrom)
-                next.loader.item.toDay = String(newTo)
-            }
-
-
-            for (let i = changedIndex + 1; i < values.length - 1; i++) {
-                const current = values[i]
-                const next = values[i + 1]
-                const span = next.to - next.from
-                const newFrom = current.to + 1
-                const newTo = newFrom + span
-
-                next.from = newFrom
-                next.to = newTo
-                next.loader.item.fromDay = String(newFrom)
-                next.loader.item.toDay = String(newTo)
-            }
-        }
-    }
-
-    function processSelectedStocks(index) {
-        if (index >= selectedSymbols.length) {
-            loadingOverlay.running = false;
-            timer.stop();
-            console.log("âœ… Alle historischen Daten wurden geladen");
-            return;
-        }
-
-        const symbol = selectedSymbols[index];
-        const exchange = selectedExchanges[index];
-        console.log("ðŸ“Š Lade Daten für:", symbol, exchange, `(${index+1}/${selectedSymbols.length})`);
-
-        function onSaveComplete(receivedSymbol) {
-            if (receivedSymbol !== symbol)
-                return; // Warten bis der *richtige* Datensatz gespeichert ist
-
-            dbManager.saveComplete.disconnect(onSaveComplete);
-            console.log("âœ… Speicherung abgeschlossen:", symbol);
-
-
-            let result = dbManager.getShares(
-                parseInt(firstPeriodLoader.item.toDay),
-                activeThreshold(firstPeriodLoader.item),
-                firstPeriodLoader.item.greaterThan,
-
-                parseInt(secondPeriodLoader.item.toDay),
-                activeThreshold(secondPeriodLoader.item),
-                secondPeriodLoader.item.greaterThan,
-
-                parseInt(thirdPeriodLoader.item.toDay),
-                activeThreshold(thirdPeriodLoader.item),
-                thirdPeriodLoader.item.greaterThan,
-
-                parseInt(fourthPeriodLoader.item.toDay),
-                activeThreshold(fourthPeriodLoader.item),
-                fourthPeriodLoader.item.greaterThan,
-
-                parseInt(filterSelectionLoader.item.salesPriceGreaterThan),
-                getSortPeriodIndex(),      // ðŸ‘ˆ Neue Hilfsfunktion, siehe unten
-                filterSelectionLoader.item.sortAscCheckBox.checked,
-                symbol
-            );
-
-            updateStockAtIndex(selectedIndices[index],result[0]);
-
-            // Starte nÃ¤chsten Schritt nach minimalem Delay
-            Qt.createQmlObject(`
-                import QtQuick 2.0
-                Timer {
-                    interval: 200
-                    running: true
-                    repeat: false
-                    onTriggered: {
-                        processSelectedStocks(${index + 1});
-                    }
-                }
-            `, mainWindow);
-        }
-
-        dbManager.saveComplete.connect(onSaveComplete);
-        dbManager.createQuotesForStock(symbol, exchange);
-    }
-
-    function getSortPeriodIndex() {
-        if (filterSelectionLoader.item.radioSortPeriod1.checked) return 1;
-        if (filterSelectionLoader.item.radioSortPeriod2.checked) return 2;
-        if (filterSelectionLoader.item.radioSortPeriod3.checked) return 3;
-        if (filterSelectionLoader.item.radioSortPeriod4.checked) return 4;
-        return 1; // Default-Fallback
-    }
-
-    function activeThreshold(periodItem) {
-        if (!periodItem || !periodItem.active)
-            return 0
-        let threshold = parseInt(periodItem.successThreshold)
-        return isNaN(threshold) ? 0 : threshold
-    }
-
-    function getConfiguredPeriods() {
-        let loaders = [firstPeriodLoader, secondPeriodLoader, thirdPeriodLoader, fourthPeriodLoader]
-        let fields = [
-            { success: "daysFirstPeriodSuccess", valueInc: "firstPeriodValueInc", volume: "firstPeriodVolume", volumePrice: "firstPeriodVolumePrice" },
-            { success: "daysSecondPeriodSuccess", valueInc: "secondPeriodValueInc", volume: "secondPeriodVolume", volumePrice: "secondPeriodVolumePrice" },
-            { success: "daysThirdPeriodSuccess", valueInc: "thirdPeriodValueInc", volume: "thirdPeriodVolume", volumePrice: "thirdPeriodVolumePrice" },
-            { success: "daysFourthPeriodSuccess", valueInc: "fourthPeriodValueInc", volume: "fourthPeriodVolume", volumePrice: "fourthPeriodVolumePrice" }
-        ]
-        let periods = []
-
-        for (let i = 0; i < loaders.length; i++) {
-            let item = loaders[i].item
-            if (!item || !item.active)
-                continue
-
-            let fromDay = parseInt(item.fromDay)
-            let toDay = parseInt(item.toDay)
-            if (isNaN(fromDay) || isNaN(toDay))
-                continue
-
-            periods.push({
-                index: i + 1,
-                label: "Periode " + (i + 1),
-                fromDay: fromDay,
-                toDay: toDay,
-                threshold: parseInt(item.successThreshold),
-                greaterThan: item.greaterThan,
-                successField: fields[i].success,
-                valueIncField: fields[i].valueInc,
-                volumeField: fields[i].volume,
-                volumePriceField: fields[i].volumePrice
-            })
-        }
-
-        return periods
-    }
-
-    function openDetailWindow(modelIndex) {
-        if (modelIndex < 0 || modelIndex >= stockModel.count)
-            return
-
-        let periods = getConfiguredPeriods()
-        if (periods.length === 0) {
-            textItem.text = "Keine aktive Periode ausgewÃ¤hlt"
-            clipboardPopup.visible = true
-            clipboardTimer.restart()
-            return
-        }
-
-        let stock = normalizeStockData(stockModel.get(modelIndex))
-        detailStock = stock
-        detailStockBought = dbManager.isBoughtStock(stock.symbol)
-        detailPeriods = periods
-        detailFromDay = periods[0].fromDay
-        detailToDay = periods[periods.length - 1].toDay
-        detailQuotes = dbManager.getQuoteDetails(stock.symbol, detailFromDay, detailToDay)
-        detailQuoteModel.clear()
-        detailQuotes.forEach(row => detailQuoteModel.append(row))
-        detailWindow.title = stock.symbol + " - Details"
-        detailWindow.show()
-        detailChart.requestPaint()
-    }
-
-    function buyDetailStock() {
-        if (!detailStock.symbol || detailStockBought)
-            return
-
-        let lastPrice = Number(detailStock.lastClosePrice || 0)
-        let ok = dbManager.saveBoughtStock(
-            detailStock.symbol,
-            detailStock.name,
-            currentIsoDate(),
-            "",
-            lastPrice,
-            lastPrice,
-            0,
-            0,
-            1,
-            ""
-        )
-
-        if (ok) {
-            detailStockBought = true
-            boughtStockMessage = "Gekauft"
-            loadBoughtStocks()
-            boughtStocksDialog.show()
-        } else {
-            textItem.text = "Kaufen fehlgeschlagen"
-            clipboardPopup.visible = true
-            clipboardTimer.restart()
-        }
-    }
 
     function stockAnalysisDb() {
         return LocalStorage.openDatabaseSync("ShareSelectorStockAnalysis", "1.0", "Stock Analyse", 100000)
@@ -1150,8 +757,8 @@ ApplicationWindow {
     }
 
     function saveStockAnalysisConfig() {
-        let configName = stockAnalysisConfigNameInput.text.trim()
-        let increasePercent = Number(stockAnalysisIncreaseInput.text.replace(",", "."))
+        let configName = stockAnalysisConfigPanel.configNameText.trim()
+        let increasePercent = Number(stockAnalysisConfigPanel.increaseText.replace(",", "."))
         let corridorPercent = stockAnalysisCorridorPercent
         let corridorRequiredPercent = stockAnalysisCorridorRequiredPercent
         let maxDrawdownPercent = stockAnalysisMaxDrawdownPercent
@@ -1194,8 +801,8 @@ ApplicationWindow {
 
         selectedStockAnalysisConfigIndex = rowIndex
         let cfg = stockAnalysisConfigModel.get(rowIndex)
-        stockAnalysisConfigNameInput.text = cfg.name
-        stockAnalysisIncreaseInput.text = String(cfg.increasePercent)
+        stockAnalysisConfigPanel.configNameText = cfg.name
+        stockAnalysisConfigPanel.increaseText = String(cfg.increasePercent)
         stockAnalysisCorridorPercent = cfg.corridorPercent === undefined ? 10 : cfg.corridorPercent
         stockAnalysisCorridorRequiredPercent = cfg.corridorRequiredPercent === undefined ? 0 : cfg.corridorRequiredPercent
         stockAnalysisMaxDrawdownPercent = cfg.maxDrawdownPercent === undefined ? 10 : cfg.maxDrawdownPercent
@@ -1207,28 +814,76 @@ ApplicationWindow {
 
     function newStockAnalysisConfig() {
         selectedStockAnalysisConfigIndex = -1
-        stockAnalysisConfigNameInput.text = ""
+        stockAnalysisConfigPanel.configNameText = ""
         stockAnalysisMessage = "Neue Konfiguration"
     }
 
+
+    function resetStockAnalysisSelectionState() {
+        selectedStockAnalysisIndex = -1
+        selectedStockAnalysisRows = []
+        stockAnalysisSelectionAnchor = -1
+        stockAnalysisStockSelected = false
+        stockAnalysisQuoteModel.clear()
+        stockAnalysisQuoteDateRangeText = ""
+        stockAnalysisCorridorHitPercent = 0
+        stockAnalysisActualIncreasePercent = 0
+        stockAnalysisRequiredCorridorPercent = 0
+        stockAnalysisActualMaxDrawdownPercent = 0
+        stockAnalysisChartRefreshTimer.restart()
+    }
+
+    function resetStockAnalysisForDirectSearch(active) {
+        stockAnalysisResultModel.clear()
+        resetStockAnalysisSelectionState()
+        stockAnalysisMessage = active ? "Direktsuche aktiviert" : "Direktsuche deaktiviert"
+    }
+    function stockAnalysisCandidateVisible(row) {
+        if (!stockAnalysisHideBoughtStocks)
+            return true
+        return !dbManager.isBoughtStock(row.symbol || "")
+    }
+
+    function removeBoughtStocksFromStockAnalysisResults() {
+        let removed = 0
+        for (let i = stockAnalysisResultModel.count - 1; i >= 0; i--) {
+            let row = stockAnalysisResultModel.get(i)
+            if (dbManager.isBoughtStock(row.symbol || "")) {
+                stockAnalysisResultModel.remove(i)
+                removed++
+            }
+        }
+        if (removed > 0)
+            resetStockAnalysisSelectionState()
+        return removed
+    }
+
+    function removeStockAnalysisResultsBySymbols(symbols) {
+        if (!stockAnalysisHideBoughtStocks || symbols.length === 0)
+            return 0
+        let normalizedSymbols = symbols.map(symbol => String(symbol || ""))
+        let removed = 0
+        for (let i = stockAnalysisResultModel.count - 1; i >= 0; i--) {
+            let row = stockAnalysisResultModel.get(i)
+            if (normalizedSymbols.indexOf(String(row.symbol || "")) >= 0) {
+                stockAnalysisResultModel.remove(i)
+                removed++
+            }
+        }
+        if (removed > 0)
+            resetStockAnalysisSelectionState()
+        return removed
+    }
+
     function runStockAnalysis() {
-        let increasePercent = Number(stockAnalysisIncreaseInput.text.replace(",", "."))
+        let increasePercent = Number(stockAnalysisConfigPanel.increaseText.replace(",", "."))
         if (isNaN(increasePercent)) {
             stockAnalysisMessage = "Steigerung um % ist ungueltig"
             return
         }
 
         stockAnalysisResultModel.clear()
-        stockAnalysisQuoteModel.clear()
-        stockAnalysisQuoteDateRangeText = ""
-        selectedStockAnalysisIndex = -1
-        selectedStockAnalysisRows = []
-        stockAnalysisSelectionAnchor = -1
-        stockAnalysisStockSelected = false
-        stockAnalysisCorridorHitPercent = 0
-        stockAnalysisActualIncreasePercent = 0
-        stockAnalysisRequiredCorridorPercent = 0
-        stockAnalysisActualMaxDrawdownPercent = 0
+        resetStockAnalysisSelectionState()
         let results = dbManager.getStockAnalysisResults(increasePercent, stockAnalysisQuoteCount)
         let found = 0
         results.forEach(row => {
@@ -1239,7 +894,8 @@ ApplicationWindow {
             row.increasepercent = trendIncreasePercent
             row.corridorhitpercent = hitPercent
             row.maxdrawdownpercent = maxDrawdown
-            if (trendIncreasePercent >= increasePercent
+            if (stockAnalysisCandidateVisible(row)
+                    && trendIncreasePercent >= increasePercent
                     && hitPercent >= stockAnalysisCorridorRequiredPercent
                     && maxDrawdown <= stockAnalysisMaxDrawdownPercent) {
                 stockAnalysisResultModel.append(row)
@@ -1478,24 +1134,91 @@ ApplicationWindow {
         return requiredBandOffset / allAverage * 100
     }
 
+    function startStockAnalysisSearch() {
+        if (stockAnalysisConfigPanel.directSearchActive) {
+            runStockAnalysisDirectSearch()
+            return
+        }
+        startStockAnalysisScan()
+    }
+
+    function runStockAnalysisDirectSearch() {
+        let isinText = stockAnalysisConfigPanel.directSearchIsinText.trim()
+        let nameText = stockAnalysisConfigPanel.directSearchNameText.trim()
+
+        if (isinText.length === 0 && nameText.length === 0) {
+            stockAnalysisMessage = "Direktsuche: Bitte ISIN oder Name eingeben"
+            return
+        }
+
+        stockAnalysisScanTimer.stop()
+        stockAnalysisScanActive = false
+        stockAnalysisResultModel.clear()
+        resetStockAnalysisSelectionState()
+
+        let rows = dbManager.findStockAnalysisDirectSearchStocks(isinText, nameText)
+        let found = 0
+
+        rows.forEach(baseRow => {
+            let row = dbManager.getStockAnalysisCandidate(baseRow.symbol || "", -1000000, stockAnalysisQuoteCount)
+            if (row.symbol === undefined || row.symbol === "") {
+                row = {
+                    symbol: baseRow.symbol || "",
+                    isin: baseRow.isin || "",
+                    name: baseRow.name || "",
+                    mic: baseRow.mic || "",
+                    quotesource: baseRow.quotesource || "-",
+                    increasepercent: 0,
+                    firstquotedate: "",
+                    firstcloseprice: 0,
+                    lastquotedate: "",
+                    lastcloseprice: 0,
+                    periodturnover: 0,
+                    totalquotecount: 0,
+                    quotecount: 0,
+                    revenue: 0,
+                    peratio: "",
+                    corridorhitpercent: 0,
+                    maxdrawdownpercent: 0
+                }
+            }
+
+            let quotes = dbManager.getQuoteDetails(row.symbol, 1, stockAnalysisQuoteCount)
+            if (quotes.length > 0) {
+                let newestQuote = quotes[0]
+                let oldestQuote = quotes[quotes.length - 1]
+                let turnover = 0
+                quotes.forEach(quote => {
+                    turnover += Number(quote.volume || 0) * Number(quote.closeprice || 0)
+                })
+
+                row.firstquotedate = oldestQuote.closedate || row.firstquotedate || ""
+                row.firstcloseprice = Number(oldestQuote.closeprice || row.firstcloseprice || 0)
+                row.lastquotedate = newestQuote.closedate || row.lastquotedate || ""
+                row.lastcloseprice = Number(newestQuote.closeprice || row.lastcloseprice || 0)
+                row.periodturnover = Number(row.periodturnover || turnover)
+                row.totalquotecount = Number(row.totalquotecount || quotes.length)
+                row.quotecount = quotes.length
+                row.increasepercent = trendIncreasePercentForQuotes(quotes)
+                row.corridorhitpercent = corridorHitPercentForQuotes(quotes)
+                row.maxdrawdownpercent = maxDrawdownForQuotes(quotes).percent
+            }
+
+            stockAnalysisResultModel.append(row)
+            found++
+        })
+
+        stockAnalysisMessage = found + " Treffer in der Direktsuche"
+    }
     function startStockAnalysisScan() {
-        let increasePercent = Number(stockAnalysisIncreaseInput.text.replace(",", "."))
+        let increasePercent = Number(stockAnalysisConfigPanel.increaseText.replace(",", "."))
         if (isNaN(increasePercent)) {
             stockAnalysisMessage = "Steigerung um % ist ungueltig"
             return
         }
 
         stockAnalysisResultModel.clear()
-        stockAnalysisQuoteModel.clear()
-        stockAnalysisQuoteDateRangeText = ""
-        selectedStockAnalysisIndex = -1
-        selectedStockAnalysisRows = []
-        stockAnalysisSelectionAnchor = -1
-        stockAnalysisStockSelected = false
-        stockAnalysisCorridorHitPercent = 0
-        stockAnalysisActualIncreasePercent = 0
-        stockAnalysisRequiredCorridorPercent = 0
-        stockAnalysisActualMaxDrawdownPercent = 0
+        resetStockAnalysisSelectionState()
         stockAnalysisScanSymbols = dbManager.getStockAnalysisIbkrSymbols()
         stockAnalysisScanIndex = 0
         stockAnalysisScanFound = 0
@@ -1516,11 +1239,11 @@ ApplicationWindow {
         stockAnalysisScanTimer.stop()
         stockAnalysisScanActive = false
         stockAnalysisMessage = "Stock-Analyse gestoppt: " + stockAnalysisScanIndex + "/" + stockAnalysisScanSymbols.length
-            + " geprueft, " + stockAnalysisScanFound + " gefunden"
+            + " geprüft, " + stockAnalysisScanFound + " gefunden"
     }
 
     function processStockAnalysisScanBatch() {
-        let increasePercent = Number(stockAnalysisIncreaseInput.text.replace(",", "."))
+        let increasePercent = Number(stockAnalysisConfigPanel.increaseText.replace(",", "."))
         let batchSize = 8
         let processed = 0
 
@@ -1542,7 +1265,8 @@ ApplicationWindow {
                     candidate.corridorhitpercent = hitPercent
                     candidate.maxdrawdownpercent = maxDrawdown
 
-                    if (trendIncreasePercent >= increasePercent
+                    if (stockAnalysisCandidateVisible(candidate)
+                            && trendIncreasePercent >= increasePercent
                             && hitPercent >= stockAnalysisCorridorRequiredPercent
                             && maxDrawdown <= stockAnalysisMaxDrawdownPercent) {
                         stockAnalysisResultModel.append(candidate)
@@ -1554,15 +1278,15 @@ ApplicationWindow {
             }
         }
 
-        stockAnalysisMessage = "Stock-Analyse laeuft: " + stockAnalysisScanIndex + "/" + stockAnalysisScanSymbols.length
-            + " geprueft, " + stockAnalysisScanFound + " gefunden"
+        stockAnalysisMessage = "Stock-Analyse läuft: " + stockAnalysisScanIndex + "/" + stockAnalysisScanSymbols.length
+            + " geprüft, " + stockAnalysisScanFound + " gefunden"
 
         if (stockAnalysisScanIndex >= stockAnalysisScanSymbols.length) {
             stockAnalysisScanTimer.stop()
             stockAnalysisScanActive = false
             sortStockAnalysisResults()
             stockAnalysisMessage = "Stock-Analyse abgeschlossen: " + stockAnalysisScanIndex + "/" + stockAnalysisScanSymbols.length
-                + " geprueft, " + stockAnalysisScanFound + " gefunden"
+                + " geprüft, " + stockAnalysisScanFound + " gefunden"
         }
     }
 
@@ -1725,14 +1449,14 @@ ApplicationWindow {
         if (selectedStockAnalysisConfigIndex >= 0
                 && selectedStockAnalysisConfigIndex < stockAnalysisConfigModel.count)
             return stockAnalysisConfigModel.get(selectedStockAnalysisConfigIndex).name || ""
-        return stockAnalysisConfigNameInput.text.trim()
+        return stockAnalysisConfigPanel.configNameText.trim()
     }
 
     function buySelectedStockAnalysisStocks() {
         let amount = parseDecimal(stockAnalysisBuyAmountInput.text)
         let buyDate = stockAnalysisBuyDateInput.text.trim()
         if (amount <= 0) {
-            stockAnalysisBuyError.text = "Bitte einen Betrag groesser 0 eintragen"
+            stockAnalysisBuyError.text = "Bitte einen Betrag größer 0 eintragen"
             return
         }
         if (!/^\d{4}-\d{2}-\d{2}$/.test(buyDate)) {
@@ -1741,6 +1465,7 @@ ApplicationWindow {
         }
 
         let saved = 0
+        let boughtSymbols = []
         let analysisConfigName = currentStockAnalysisConfigName()
         stockAnalysisBuyDialog.stocks.forEach(stock => {
             let entryPrice = Number(dbManager.closePriceOnOrBefore(stock.symbol, buyDate) || 0)
@@ -1761,16 +1486,68 @@ ApplicationWindow {
                 quantity,
                 analysisConfigName
             )
-            if (ok)
+            if (ok) {
                 saved++
+                boughtSymbols.push(stock.symbol)
+            }
         })
 
         stockAnalysisBuyDialog.close()
+        let removed = stockAnalysisHideBoughtStocks ? removeBoughtStocksFromStockAnalysisResults() : 0
+        if (removed === 0)
+            removed = removeStockAnalysisResultsBySymbols(boughtSymbols)
         stockAnalysisMessage = saved + " von " + stockAnalysisBuyDialog.stocks.length + " Positionen gekauft"
-        loadBoughtStocks()
+            + (removed > 0 ? ", " + removed + " aus Liste entfernt" : "")
         loadTestPortfolio("")
     }
 
+    function openPortfolioWindow() {
+        portfolioWindow.show()
+        portfolioWindow.raise()
+        portfolioWindow.requestActivate()
+    }
+    function openPortfolioChartWindow(row) {
+        if (!row || !row.symbol)
+            return
+
+        portfolioChartWindow.openForStock(row, dbManager.getPortfolioChartData(row.symbol))
+    }
+    function showPortfolioStockInAnalysis(row) {
+        if (!row || !row.symbol)
+            return
+
+        let targetIndex = -1
+        for (let i = 0; i < stockAnalysisResultModel.count; i++) {
+            if (stockAnalysisResultModel.get(i).symbol === row.symbol) {
+                targetIndex = i
+                break
+            }
+        }
+
+        if (targetIndex < 0) {
+            stockAnalysisResultModel.append({
+                nr: stockAnalysisResultModel.count + 1,
+                symbol: row.symbol,
+                isin: row.isin || "",
+                name: row.name || row.symbol,
+                turnover: 0,
+                peratio: row.fundamentalPERatio || "",
+                quotecount: stockAnalysisQuoteCount,
+                ibkrsource: "Depot",
+                corridorhitpercent: 0,
+                increasepercent: Number(row.valueIncreasePercent || 0),
+                maxdrawdownpercent: 0
+            })
+            targetIndex = stockAnalysisResultModel.count - 1
+        }
+
+        mainWindow.show()
+        mainWindow.raise()
+        mainWindow.requestActivate()
+        selectedStockAnalysisRows = [targetIndex]
+        stockAnalysisSelectionAnchor = targetIndex
+        selectStockAnalysisResult(targetIndex)
+    }
     function selectStockAnalysisResult(rowIndex) {
         if (rowIndex < 0 || rowIndex >= stockAnalysisResultModel.count)
             return
@@ -1786,507 +1563,8 @@ ApplicationWindow {
         stockAnalysisChart.requestPaint()
     }
 
-    Component {
-        id: periodSelectionComponent
-        GroupBox {
-            id: peridGbID
-            property string periodLabel: peridGbID.title
-            property alias fromDay: fromDayInput.text
-            property alias toDay: toDayInput.text
-            property alias successThreshold: successThresholdInput.text
-            property alias greaterThan: greaterThanCheckBox.checked
-            property alias fromDayInput: fromDayInput
-            property alias toDayInput: toDayInput
-            property alias active: disablePeriodSelectionID.checked
-            property int index: -1
-            Rectangle {
-                height: periodTextID.implicitHeight
-                width: periodTextID.implicitWidth + 5
-                anchors.left: parent.left
-                anchors.leftMargin: 10
-                anchors.top: parent.top
-                anchors.topMargin: -21
-                color:"white"
-                Text {
-                    id: periodTextID
-                    //height:parent.height
-                    //width: parent.width
-                    text: periodLabel
-                    font.bold: true
-                }
-            }
-            //label: periodLabel
-            ColumnLayout {
-                Layout.fillHeight: true
-                Layout.preferredWidth: 280
-                spacing: 10
-
-                RowLayout {
-                    spacing: 10
-                    Label { text: "Von Tag:"; Layout.preferredWidth: 100 }
-                    TextField {
-                        id: fromDayInput
-                        property string propertyPreviousValue: text
-                        placeholderText: "Von Tag"
-                        onTextChanged: {
-                            if (enabled) {
-                                if (!propertyPreviousValue || propertyPreviousValue === "") {
-                                    propertyPreviousValue = text
-                                    return
-                                }
-                                updatePeriods(index, "from")
-                            }
-                        }
-                    }
-                }
-
-                RowLayout {
-                    spacing: 10
-                    Label { text: "Bis Tag:"; Layout.preferredWidth: 100 }
-                    TextField {
-                        id: toDayInput
-                        Layout.fillWidth: true
-                        inputMethodHints: Qt.ImhDigitsOnly
-                        onTextChanged: if (enabled) updatePeriods(index, "to")
-                    }
-                }
-
-                RowLayout {
-                    spacing: 10
-                    Label { text: "Erfolgsschwelle:"; Layout.preferredWidth: 100 }
-                    RowLayout {
-                        spacing: 0
-                        Layout.fillWidth: true
-                        TextField {
-                            id: successThresholdInput
-                            Layout.fillWidth: true
-                            inputMethodHints: Qt.ImhDigitsOnly
-                            onTextChanged: {
-                                text = text.replace(/[^0-9]/g, "")
-                                if (text !== "") {
-                                    let val = parseInt(text)
-                                    if (val > 100) text = "100"
-                                    else if (val < 0) text = "0"
-                                }
-                            }
-                        }
-                        Label { text: "%"; font.pixelSize: 16; padding: 6 }
-                    }
-                }
-
-                RowLayout {
-                    spacing: 10
-                    Label { text: "Größer als:"; Layout.preferredWidth: 100 }
-                    CheckBox { id: greaterThanCheckBox; text: ""; checked: true; Layout.alignment: Qt.AlignLeft }
-                }
-
-            }
-            CheckBox {
-                id: disablePeriodSelectionID
-                checked: true
-                anchors.bottom: parent.bottom
-                anchors.right: parent.right
-                anchors.rightMargin: -10
-                contentItem: Text {
-                    anchors.bottom: parent.bottom
-                    anchors.bottomMargin: -10
-                    text: qsTr("aktiv")
-                    font: disablePeriodSelectionID.font
-                    color: disablePeriodSelectionID.enabled ? "black" : "gray"
-                    leftPadding: disablePeriodSelectionID.indicator.width
-                }
-                indicator: Rectangle {
-                    anchors.bottom: parent.bottom
-                    anchors.bottomMargin: -8
-                    width: 20
-                    height: 20
-                    border.color: "black"
-                    Rectangle {
-                        width: 14
-                        height: 14
-                        anchors.centerIn: parent
-                        color: disablePeriodSelectionID.checked ? "black" : "transparent"
-                    }
-                }
-            }
-        }
-    }
-
-    Component {
-        id: filterSelectionComponent
-        GroupBox {
-            id: peridGbID
-            property string periodLabel: peridGbID.title
-            property alias salesPriceGreaterThan: salesPriceGreaterThan.text
-            property alias sortAscCheckBox: sortAscCheckBox
-            property alias radioSortPeriod1: radioSortPeriod1
-            property alias radioSortPeriod2: radioSortPeriod2
-            property alias radioSortPeriod3: radioSortPeriod3
-            property alias radioSortPeriod4: radioSortPeriod4
-            Rectangle {
-                height: periodLabelID.implicitHeight
-                width: periodLabelID.implicitWidth + 5
-                anchors.left: parent.left
-                anchors.leftMargin: 10
-                anchors.top: parent.top
-                anchors.topMargin: -21
-                color:"white"
-                Text {
-                    id: periodLabelID
-                    text: periodLabel
-                    font.bold: true
-                }
-            }
-            //label: periodLabel
-            ColumnLayout {
-                id: salesID
-                Layout.fillHeight: true
-                Layout.preferredWidth: 280
-                spacing: 10
-                RowLayout {
-                    spacing: 5
-                    Layout.fillWidth: true
-                    Label { text: "Umsatz (P1) größer als:"}
-                    TextField {
-                        id: salesPriceGreaterThan
-                        Layout.fillWidth: true
-                        inputMethodHints: Qt.ImhDigitsOnly
-                        Layout.preferredWidth: 100
-                    }
-                }
-                RowLayout {
-                    spacing: 5
-                    Layout.fillWidth: true
-                    Frame {
-                        id: groupSortDaysID
-                        Layout.fillWidth: true
-                        background: Rectangle {
-                            id: groupSortDaysRectID
-                            border.width: 1
-                            width: salesPriceGreaterThan.x - x
-                            height: colSortDaysID.height + 15
-                        }
-                        Rectangle {
-                            height: sortIncDaysID.implicitHeight
-                            width: sortIncDaysID.implicitWidth + 5
-                            anchors.left: parent.left
-                            anchors.leftMargin: 10
-                            anchors.top: parent.top
-                            anchors.topMargin: -21
-                            Text {
-                                id: sortIncDaysID
-                                text: "Anstiege sortieren"
-                                font.bold: true
-                            }
-                        }
-                        ColumnLayout {
-                            id: colSortDaysID
-                            spacing: 5
-                            Layout.fillWidth: true
-                            RadioButton {
-                                id: radioSortPeriod1
-                                text: "Per. 1"
-                                checked: true
-                            }
-                            RadioButton {
-                                id: radioSortPeriod2
-                                text: "Per. 2"
-                            }
-                            RadioButton {
-                                id: radioSortPeriod3
-                                text: "Per. 3"
-                            }
-                            RadioButton {
-                                id: radioSortPeriod4
-                                text: "Per. 4"
-                            }
-                        }
-                        Rectangle {
-                            id: sortDirectionID
-                            anchors.left: parent.left
-                            anchors.leftMargin: parent.x + ((radioSortPeriod4.x + radioSortPeriod4.width) - parent.x)
-                            anchors.top: parent.top
-                            anchors.topMargin: radioSortPeriod4.y - groupSortDaysRectID.y
-                            x: radioSortPeriod4.bottom
-                            //Layout.alignment: Qt.AlignRight | Qt.AlignBottom // Positionierung im Layout
-                            //Layout.margins: 5  // Abstand zum Rand
-
-                            Row {
-                                id: xyzID
-                                CheckBox {
-                                    id: sortAscCheckBox
-                                    checked: false
-                                }
-                                Label {
-                                    text: sortAscCheckBox.checked ? "â†‘" : "â†“"
-                                    font.pixelSize: 30
-                                    font.bold: true
-                                    Component.onCompleted: {
-                                        x = x - 10
-                                        y = y - 5
-                                    }
-                                }
-                            }
-                            Component.onCompleted: {
-                                xyzID.x = xyzID.x + 20
-                            }
-                        }
-                    }
-                }
-            }
-            CheckBox {
-                id: disablePeriodSelectionID
-                checked: true
-                anchors.bottom: parent.bottom
-                anchors.right: parent.right
-                anchors.rightMargin: -10
-                contentItem: Text {
-                    anchors.bottom: parent.bottom
-                    anchors.bottomMargin: -10
-                    text: qsTr("aktiv")
-                    font: disablePeriodSelectionID.font
-                    color: disablePeriodSelectionID.enabled ? "black" : "gray"
-                    leftPadding: disablePeriodSelectionID.indicator.width
-                }
-                indicator: Rectangle {
-                    anchors.bottom: parent.bottom
-                    anchors.bottomMargin: -8
-                    width: 20
-                    height: 20
-                    border.color: "black"
-                    Rectangle {
-                        width: 14
-                        height: 14
-                        anchors.centerIn: parent
-                        color: disablePeriodSelectionID.checked ? "black" : "transparent"
-                    }
-                }
-            }
-        }
-    }
-
-    Window {
-        id: detailWindow
-        width: 1250
-        height: 760
-        minimumWidth: 900
-        minimumHeight: 580
-        modality: Qt.NonModal
-
-        Rectangle {
-            anchors.fill: parent
-            color: "#f4f6f7"
-
-            ColumnLayout {
-                anchors.fill: parent
-                anchors.margins: 12
-                spacing: 10
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 16
-
-                    ColumnLayout {
-                        Layout.fillWidth: true
-                        spacing: 2
-
-                        Label {
-                            text: (detailStock.symbol || "") + "  " + (detailStock.name || "")
-                            font.pixelSize: 22
-                            font.bold: true
-                            elide: Text.ElideRight
-                            Layout.fillWidth: true
-                        }
-
-                        Label {
-                            text: "Tage " + detailFromDay + " bis " + detailToDay + " | letzter Preis: " + (detailStock.lastClosePrice || "-") + " vom " + (detailStock.lastClosePriceDate || "-")
-                            color: "#4f5b62"
-                            Layout.fillWidth: true
-                            elide: Text.ElideRight
-                        }
-                    }
-
-                    Button {
-                        text: "Kaufen"
-                        enabled: Boolean(detailStock.symbol) && !detailStockBought
-                        onClicked: buyDetailStock()
-                    }
-
-                    Button {
-                        text: "Schließen"
-                        onClicked: detailWindow.close()
-                    }
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 8
-
-                    Repeater {
-                        model: detailPeriods
-
-                        Rectangle {
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: 96
-                            color: "#ffffff"
-                            border.color: "#d3d8dc"
-                            radius: 4
-
-                            ColumnLayout {
-                                anchors.fill: parent
-                                anchors.margins: 8
-                                spacing: 2
-
-                                Label {
-                                    text: modelData.label + " | Tag " + modelData.fromDay + "-" + modelData.toDay
-                                    font.bold: true
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideRight
-                                }
-
-                                Label {
-                                    text: "Anstiege: " + (detailStock[modelData.successField] || 0) + " | Grenze: " + (modelData.greaterThan ? ">" : "<") + " " + (modelData.threshold || 0)
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideRight
-                                }
-
-                                Label {
-                                    text: "Gesamt: " + Number(detailStock[modelData.valueIncField] || 0).toFixed(2) + "% | Volumen: " + (detailStock[modelData.volumeField] || 0)
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideRight
-                                }
-
-                                Label {
-                                    text: "Umsatz: " + (detailStock[modelData.volumePriceField] || 0)
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideRight
-                                }
-                            }
-                        }
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 230
-                    color: "#ffffff"
-                    border.color: "#d3d8dc"
-                    radius: 4
-
-                    Canvas {
-                        id: detailChart
-                        anchors.fill: parent
-                        anchors.margins: 12
-
-                        onPaint: {
-                            let ctx = getContext("2d")
-                            ctx.reset()
-                            ctx.clearRect(0, 0, width, height)
-
-                            let count = detailQuoteModel.count
-                            ctx.strokeStyle = "#d7dde1"
-                            ctx.lineWidth = 1
-                            ctx.beginPath()
-                            ctx.moveTo(0, height - 24)
-                            ctx.lineTo(width, height - 24)
-                            ctx.stroke()
-
-                            if (count === 0) {
-                                ctx.fillStyle = "#66727a"
-                                ctx.font = "14px sans-serif"
-                                ctx.fillText("Keine Kursdaten für diesen Bereich", 12, 28)
-                                return
-                            }
-
-                            let minPrice = Number(detailQuoteModel.get(0).closeprice)
-                            let maxPrice = minPrice
-                            for (let i = 1; i < count; i++) {
-                                let price = Number(detailQuoteModel.get(i).closeprice)
-                                minPrice = Math.min(minPrice, price)
-                                maxPrice = Math.max(maxPrice, price)
-                            }
-
-                            let range = Math.max(0.0001, maxPrice - minPrice)
-                            let leftPad = 52
-                            let rightPad = 16
-                            let topPad = 18
-                            let bottomPad = 34
-                            let plotWidth = Math.max(1, width - leftPad - rightPad)
-                            let plotHeight = Math.max(1, height - topPad - bottomPad)
-
-                            ctx.strokeStyle = "#5b8db8"
-                            ctx.lineWidth = 2
-                            ctx.beginPath()
-                            for (let j = 0; j < count; j++) {
-                                let row = detailQuoteModel.get(j)
-                                let x = leftPad + (count === 1 ? plotWidth / 2 : (j / (count - 1)) * plotWidth)
-                                let y = topPad + (1 - ((Number(row.closeprice) - minPrice) / range)) * plotHeight
-                                if (j === 0)
-                                    ctx.moveTo(x, y)
-                                else
-                                    ctx.lineTo(x, y)
-                            }
-                            ctx.stroke()
-
-                            ctx.fillStyle = "#4f5b62"
-                            ctx.font = "12px sans-serif"
-                            ctx.fillText(maxPrice.toFixed(2), 4, topPad + 8)
-                            ctx.fillText(minPrice.toFixed(2), 4, topPad + plotHeight)
-                            ctx.fillText("Tag " + detailFromDay, leftPad, height - 8)
-                            ctx.fillText("Tag " + detailToDay, Math.max(leftPad, width - 82), height - 8)
-                        }
-                    }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 1
-                    color: "#c9d0d5"
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 1
-                    Label { text: "Tag"; Layout.preferredWidth: 60; font.bold: true; horizontalAlignment: Text.AlignRight }
-                    Label { text: "Datum"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignHCenter }
-                    Label { text: "Open"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
-                    Label { text: "Close"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
-                    Label { text: "High"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
-                    Label { text: "Low"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
-                    Label { text: "Ã„nderung"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
-                    Label { text: "Volumen"; Layout.preferredWidth: 140; font.bold: true; horizontalAlignment: Text.AlignRight }
-                    Item { Layout.fillWidth: true }
-                }
-
-                ListView {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    model: detailQuoteModel
-                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-
-                    delegate: Rectangle {
-                        width: ListView.view.width
-                        height: 30
-                        color: index % 2 === 0 ? "#ffffff" : "#eef2f4"
-
-                        RowLayout {
-                            anchors.fill: parent
-                            spacing: 1
-                            Label { text: model.dayindex; Layout.preferredWidth: 60; horizontalAlignment: Text.AlignRight }
-                            Label { text: model.closedate; Layout.preferredWidth: 110; horizontalAlignment: Text.AlignHCenter }
-                            Label { text: Number(model.openprice || 0).toFixed(2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
-                            Label { text: Number(model.closeprice || 0).toFixed(2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
-                            Label { text: Number(model.highestprice || 0).toFixed(2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
-                            Label { text: Number(model.lowestprice || 0).toFixed(2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
-                            Label { text: Number(model.changepercent || 0).toFixed(2) + "%"; Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
-                            Label { text: model.volume || 0; Layout.preferredWidth: 140; horizontalAlignment: Text.AlignRight }
-                            Item { Layout.fillWidth: true }
-                        }
-                    }
-                }
-            }
-        }
+    PortfolioChartWindow {
+        id: portfolioChartWindow
     }
 
     Window {
@@ -2298,7 +1576,7 @@ ApplicationWindow {
         minimumHeight: 520
 
         onVisibleChanged: {
-            if (visible)
+            if (visible && !portfolioLoaded)
                 loadTestPortfolio()
         }
 
@@ -2351,12 +1629,12 @@ ApplicationWindow {
                             Label { text: "Depot"; color: "#475569"; Layout.preferredWidth: 130 }
                             Label { text: "Gekaufte Positionen"; font.bold: true; Layout.preferredWidth: 180 }
                             Label { text: "Positionen"; color: "#475569"; Layout.preferredWidth: 130 }
-                            Label { text: portfolioModel.count + " gesamt, " + portfolioStatusCount(false) + " aktiv"; font.bold: true; Layout.preferredWidth: 180 }
+                            Label { text: portfolioRows.length + " gesamt, " + portfolioActiveCountValue + " aktiv"; font.bold: true; Layout.preferredWidth: 180 }
 
                             Label { text: "Depotwert"; color: "#475569"; Layout.preferredWidth: 130 }
-                            Label { text: portfolioTotalCurrentValue().toLocaleString(Qt.locale(), "f", 2); font.bold: true; Layout.preferredWidth: 180 }
+                            Label { text: portfolioTotalCurrentAmount.toLocaleString(Qt.locale(), "f", 2); font.bold: true; Layout.preferredWidth: 180 }
                             Label { text: "Investiert"; color: "#475569"; Layout.preferredWidth: 130 }
-                            Label { text: portfolioTotalEntryValue().toLocaleString(Qt.locale(), "f", 2); font.bold: true; Layout.preferredWidth: 180 }
+                            Label { text: portfolioTotalEntryAmount.toLocaleString(Qt.locale(), "f", 2); font.bold: true; Layout.preferredWidth: 180 }
 
                             Label { text: "Gewinn/Verlust"; color: "#475569"; Layout.preferredWidth: 130 }
                             Label {
@@ -2428,10 +1706,50 @@ ApplicationWindow {
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 1
+                                Layout.preferredHeight: 28
+                                Layout.minimumHeight: 28
+                                Layout.maximumHeight: 28
                                 Label { text: "Name"; Layout.fillWidth: true; font.bold: true; leftPadding: 10 }
-                                Label { text: "Gesamtwert"; Layout.preferredWidth: 120; font.bold: true; horizontalAlignment: Text.AlignRight }
-                                Label { text: "Gewinn (%)"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Rectangle {
+                                    Layout.preferredWidth: 120
+                                    Layout.preferredHeight: 28
+                                    Layout.minimumHeight: 28
+                                    Layout.maximumHeight: 28
+                                    color: portfolioSortKey === "totalValue" ? "#e0f2fe" : "transparent"
+                                    Label {
+                                        anchors.fill: parent
+                                        text: "Gesamtwert " + portfolioSortIcon("totalValue")
+                                        font.bold: true
+                                        horizontalAlignment: Text.AlignRight
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: sortPortfolioBy("totalValue")
+                                    }
+                                }
+                                Rectangle {
+                                    Layout.preferredWidth: 90
+                                    Layout.preferredHeight: 28
+                                    Layout.minimumHeight: 28
+                                    Layout.maximumHeight: 28
+                                    color: portfolioSortKey === "gainPercent" ? "#e0f2fe" : "transparent"
+                                    Label {
+                                        anchors.fill: parent
+                                        text: "Gewinn (%) " + portfolioSortIcon("gainPercent")
+                                        font.bold: true
+                                        horizontalAlignment: Text.AlignRight
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: sortPortfolioBy("gainPercent")
+                                    }
+                                }
                                 Label { text: "Einstiegswert"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { text: "Aktualisiert"; Layout.preferredWidth: 95; font.bold: true; horizontalAlignment: Text.AlignRight }
                                 Label { text: "20 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
                                 Label { text: "40 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
                                 Label { text: "60 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
@@ -2477,6 +1795,7 @@ ApplicationWindow {
                                         }
                                         Label { text: formatPercentValue(model.valueIncreasePercent); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
                                         Label { text: Number(model.entryValue || 0).toLocaleString(Qt.locale(), "f", 2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
+                                        Label { text: model.quoteLastDate || "-"; Layout.preferredWidth: 95; horizontalAlignment: Text.AlignRight }
                                         Label { text: formatPercentValue(model.days20ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
                                         Label { text: formatPercentValue(model.days40ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
                                         Label { text: formatPercentValue(model.days60ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
@@ -2488,8 +1807,15 @@ ApplicationWindow {
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
                                         onClicked: function(mouse) {
                                             selectedPortfolioIndex = index
+                                            portfolioDetailsLoadTimer.restart()
                                             if (mouse.button === Qt.RightButton)
                                                 portfolioContextMenu.popup()
+                                        }
+                                        onDoubleClicked: function(mouse) {
+                                            mouse.accepted = true
+                                            selectedPortfolioIndex = index
+                                            portfolioDetailsLoadTimer.restart()
+                                            openPortfolioChartWindow(portfolioModel.get(index))
                                         }
                                     }
 
@@ -2627,6 +1953,7 @@ ApplicationWindow {
                                                     readOnly: true
                                                     Layout.fillWidth: true
                                                     Layout.fillHeight: true
+                                                    implicitWidth: 0
                                                     horizontalAlignment: Text.AlignLeft
                                                     verticalAlignment: Text.AlignVCenter
                                                     selectByMouse: true
@@ -2860,21 +2187,6 @@ ApplicationWindow {
         }
     }
 
-    Window {
-        id: stockAnalysisWindow
-        title: "Stock Analyse"
-        width: 1600
-        height: 1220
-        minimumWidth: 1200
-        minimumHeight: 1100
-
-        onVisibleChanged: {
-            if (visible) {
-                loadStockAnalysisConfigs()
-                loadLastStockAnalysisConfig()
-            }
-        }
-
         Rectangle {
             anchors.fill: parent
             color: "#f4f6f7"
@@ -2887,392 +2199,36 @@ ApplicationWindow {
                 anchors.bottomMargin: 44
                 spacing: 10
 
-                GroupBox {
-                    title: "Suchparameter"
+                StockAnalysisConfigPanel {
+                    id: stockAnalysisConfigPanel
+                    app: mainWindow
+                    hostWindow: mainWindow
+                    configModel: stockAnalysisConfigModel
+                    quoteModel: stockAnalysisQuoteModel
                     Layout.fillWidth: true
                     Layout.preferredHeight: 310
                     Layout.minimumHeight: 300
-                    clip: false
-
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.margins: 4
-                        spacing: 12
-
-                        Rectangle {
-                            Layout.preferredWidth: Math.max(300, stockAnalysisWindow.width * 0.22)
-                            Layout.maximumWidth: Math.max(300, stockAnalysisWindow.width * 0.22)
-                            Layout.fillHeight: true
-                            Layout.alignment: Qt.AlignTop
-                            color: "#ffffff"
-                            border.color: "#c9d0d5"
-                            radius: 4
-
-                            ColumnLayout {
-                                anchors.fill: parent
-                                anchors.margins: 8
-                                spacing: 4
-
-                                Label {
-                                    text: "Name"
-                                    font.bold: true
-                                    Layout.fillWidth: true
-                                }
-
-                                TextField {
-                                    id: stockAnalysisConfigNameInput
-                                    placeholderText: "Konfigurationsname"
-                                    Layout.fillWidth: true
-                                }
-
-                                Rectangle {
-                                    Layout.fillWidth: true
-                                    Layout.preferredHeight: 1
-                                    color: "#c9d0d5"
-                                }
-
-                                Label {
-                                    text: "Gespeicherte Konfigurationen"
-                                    font.bold: true
-                                    Layout.fillWidth: true
-                                }
-
-                                Rectangle {
-                                    Layout.fillWidth: true
-                                    Layout.preferredHeight: 130
-                                    Layout.maximumHeight: 130
-                                    color: "#ffffff"
-                                    border.color: "#d3d8dc"
-                                    radius: 4
-                                    clip: true
-
-                                    ListView {
-                                        id: stockAnalysisConfigListView
-                                        anchors.fill: parent
-                                        anchors.margins: 1
-                                        clip: true
-                                        model: stockAnalysisConfigModel
-                                        currentIndex: selectedStockAnalysisConfigIndex
-                                        boundsBehavior: Flickable.StopAtBounds
-                                        ScrollBar.vertical: ScrollBar {
-                                            policy: stockAnalysisConfigModel.count > stockAnalysisConfigListView.height / 32
-                                                ? ScrollBar.AlwaysOn
-                                                : ScrollBar.AsNeeded
-                                        }
-
-                                        delegate: Rectangle {
-                                            width: ListView.view.width
-                                            height: 32
-                                            color: selectedStockAnalysisConfigIndex === index ? "lightsteelblue" : (index % 2 === 0 ? "#ffffff" : "#eef2f4")
-
-                                            RowLayout {
-                                                anchors.fill: parent
-                                                anchors.leftMargin: 8
-                                                anchors.rightMargin: 8
-                                                spacing: 8
-
-                                                Label {
-                                                    text: model.name
-                                                    Layout.fillWidth: true
-                                                    elide: Text.ElideRight
-                                                }
-
-                                                Label {
-                                                    text: Number(model.increasePercent || 0).toFixed(0) + "% / "
-                                                        + Number(model.corridorPercent === undefined ? 10 : model.corridorPercent).toFixed(0) + "% / "
-                                                        + Number(model.corridorRequiredPercent === undefined ? 0 : model.corridorRequiredPercent).toFixed(0) + "% / "
-                                                        + Number(model.quoteCount === undefined ? 90 : model.quoteCount).toFixed(0) + " / "
-                                                        + Number(model.maxDrawdownPercent === undefined ? 10 : model.maxDrawdownPercent).toFixed(0) + "%"
-                                                    Layout.preferredWidth: 210
-                                                    horizontalAlignment: Text.AlignRight
-                                                    color: "#475569"
-                                                }
-                                            }
-
-                                            MouseArea {
-                                                anchors.fill: parent
-                                                onClicked: selectStockAnalysisConfig(index)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            Layout.fillHeight: true
-                            Layout.alignment: Qt.AlignTop
-                            spacing: 8
-
-                            GridLayout {
-                                Layout.fillWidth: true
-                                columns: 3
-                                columnSpacing: 8
-                                rowSpacing: 6
-
-                                Item { Layout.preferredWidth: 330 }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Layout.preferredWidth: 360
-                                    spacing: 8
-
-                                    Item { Layout.fillWidth: true }
-
-                                    Label {
-                                        text: "Soll"
-                                        Layout.preferredWidth: 44
-                                        font.bold: true
-                                        horizontalAlignment: Text.AlignRight
-                                    }
-                                }
-
-                                Label {
-                                    text: "Aktuell"
-                                    Layout.preferredWidth: 100
-                                    font.bold: true
-                                    horizontalAlignment: Text.AlignLeft
-                                }
-
-                                Label {
-                                    text: "Steigerung um %"
-                                    Layout.preferredWidth: 330
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Layout.preferredWidth: 360
-                                    spacing: 8
-
-                                    TextField {
-                                        id: stockAnalysisIncreaseInput
-                                        text: "10"
-                                        inputMethodHints: Qt.ImhFormattedNumbersOnly
-                                        horizontalAlignment: Text.AlignRight
-                                        Layout.preferredWidth: 100
-                                    }
-
-                                    Item { Layout.fillWidth: true }
-
-                                    Label {
-                                        text: {
-                                            let value = Number(stockAnalysisIncreaseInput.text.replace(",", "."))
-                                            return isNaN(value) ? "" : value.toFixed(0) + "%"
-                                        }
-                                        Layout.preferredWidth: 44
-                                        horizontalAlignment: Text.AlignRight
-                                    }
-                                }
-
-                                Label {
-                                    text: stockAnalysisStockSelected ? Number(stockAnalysisActualIncreasePercent || 0).toFixed(1) + "%" : "---"
-                                    Layout.preferredWidth: 100
-                                    horizontalAlignment: Text.AlignLeft
-                                    verticalAlignment: Text.AlignVCenter
-                                    font.bold: true
-                                    color: "#475569"
-                                }
-
-                                Label {
-                                    text: "Korridorbreite in % Ø aller Quotes"
-                                    Layout.preferredWidth: 330
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Layout.preferredWidth: 360
-                                    spacing: 8
-
-                                    Slider {
-                                        id: stockAnalysisCorridorSlider
-                                        from: 0
-                                        to: 50
-                                        stepSize: 2
-                                        snapMode: Slider.SnapAlways
-                                        value: stockAnalysisCorridorPercent
-                                        Layout.fillWidth: true
-                                        onMoved: {
-                                            stockAnalysisCorridorPercent = Math.round(value / 2) * 2
-                                        }
-                                    }
-
-                                    Label {
-                                        text: Number(stockAnalysisCorridorPercent || 0).toFixed(0) + "%"
-                                        Layout.preferredWidth: 44
-                                        horizontalAlignment: Text.AlignRight
-                                    }
-                                }
-
-                                Label {
-                                    text: stockAnalysisStockSelected ? Number(stockAnalysisRequiredCorridorPercent || 0).toFixed(1) + "%" : "---"
-                                    Layout.preferredWidth: 100
-                                    horizontalAlignment: Text.AlignLeft
-                                    verticalAlignment: Text.AlignVCenter
-                                    font.bold: true
-                                    color: "#475569"
-                                }
-
-                                Label {
-                                    text: "Werte im Korridor"
-                                    Layout.preferredWidth: 330
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Layout.preferredWidth: 360
-                                    spacing: 8
-
-                                    Slider {
-                                        id: stockAnalysisCorridorRequiredSlider
-                                        from: 0
-                                        to: 100
-                                        stepSize: 2
-                                        snapMode: Slider.SnapAlways
-                                        value: stockAnalysisCorridorRequiredPercent
-                                        Layout.fillWidth: true
-                                        onMoved: {
-                                            stockAnalysisCorridorRequiredPercent = Math.round(value / 2) * 2
-                                        }
-                                    }
-
-                                    Label {
-                                        text: Number(stockAnalysisCorridorRequiredPercent || 0).toFixed(0) + "%"
-                                        Layout.preferredWidth: 44
-                                        horizontalAlignment: Text.AlignRight
-                                    }
-                                }
-
-                                Label {
-                                    text: stockAnalysisStockSelected ? Number(stockAnalysisCorridorHitPercent || 0).toFixed(1) + "%" : "---"
-                                    Layout.preferredWidth: 100
-                                    horizontalAlignment: Text.AlignLeft
-                                    verticalAlignment: Text.AlignVCenter
-                                    font.bold: true
-                                    color: "#475569"
-                                }
-
-                                Label {
-                                    text: "Anzahl Kurswerte"
-                                    Layout.preferredWidth: 330
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Layout.preferredWidth: 360
-                                    spacing: 8
-
-                                    Slider {
-                                        id: stockAnalysisQuoteCountSlider
-                                        from: 10
-                                        to: 90
-                                        stepSize: 10
-                                        snapMode: Slider.SnapAlways
-                                        live: true
-                                        value: stockAnalysisQuoteCount
-                                        Layout.fillWidth: true
-                                        onMoved: setStockAnalysisQuoteCount(value, false)
-                                        onValueChanged: {
-                                            if (pressed)
-                                                setStockAnalysisQuoteCount(value, false)
-                                        }
-                                        onPressedChanged: {
-                                            if (!pressed)
-                                                setStockAnalysisQuoteCount(value, true)
-                                        }
-                                    }
-
-                                    Label {
-                                        text: Number(stockAnalysisQuoteCount || 90).toFixed(0)
-                                        Layout.preferredWidth: 44
-                                        horizontalAlignment: Text.AlignRight
-                                    }
-                                }
-
-                                Label {
-                                    text: stockAnalysisStockSelected
-                                        ? stockAnalysisQuoteModel.count + " Werte" + (stockAnalysisQuoteDateRangeText.length > 0 ? " | " + stockAnalysisQuoteDateRangeText : "")
-                                        : "---"
-                                    Layout.preferredWidth: 220
-                                    horizontalAlignment: Text.AlignLeft
-                                    verticalAlignment: Text.AlignVCenter
-                                    font.bold: true
-                                    color: "#475569"
-                                }
-
-                                Label {
-                                    text: "Größter Kursrückgang während Laufzeit"
-                                    Layout.preferredWidth: 330
-                                }
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Layout.preferredWidth: 360
-                                    spacing: 8
-
-                                    Slider {
-                                        id: stockAnalysisMaxDrawdownSlider
-                                        from: 0
-                                        to: 100
-                                        stepSize: 2
-                                        snapMode: Slider.SnapAlways
-                                        value: stockAnalysisMaxDrawdownPercent
-                                        Layout.fillWidth: true
-                                        onMoved: {
-                                            stockAnalysisMaxDrawdownPercent = Math.round(value / 2) * 2
-                                        }
-                                    }
-
-                                    Label {
-                                        text: Number(stockAnalysisMaxDrawdownPercent || 0).toFixed(0) + "%"
-                                        Layout.preferredWidth: 44
-                                        horizontalAlignment: Text.AlignRight
-                                    }
-                                }
-
-                                Label {
-                                    text: stockAnalysisStockSelected ? Number(stockAnalysisActualMaxDrawdownPercent || 0).toFixed(1) + "%" : "---"
-                                    Layout.preferredWidth: 100
-                                    horizontalAlignment: Text.AlignLeft
-                                    verticalAlignment: Text.AlignVCenter
-                                    font.bold: true
-                                    color: "#475569"
-                                }
-
-                            }
-
-                            Item { Layout.preferredHeight: 1 }
-                        }
-
-                        ColumnLayout {
-                            Layout.alignment: Qt.AlignRight | Qt.AlignTop
-                            Layout.preferredWidth: 110
-                            spacing: 8
-
-                            Button {
-                                text: stockAnalysisScanActive ? "Stoppen" : "Suchen"
-                                Layout.preferredWidth: 100
-                                onClicked: stockAnalysisScanActive ? stopStockAnalysisScan() : startStockAnalysisScan()
-                            }
-
-
-                            Button {
-                                text: "Neuanlage"
-                                Layout.preferredWidth: 100
-                                onClicked: newStockAnalysisConfig()
-                            }
-
-                            Button {
-                                text: "Ändern"
-                                Layout.preferredWidth: 100
-                                onClicked: saveStockAnalysisConfig()
-                            }
-                        }
-                    }
                 }
-
                 GroupBox {
+                    id: stockAnalysisResultsGroupBox
                     title: "Gefundene Stocks (" + stockAnalysisResultModel.count + ")"
+                    topPadding: 22
+                    label: Label {
+                        text: stockAnalysisResultsGroupBox.title
+                        x: 10
+                        y: 0
+                        padding: 2
+                        font.bold: true
+                        background: Rectangle { color: "#f4f6f7" }
+                    }
+                    background: Rectangle {
+                        y: stockAnalysisResultsGroupBox.label.height / 2
+                        width: parent.width
+                        height: parent.height - y
+                        color: "transparent"
+                        border.color: "#8b8b8b"
+                        border.width: 1
+                    }
                     Layout.fillWidth: true
                     Layout.preferredHeight: 250
 
@@ -3382,13 +2338,31 @@ ApplicationWindow {
                 }
 
                 GroupBox {
+                    id: stockAnalysisDisplayGroupBox
                     title: selectedStockAnalysisIndex >= 0
                         ? "Darstellung: " + stockAnalysisResultModel.get(selectedStockAnalysisIndex).name
                             + (stockAnalysisQuoteDateRangeText.length > 0 ? " (" + stockAnalysisQuoteDateRangeText + ")" : "")
                         : "Darstellung"
+                    topPadding: 22
+                    label: Label {
+                        text: stockAnalysisDisplayGroupBox.title
+                        x: 10
+                        y: 0
+                        padding: 2
+                        font.bold: true
+                        background: Rectangle { color: "#f4f6f7" }
+                    }
+                    background: Rectangle {
+                        y: stockAnalysisDisplayGroupBox.label.height / 2
+                        width: parent.width
+                        height: parent.height - y
+                        color: "transparent"
+                        border.color: "#8b8b8b"
+                        border.width: 1
+                    }
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    Layout.minimumHeight: stockAnalysisWindow.height * 0.42
+                    Layout.minimumHeight: mainWindow.height * 0.42
 
                     Canvas {
                         id: stockAnalysisChart
@@ -3737,7 +2711,6 @@ ApplicationWindow {
                 }
             }
         }
-    }
 
 
     Window {
@@ -3753,8 +2726,8 @@ ApplicationWindow {
         property var stocks: []
 
         function open() {
-            x = stockAnalysisWindow.x + Math.max(20, (stockAnalysisWindow.width - width) / 2)
-            y = stockAnalysisWindow.y + Math.max(20, (stockAnalysisWindow.height - height) / 2)
+            x = mainWindow.x + Math.max(20, (mainWindow.width - width) / 2)
+            y = mainWindow.y + Math.max(20, (mainWindow.height - height) / 2)
             show()
             raise()
             requestActivate()
@@ -3821,10 +2794,15 @@ ApplicationWindow {
     Window {
         id: portfolioBatchWindow
         title: "Depot-Batchaufrufe"
-        width: 760
-        height: 430
-        minimumWidth: 680
-        minimumHeight: 360
+        width: 900
+        height: 600
+        minimumWidth: 820
+        minimumHeight: 560
+
+        onVisibleChanged: if (visible) {
+            updateIbkrQuoteScheduleStatus()
+            checkIbkrGatewayOnly()
+        }
 
         Rectangle {
             anchors.fill: parent
@@ -3841,6 +2819,132 @@ ApplicationWindow {
                     font.bold: true
                 }
 
+                Label {
+                    text: "Geplanter IBKR-Quote-Batch über IB Gateway"
+                    font.bold: true
+                    Layout.fillWidth: true
+                }
+
+                GridLayout {
+                    Layout.fillWidth: true
+                    columns: 5
+                    columnSpacing: 10
+                    rowSpacing: 8
+
+                    CheckBox {
+                        id: ibkrQuoteScheduleEnabledInput
+                        text: "Automatisch an aktiven Handelstagen"
+                        checked: ibkrQuoteScheduleEnabled
+                        Layout.columnSpan: 2
+                        onToggled: {
+                            ibkrQuoteScheduleEnabled = checked
+                            saveIbkrQuoteSchedule()
+                        }
+                    }
+
+                    Label {
+                        text: "IB Gateway EXE"
+                        horizontalAlignment: Text.AlignRight
+                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                    }
+
+                    TextField {
+                        id: ibkrTradingAppPathInput
+                        text: ibkrTradingAppPath
+                        placeholderText: "Pfad zu ibgateway.exe (TWS nur alternativ)"
+                        selectByMouse: true
+                        Layout.columnSpan: 3
+                        Layout.fillWidth: true
+                        onEditingFinished: {
+                            ibkrTradingAppPath = text.trim()
+                            dbManager.saveAppSetting("ibkrTradingAppPath", ibkrTradingAppPath)
+                        }
+                    }
+
+                    Button {
+                        text: "Starten"
+                        Layout.fillWidth: true
+                        enabled: ibkrTradingAppPathInput.text.trim().length > 0
+                        onClicked: {
+                            ibkrTradingAppPath = ibkrTradingAppPathInput.text.trim()
+                            dbManager.saveAppSetting("ibkrTradingAppPath", ibkrTradingAppPath)
+                            dbManager.startIbkrTradingApp(ibkrTradingAppPath)
+                        }
+                    }
+
+                    Item { Layout.columnSpan: 4; Layout.fillWidth: true }
+                    Button {
+                        text: "Gateway/API prüfen"
+                        Layout.fillWidth: true
+                        enabled: canProbeIbkrGateway()
+                        onClicked: checkIbkrGatewayOnly()
+                    }
+
+                    Label {
+                        text: "Uhrzeit"
+                        horizontalAlignment: Text.AlignRight
+                        Layout.alignment: Qt.AlignVCenter | Qt.AlignRight
+                    }
+
+                    TextField {
+                        id: ibkrQuoteScheduleTimeInput
+                        text: ibkrQuoteScheduleTime
+                        placeholderText: "HH:MM"
+                        selectByMouse: true
+                        horizontalAlignment: Text.AlignHCenter
+                        inputMask: "99:99"
+                        Layout.preferredWidth: 82
+                        onEditingFinished: {
+                            ibkrQuoteScheduleTime = text.trim()
+                            updateIbkrQuoteScheduleStatus()
+                        }
+                    }
+
+                    Button {
+                        text: "Speichern"
+                        Layout.fillWidth: true
+                        onClicked: {
+                            ibkrQuoteScheduleTime = ibkrQuoteScheduleTimeInput.text.trim()
+                            saveIbkrQuoteSchedule()
+                        }
+                    }
+
+                    Label {
+                        text: ibkrQuoteScheduleStatus
+                        color: ibkrQuoteScheduleStatus.indexOf("Format") >= 0 || ibkrQuoteScheduleStatus.indexOf("nicht gestartet") >= 0 ? "#b91c1c" : "#475569"
+                        wrapMode: Text.WordWrap
+                        Layout.columnSpan: 4
+                        Layout.fillWidth: true
+                    }
+
+                    Label {
+                        text: dbManager.ibkrConnectionStatus
+                        color: dbManager.ibkrConnected ? "#15803d" : (dbManager.ibkrConnectionStatus.indexOf("Fehler:") === 0 || dbManager.ibkrConnectionStatus.indexOf("Keine") === 0 ? "#b91c1c" : "#475569")
+                        wrapMode: Text.WordWrap
+                        Layout.columnSpan: 4
+                        Layout.fillWidth: true
+                    }
+
+                    Button {
+                        text: "Jetzt ausführen"
+                        Layout.fillWidth: true
+                        enabled: canRequestIbkrQuoteBatchStart()
+                        onClicked: startIbkrQuoteBatchFromSchedule(true)
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: 1
+                    color: "#cbd5e1"
+                }
+
+                Label {
+                    text: "Manuelle Batchaufrufe"
+                    font.bold: true
+                    Layout.fillWidth: true
+                }
+
                 GridLayout {
                     Layout.fillWidth: true
                     columns: 2
@@ -3849,7 +2953,7 @@ ApplicationWindow {
 
                     Button { text: "IBKR Batch starten"; Layout.fillWidth: true; enabled: dbManager.ibkrConnected && !dbManager.ibkrDataLoading && !dbManager.ibkrBatchActive; onClicked: dbManager.startIbkrBatch() }
                     Button { text: "IBKR Batch stoppen"; Layout.fillWidth: true; enabled: dbManager.ibkrBatchActive; onClicked: dbManager.stopIbkrBatch() }
-                    Button { text: "IBKR Get Quotes starten"; Layout.fillWidth: true; enabled: dbManager.ibkrConnected && !dbManager.ibkrDataLoading && !dbManager.ibkrBatchActive && !dbManager.ibkrNameCheckBatchActive && !dbManager.ibkrGetStocksActive; onClicked: dbManager.startIbkrGetStocks() }
+                    Button { text: "IBKR Get Quotes starten"; Layout.fillWidth: true; enabled: canStartIbkrQuoteBatch(); onClicked: dbManager.startIbkrGetStocks() }
                     Button { text: "IBKR Get Quotes stoppen"; Layout.fillWidth: true; enabled: dbManager.ibkrGetStocksActive; onClicked: dbManager.stopIbkrGetStocks() }
                     Button { text: "Marketstack Set Exchange starten"; Layout.fillWidth: true; enabled: !dbManager.yahooFundamentalsBatchActive && !dbManager.marketstackBatchActive && !dbManager.marketstackQuotesBatchActive && !dbManager.marketstackValidationBatchActive; onClicked: dbManager.startMarketstackBatch() }
                     Button { text: "Marketstack Set Exchange stoppen"; Layout.fillWidth: true; enabled: dbManager.marketstackBatchActive; onClicked: dbManager.stopMarketstackBatch() }
@@ -3867,880 +2971,11 @@ ApplicationWindow {
                 RowLayout {
                     Layout.fillWidth: true
                     Item { Layout.fillWidth: true }
-                    Button { text: "Schlie\u00dfen"; onClicked: portfolioBatchWindow.close() }
+                    Button { text: "Schließen"; onClicked: portfolioBatchWindow.close() }
                 }
             }
         }
     }
 
-    Window {
-        id: boughtStocksDialog
-        title: "Gekaufte Aktien"
-        width: 1180
-        height: 620
-        minimumWidth: 900
-        minimumHeight: 420
 
-        onVisibleChanged: {
-            if (visible) {
-                boughtStockMessage = ""
-                loadBoughtStocks()
-            }
-        }
-
-        Rectangle {
-            anchors.fill: parent
-            color: "#f4f6f7"
-
-            ColumnLayout {
-                anchors.fill: parent
-                anchors.margins: 12
-                spacing: 10
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 1
-                    Label { text: "Symbol"; Layout.preferredWidth: 110; font.bold: true }
-                    Label { text: "Name"; Layout.preferredWidth: 260; font.bold: true }
-                    Label { text: "Gekauft"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignHCenter }
-                    Label { text: "Verkauft"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignHCenter }
-                    Label { text: "Aktuell"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignRight }
-                    Label { text: "Einstieg"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignRight }
-                    Label { text: "Steigerung"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignRight }
-                    Label { text: "Status"; Layout.preferredWidth: 70; font.bold: true; horizontalAlignment: Text.AlignHCenter }
-                    Item { Layout.fillWidth: true }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 1
-                    color: "#c9d0d5"
-                }
-
-                ListView {
-                    id: boughtStockListView
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    model: boughtStockModel
-                    currentIndex: selectedBoughtStockIndex
-                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-
-                    delegate: Rectangle {
-                        width: ListView.view.width
-                        height: 34
-                        color: selectedBoughtStockIndex === index ? "lightsteelblue" : (index % 2 === 0 ? "#ffffff" : "#eef2f4")
-
-                        RowLayout {
-                            anchors.fill: parent
-                            spacing: 1
-                            Label { text: model.symbol; Layout.preferredWidth: 110; elide: Text.ElideRight }
-                            Label { text: model.name; Layout.preferredWidth: 260; elide: Text.ElideRight }
-                            Label { text: model.buyDate; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignHCenter }
-                            Label { text: model.sellDate; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignHCenter }
-                            Label { text: Number(model.currentValue || 0).toFixed(2); Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight }
-                            Label { text: Number(model.entryValue || 0).toFixed(2); Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight }
-                            Label { text: Number(model.valueIncreasePercent || 0).toFixed(2) + "%"; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight }
-                            Label { text: model.status; Layout.preferredWidth: 70; horizontalAlignment: Text.AlignHCenter }
-                            Item { Layout.fillWidth: true }
-                        }
-
-                        MouseArea {
-                            anchors.fill: parent
-                            acceptedButtons: Qt.LeftButton | Qt.RightButton
-                            onClicked: function(mouse) {
-                                selectedBoughtStockIndex = index
-                                boughtStockMessage = ""
-                                if (mouse.button === Qt.RightButton)
-                                    boughtStockContextMenu.popup()
-                            }
-                        }
-
-                        Menu {
-                            id: boughtStockContextMenu
-                            MenuItem {
-                                text: "Aktie entfernen"
-                                onTriggered: requestDeleteBoughtStock(index)
-                            }
-                        }
-                    }
-                }
-
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 8
-
-                    Button {
-                        text: "Aktie entfernen"
-                        enabled: selectedBoughtStockIndex >= 0
-                        onClicked: requestDeleteBoughtStock(selectedBoughtStockIndex)
-                    }
-
-                    Label {
-                        text: boughtStockMessage
-                        color: boughtStockMessage === "Verkauft" ? "darkgreen" : "darkred"
-                        Layout.fillWidth: true
-                    }
-
-                    Button {
-                        text: "Verkaufen"
-                        enabled: selectedBoughtStockIndex >= 0
-                        onClicked: sellSelectedBoughtStock()
-                    }
-
-                    Button {
-                        text: "Abbrechen"
-                        onClicked: boughtStocksDialog.close()
-                    }
-                }
-            }
-        }
-    }
-
-    Dialog {
-        id: deleteBoughtStockDialog
-        title: "Aktie entfernen"
-        parent: boughtStocksDialog.contentItem
-        modal: true
-        standardButtons: Dialog.Yes | Dialog.No
-        closePolicy: Popup.CloseOnEscape
-        width: 420
-        anchors.centerIn: parent
-        onAccepted: deletePendingBoughtStock()
-        onRejected: pendingDeleteBoughtSymbol = ""
-
-        contentItem: Label {
-            text: "Die Aktie " + pendingDeleteBoughtSymbol + " endgÃ¼ltig entfernen?"
-            wrapMode: Text.Wrap
-        }
-    }
-
-    ColumnLayout {
-        anchors.fill: parent
-        spacing: 10
-
-        RowLayout {
-            Layout.fillWidth: true
-            spacing: 10
-
-            TextField {
-                id: tickerInput
-                Layout.preferredWidth: 200
-                placeholderText: "Ticker eingeben"
-            }
-
-            TextField {
-                id: nameInput
-                Layout.preferredWidth: 200
-                placeholderText: "Name eingeben"
-            }
-
-            Button {
-                text: "Suchen"
-                onClicked: searchByTickerAndExchange()
-            }
-
-            Button {
-                text: "ZurÃ¼cksetzen"
-                onClicked: {
-                    dbManager.updateAllISINs()
-                    return;
-                    /*
-                    tickerInput.text = ""
-                    nameInput.text = ""
-                    loadAllStocks()
-                    */
-                }
-
-            }
-            Button {
-                id: loadStockQuotesButton
-                text: "Lade Kurse für Selektion"
-                enabled: false
-                onClicked: {
-                    if (selectedSymbols.length === 0) return;
-
-                    console.log("ðŸ“Š Lade historische Daten für:", selectedSymbols.length, "Aktien");
-                    loadingOverlay.running = true;
-
-                    // Timer für das Fallback, falls etwas schief geht
-                    timer.interval = Math.max(10000, selectedSymbols.length * 2000); // Mindestens 10s, plus 2s pro Aktie
-                    timer.start();
-
-                    // Alle selektierten Aktien nacheinander verarbeiten
-                    processSelectedStocks(0);
-                }
-            }
-
-            Timer {
-                id: timer
-                interval: 10000
-                onTriggered: loadingOverlay.running = false
-            }
-
-            BusyIndicator {
-                id: loadingIndicator
-                running: false
-                Layout.alignment: Qt.AlignCenter
-            }
-
-            Button {
-                id: loadQuotesButton
-                text: "Lade alle Aktienkurse"
-                enabled: true
-                onClicked: {
-                    console.log("ðŸ“Š Lade historische Daten für alle Aktien")
-                    loadingOverlay.running = true
-                    dbManager.generateQuotesForAllStocks()
-                }
-            }
-
-            Item { Layout.fillWidth: true }
-
-            Button {
-                text: "Gekaufte Aktien"
-                onClicked: {
-                    boughtStockMessage = ""
-                    boughtStocksDialog.show()
-                }
-            }
-
-            Button {
-                text: "Mein Depot"
-                onClicked: portfolioWindow.show()
-            }
-
-            Button {
-                text: "Stock Analyse"
-                onClicked: stockAnalysisWindow.show()
-            }
-        }
-
-        Frame {
-            id: selectionArea
-            Layout.fillWidth: true
-            Layout.preferredHeight: 250
-            padding: 10
-
-            RowLayout {
-                id: selectionRoad
-                anchors.fill: parent
-                spacing: 20
-
-                Loader {
-                    id: firstPeriodLoader
-                    sourceComponent: periodSelectionComponent
-                    Layout.preferredWidth: 280
-                    Layout.fillHeight: true
-                    onLoaded: {
-                        Qt.callLater(() => {
-                            if (item !== null) {
-                                item.index = 0
-                                item.periodLabel = "Erste Periode:"
-                                item.fromDay = "1"
-                                item.toDay = "5"
-                                item.successThreshold = "3"
-                                item.fromDayInput.enabled = false
-                            }
-                        })
-                    }
-                }
-
-                Loader {
-                    id: secondPeriodLoader
-                    sourceComponent: periodSelectionComponent
-                    Layout.preferredWidth: 280
-                    Layout.fillHeight: true
-                    onLoaded: {
-                        Qt.callLater(() => {
-                            if (item !== null) {
-                                item.index = 1
-                                item.periodLabel = "Zweite Periode:"
-                                item.fromDay = "6"
-                                item.toDay = "15"
-                                item.successThreshold = "3"
-                            }
-                        })
-                    }
-                }
-
-                Loader {
-                    id: thirdPeriodLoader
-                    sourceComponent: periodSelectionComponent
-                    Layout.preferredWidth: 280
-                    Layout.fillHeight: true
-                    onLoaded: {
-                        Qt.callLater(() => {
-                            if (item !== null) {
-                                item.index = 2
-                                item.periodLabel = "Dritte Periode:"
-                                item.fromDay = "16"
-                                item.toDay = "35"
-                                item.successThreshold = "3"
-                            }
-                        })
-                    }
-                }
-
-                Loader {
-                    id: fourthPeriodLoader
-                    sourceComponent: periodSelectionComponent
-                    Layout.preferredWidth: 280
-                    Layout.fillHeight: true
-                    onLoaded: {
-                        Qt.callLater(() => {
-                            if (item !== null) {
-                                item.index = 3
-                                item.periodLabel = "Vierte Periode:"
-                                item.fromDay = "36"
-                                item.toDay = "75"
-                                item.successThreshold = "3"
-                            }
-                        })
-                    }
-                }
-                Loader {
-                    id: filterSelectionLoader
-                    sourceComponent: filterSelectionComponent
-                    Layout.preferredWidth: 280
-                    Layout.fillHeight: true
-                    onLoaded: {
-                        Qt.callLater(() => {
-                            if (item !== null) {
-                                //item.index = 3
-                                item.periodLabel = "Weitere Filter:"
-                                item.salesPriceGreaterThan = 10000
-                                //item.successThreshold = "3"
-                            }
-                        })
-                    }
-                }
-
-
-                Item { Layout.fillWidth: true }
-
-                ColumnLayout {
-                    Layout.fillHeight: true
-                    Layout.alignment: Qt.AlignBottom
-                    Button {
-                        text: "Aktien laden"
-                        onClicked: {
-                            let firstItem = firstPeriodLoader.item
-                            let secondItem = secondPeriodLoader.item
-                            let thirdItem = thirdPeriodLoader.item
-                            let fourthItem = fourthPeriodLoader.item
-                            let filterItem = filterSelectionLoader.item
-
-                            if (!firstItem || !secondItem || !thirdItem || !fourthItem) {
-                                console.warn("âš ï¸ Perioden-Komponenten nicht vollstÃ¤ndig geladen.")
-                                return
-                            }
-
-                            loadingOverlay.message = "Lade Aktien..."
-                            loadingOverlay.running = true
-
-                            Qt.callLater(() => {
-                                // Kleiner Timer-Delay, damit das UI das Overlay vorher zeigt
-                                Qt.createQmlObject(`
-                                    import QtQuick 2.0
-                                    Timer {
-                                        interval: 50
-                                        running: true
-                                        repeat: false
-                                        onTriggered: {
-                                            dbManager.getSharesAsync(
-                                                ${firstItem.toDay}, ${activeThreshold(firstItem)}, ${firstItem.greaterThan},
-                                                ${secondItem.toDay}, ${activeThreshold(secondItem)}, ${secondItem.greaterThan},
-                                                ${thirdItem.toDay}, ${activeThreshold(thirdItem)}, ${thirdItem.greaterThan},
-                                                ${fourthItem.toDay}, ${activeThreshold(fourthItem)}, ${fourthItem.greaterThan},
-                                                ${filterItem.salesPriceGreaterThan},
-                                                ${getSortPeriodIndex()},
-                                                ${filterItem.sortAscCheckBox.checked},""
-                                            )
-                                            timer.start()
-                                        }
-                                    }
-                                `, mainWindow)
-                            })
-                            Qt.callLater(() => listView.forceActiveFocus())
-                        }
-                    }
-                }
-            }
-        }
-
-        Frame {
-            Layout.fillWidth: true
-            Layout.fillHeight: true
-            padding: 0
-
-            background: Rectangle {
-                color: "#e8ede9"
-                border.color: "#cccccc"
-                radius: 2
-            }
-
-            ColumnLayout {
-                anchors.fill: parent
-                spacing: 0
-
-                // Header-Zeile
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 1
-                    Label { text: "#"; Layout.preferredWidth: 40; horizontalAlignment: Text.AlignHCenter; font.bold: true }
-                    Label {
-                        text: "Symbol"
-                        Layout.preferredWidth: 120
-                        font.bold: true
-                    }
-                    Label {
-                        text: "Name"
-                        Layout.preferredWidth: 270
-                        horizontalAlignment: Text.AlignLeft
-                        font.bold: true
-                    }
-                    Label { text: "BÃ¶rse"; Layout.preferredWidth: 60; font.bold: true; horizontalAlignment: Text.AlignLeft }
-                    Label { text: "Aktualisiert"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignHCenter }
-                    Label { text: "letzter Preis"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignRight }
-                    Label { text: "vom Datum"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignRight }
-                    Label {
-                        id: labelSortP1
-                        property string baseText: "AnstiegePeriode-1(Ges.%)"
-                        text: baseText + (currentSortPeriod === 1 ? (currentSortAsc ? "â†‘" : "â†“") : "")
-                        Layout.preferredWidth: 190
-                        horizontalAlignment: Text.AlignRight
-                        font.bold: true
-
-                        MouseArea {
-                            anchors.fill: parent
-                            acceptedButtons: Qt.LeftButton
-                            hoverEnabled: true
-                            onClicked: {
-                                if (currentSortPeriod === 1) {
-                                    currentSortAsc = !currentSortAsc
-                                } else {
-                                    currentSortPeriod = 1
-                                    currentSortAsc = false
-                                }
-                                sortStockModelByField("firstPeriodValueInc", currentSortAsc)
-                            }
-
-                            ToolTip.visible: containsMouse
-                            ToolTip.text: "Sortieren nach prozentueller ErhÃ¶hung"
-                            ToolTip.delay: 300
-                        }
-                    }
-
-                    Label {
-                        id: labelSortP2
-                        property string baseText: "-Periode-2(Ges.%)"
-                        text: baseText + (currentSortPeriod === 2 ? (currentSortAsc ? "â†‘" : "â†“") : "")
-                        Layout.preferredWidth: 140
-                        horizontalAlignment: Text.AlignRight
-                        font.bold: true
-
-                        MouseArea {
-                            anchors.fill: parent
-                            acceptedButtons: Qt.LeftButton
-                            hoverEnabled: true
-                            onClicked: {
-                                if (currentSortPeriod === 2) {
-                                    currentSortAsc = !currentSortAsc
-                                } else {
-                                    currentSortPeriod = 2
-                                    currentSortAsc = false
-                                }
-                                sortStockModelByField("secondPeriodValueInc", currentSortAsc)
-                            }
-
-                            ToolTip.visible: containsMouse
-                            ToolTip.text: "Sortieren nach prozentueller ErhÃ¶hung"
-                            ToolTip.delay: 300
-                        }
-                    }
-
-                    Label {
-                        id: labelSortP3
-                        property string baseText: "-Periode-3(Ges.%)"
-                        text: baseText + (currentSortPeriod === 3 ? (currentSortAsc ? "â†‘" : "â†“") : "")
-                        Layout.preferredWidth: 140
-                        horizontalAlignment: Text.AlignRight
-                        font.bold: true
-
-                        MouseArea {
-                            anchors.fill: parent
-                            acceptedButtons: Qt.LeftButton
-                            hoverEnabled: true
-                            onClicked: {
-                                if (currentSortPeriod === 3) {
-                                    currentSortAsc = !currentSortAsc
-                                } else {
-                                    currentSortPeriod = 3
-                                    currentSortAsc = false
-                                }
-                                sortStockModelByField("thirdPeriodValueInc", currentSortAsc)
-                            }
-
-                            ToolTip.visible: containsMouse
-                            ToolTip.text: "Sortieren nach prozentueller ErhÃ¶hung"
-                            ToolTip.delay: 300
-                        }
-                    }
-
-                    Label {
-                        id: labelSortP4
-                        property string baseText: "-Periode-4(Ges.%)"
-                        text: baseText + (currentSortPeriod === 4 ? (currentSortAsc ? "â†‘" : "â†“") : "")
-                        Layout.preferredWidth: 140
-                        horizontalAlignment: Text.AlignRight
-                        font.bold: true
-
-                        MouseArea {
-                            anchors.fill: parent
-                            acceptedButtons: Qt.LeftButton
-                            hoverEnabled: true
-                            onClicked: {
-                                if (currentSortPeriod === 4) {
-                                    currentSortAsc = !currentSortAsc
-                                } else {
-                                    currentSortPeriod = 4
-                                    currentSortAsc = false
-                                }
-                                sortStockModelByField("fourthPeriodValueInc", currentSortAsc)
-                            }
-
-                            ToolTip.visible: containsMouse
-                            ToolTip.text: "Sortieren nach prozentueller ErhÃ¶hung"
-                            ToolTip.delay: 300
-                        }
-                    }
-                    Label { text: "UmsatzP-1"; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight; font.bold: true }
-                    Label { text: "Volumen5T"; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight; font.bold: true }
-                    Label { text: "Volumen10T"; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight; font.bold: true }
-                    Label { text: "Volumen20T"; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight; font.bold: true }
-                    Label { text: "Volumen40T"; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight; font.bold: true }
-                }
-
-                Rectangle {
-                    Layout.fillWidth: true
-                    Layout.preferredHeight: 2
-                    color: "#aaaaaa"
-                }
-
-                // ListView mit Scrollbar
-                Item {
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-
-                    ListView {
-                        id: listView
-                        anchors.fill: parent
-                        model: stockModel
-                        clip: true
-                        focus: true
-                        // Ihre ListView-Konfiguration
-                        ScrollBar.vertical: ScrollBar {
-                            policy: ScrollBar.AsNeeded
-                            interactive: true
-                        }
-                        Keys.onPressed: function(event) {
-                            let newIndex = currentListViewIndex;
-                            const itemsPerPage = Math.floor(listView.height / 40); // ZeilenhÃ¶he ist 40
-
-                            switch (event.key) {
-                                case Qt.Key_Up:
-                                    if (currentListViewIndex > 0) newIndex--;
-                                    break;
-                                case Qt.Key_Down:
-                                    if (currentListViewIndex < listView.count - 1) newIndex++;
-                                    break;
-                                case Qt.Key_PageUp:
-                                    newIndex = Math.max(0, currentListViewIndex - itemsPerPage);
-                                    break;
-                                case Qt.Key_PageDown:
-                                    newIndex = Math.min(listView.count - 1, currentListViewIndex + itemsPerPage);
-                                    break;
-                                case Qt.Key_Home:
-                                    newIndex = 0;
-                                    break;
-                                case Qt.Key_End:
-                                    newIndex = listView.count - 1;
-                                    break;
-                                case Qt.Key_Space:
-                                    event.accepted = true;
-                                    if (currentListViewIndex >= 0) {
-                                        toggleSelection(currentListViewIndex);
-                                        updateSelectedItems();
-                                    }
-                                    return;
-                                default:
-                                    return;
-                            }
-
-                            if (newIndex !== currentListViewIndex) {
-                                const previousIndex = currentListViewIndex;
-                                currentListViewIndex = newIndex;
-                                listView.currentIndex = newIndex;
-
-                                if (event.modifiers & Qt.ShiftModifier) {
-                                    if (selectionAnchor === -1) {
-                                        selectionAnchor = previousIndex;
-                                        if (!(event.modifiers & Qt.ControlModifier)) {
-                                            selectedIndices = [previousIndex];
-                                        }
-                                    }
-                                    selectRange(selectionAnchor, newIndex, event.modifiers & Qt.ControlModifier);
-                                } else {
-                                    selectionAnchor = -1;
-                                }
-
-                                // Scrollen, damit die Zeile sichtbar bleibt
-                                listView.positionViewAtIndex(newIndex, ListView.Contain);
-                            }
-
-                            event.accepted = true;
-                        }
-
-                        function calculateItemsPerPage() {
-                            return Math.max(1, Math.floor(listView.height / 40)); // 40 ist die ZeilenhÃ¶he
-                        }
-
-                        function selectSingle(index) {
-                            selectedIndices = [index];
-                            selectedSymbol = stockModel.get(index).symbol;
-                            selectedExchange = stockModel.get(index).mic;
-                            updateSelectedItems();
-                        }
-
-                        function navigateAndSelect(newIndex, event) {
-                            const previousIndex = listView.currentIndex;
-
-                            if (event.modifiers & Qt.ShiftModifier) {
-                                if (selectionAnchor === -1) {
-                                    selectionAnchor = previousIndex;
-                                    selectedIndices = [previousIndex, newIndex];
-                                } else {
-                                    selectRange(selectionAnchor, newIndex);
-                                }
-                            } else {
-                                selectionAnchor = -1;
-                                if (!(event.modifiers & Qt.ControlModifier)) {
-                                    selectedIndices = [newIndex];
-                                }
-                            }
-
-                            listView.currentIndex = newIndex;
-                            selectedSymbols = selectedIndices.map(i => stockModel.get(i).symbol);
-                            selectedExchanges = selectedIndices.map(i => stockModel.get(i).mic);
-                            listView.positionViewAtIndex(newIndex, ListView.Contain);
-                        }
-
-                        function handleKeyboardSelection(event) {
-                            if (event.modifiers & Qt.ShiftModifier) {
-                                if (selectionAnchor === -1) {
-                                    selectionAnchor = currentListViewIndex;
-                                    selectedIndices = [currentListViewIndex];
-                                }
-                                selectRange(selectionAnchor, currentListViewIndex);
-                            } else {
-                                selectionAnchor = -1;
-                                if (!(event.modifiers & Qt.ControlModifier)) {
-                                    selectedIndices = [currentListViewIndex];
-                                }
-                            }
-                            updateSelectedItems();
-                        }
-
-                        function selectAll() {
-                            selectedIndices = [];
-                            selectedSymbols = [];
-                            selectedExchanges = [];
-
-                            for (let i = 0; i < stockModel.count; i++) {
-                                selectedIndices.push(i);
-                                selectedSymbols.push(stockModel.get(i).symbol);
-                                selectedExchanges.push(stockModel.get(i).mic);
-                            }
-
-                            loadStockQuotesButton.enabled = selectedIndices.length > 0;
-                            console.log("âœ… Alle selektiert: ", selectedSymbols.length + " Items");
-                        }
-
-                        Component.onCompleted: {
-                            forceActiveFocus()
-                            if (stockModel.count > 0) currentIndex = 0
-                        }
-
-                        highlight: Rectangle {
-                        }
-
-                        //highlightFollowsCurrentItem: true
-                        highlightMoveDuration: 0
-                        delegate: Item {
-                            width: listView.width
-                            height: 40
-                            // Hintergrund für Selektion
-                            Rectangle {
-                                id: bgRect
-                                anchors.fill: parent
-                                color: model.selected ? "lightsteelblue" : "transparent"
-                                radius: 2
-                            }
-
-                            // Fokus-Rahmen (sichtbar für aktuellen Fokus)
-                            Rectangle {
-                                anchors.fill: parent
-                                color: "transparent"
-                                border.color: listView.currentIndex === index ? "steelblue" : "transparent"
-                                border.width: 2
-                                radius: 2
-                            }
-
-                            RowLayout {
-                                spacing: 1
-
-                                Label {
-                                    text: (index + 1).toString()
-                                    Layout.preferredWidth: 40
-                                    horizontalAlignment: Text.AlignHCenter
-                                }
-                                Label {
-                                    text: model.symbol
-                                    Layout.preferredWidth: 120
-                                    horizontalAlignment: Text.AlignLeft
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        acceptedButtons: Qt.RightButton
-                                        onClicked: {
-                                            clipboardHelper.setText(model.symbol);
-                                            textItem.text = "Symbol \"" + model.symbol + "\" wurde kopiert";
-                                            clipboardPopup.visible = true;
-                                            clipboardTimer.restart();
-                                            console.log("Symbol kopiert: " + model.symbol);
-                                        }
-                                    }                                }
-                                Label {
-                                    text: model.name
-                                    Layout.preferredWidth: 270
-                                    horizontalAlignment: Text.AlignLeft
-                                    elide: Text.ElideRight
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        acceptedButtons: Qt.RightButton
-                                        onClicked: {
-                                            clipboardHelper.setText(model.name);
-                                            textItem.text = "Name \"" + model.name + "\" wurde kopiert";
-                                            clipboardPopup.visible = true;
-                                            clipboardTimer.restart();
-                                            console.log("Name kopiert: " + model.name);
-                                        }
-                                    }                                }
-                                Label {
-                                    text: model.mic
-                                    Layout.preferredWidth: 60
-                                    horizontalAlignment: Text.AlignLeft
-                                }
-                                Label {
-                                    text:model.lastUpdateDate
-                                    Layout.preferredWidth: 100
-                                    horizontalAlignment: Text.AlignHCenter
-                                }
-                                Label {
-                                    text: model.lastClosePrice
-                                    Layout.preferredWidth: 100
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                                Label {
-                                    text: model.lastClosePriceDate
-                                    Layout.preferredWidth: 100
-                                    horizontalAlignment: Text.AlignHCenter
-                                }
-                                Label {
-                                    text: model.daysFirstPeriodSuccess + "(" + model.firstPeriodValueInc.toFixed(2) + "%)"
-                                    Layout.preferredWidth: 190
-                                    horizontalAlignment: Text.AlignHCenter
-                                }
-                                Label {
-                                    text: model.daysSecondPeriodSuccess + "(" + model.secondPeriodValueInc.toFixed(2) + "%)"
-                                    Layout.preferredWidth: 140
-                                    horizontalAlignment: Text.AlignHCenter
-                                }
-                                Label {
-                                    text: model.daysThirdPeriodSuccess + "(" + model.thirdPeriodValueInc.toFixed(2) + "%)"
-                                    Layout.preferredWidth: 140
-                                    horizontalAlignment: Text.AlignHCenter
-                                }
-                                Label {
-                                    text: model.daysFourthPeriodSuccess + "(" + model.fourthPeriodValueInc.toFixed(2) + "%)"
-                                    Layout.preferredWidth: 140
-                                    horizontalAlignment: Text.AlignHCenter
-                                }
-                                Label {
-                                    text: model.firstPeriodVolumePrice
-                                    Layout.preferredWidth: 100
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                                Label {
-                                    text: model.firstPeriodVolume
-                                    Layout.preferredWidth: 100
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                                Label {
-                                    text: model.secondPeriodVolume
-                                    Layout.preferredWidth: 100
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                                Label {
-                                    text: model.thirdPeriodVolume
-                                    Layout.preferredWidth: 100
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                                Label {
-                                    text: model.fourthPeriodVolume
-                                    Layout.preferredWidth: 100
-                                    horizontalAlignment: Text.AlignRight
-                                }
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                acceptedButtons: Qt.LeftButton
-                                onClicked: function(mouse) {
-                                    const clickedIndex = index;
-                                    currentListViewIndex = clickedIndex;
-                                    listView.currentIndex = clickedIndex;
-                                    listView.forceActiveFocus();
-
-                                    if (mouse.modifiers & Qt.ShiftModifier) {
-                                        if (selectionAnchor === -1) {
-                                            selectionAnchor = currentListViewIndex;
-                                        }
-                                        selectRange(selectionAnchor, clickedIndex, mouse.modifiers & Qt.ControlModifier);
-                                    } else if (mouse.modifiers & Qt.ControlModifier) {
-                                        toggleSelection(clickedIndex);
-                                    } else {
-                                        selectedIndices = [clickedIndex];
-                                        selectionAnchor = clickedIndex;
-                                    }
-                                    updateSelectedItems();
-                                }
-                                onDoubleClicked: function(mouse) {
-                                    mouse.accepted = true;
-                                    currentListViewIndex = index;
-                                    listView.currentIndex = index;
-                                    if (!selectedIndices.includes(index)) {
-                                        selectedIndices = [index];
-                                        selectionAnchor = index;
-                                        updateSelectedItems();
-                                    }
-                                    openDetailWindow(index);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
 }

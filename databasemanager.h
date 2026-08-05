@@ -19,7 +19,6 @@
 #include <QNetworkReply>
 #include <QUrl>
 
-#include "sharedata.h"
 #include "marketstackclient.h"
 #include "alphavantageclient.h"
 #include "yahoofinanceclient.h"
@@ -63,9 +62,6 @@ public:
     ~DatabaseManager();
 
     bool connectToDatabase(const QString &host, const QString &dbName, const QString &user, const QString &password);
-    Q_INVOKABLE QVariantList searchByTickerAndExchange(const QString &ticker, const QString &exchange);
-    Q_INVOKABLE void saveShares(const QList<ShareData>& shares);
-    Q_INVOKABLE void updateShares(const QList<ShareData>& shares);
     Q_INVOKABLE void createQuotesForStock(const QString symbol, const QString exchange);
     Q_INVOKABLE void generateQuotesForAllStocks(); // Neue Methode für alle Stocks
     Q_INVOKABLE void generateQuoteForStock(const QString symbol, const QString exchange);
@@ -81,12 +77,19 @@ public:
         int quoteCount);
     Q_INVOKABLE QString lastStockAnalysisConfigName();
     Q_INVOKABLE bool saveLastStockAnalysisConfigName(const QString &name);
+    Q_INVOKABLE QString appSetting(const QString &key);
+    Q_INVOKABLE bool saveAppSetting(const QString &key, const QString &value);
     Q_INVOKABLE QVariantList getStockAnalysisIbkrSymbols();
+    Q_INVOKABLE QVariantList findStockAnalysisDirectSearchStocks(const QString &isin, const QString &name);
     Q_INVOKABLE QVariantMap getStockAnalysisCandidate(const QString &symbol, double minIncreasePercent, int quoteCount);
     Q_INVOKABLE QVariantList getBoughtStocks();
     Q_INVOKABLE double closePriceOnOrBefore(const QString &symbol, const QString &date);
     Q_INVOKABLE QVariantList getTestPortfolio();
+    Q_INVOKABLE QVariantList getTestPortfolioSummary();
+    Q_INVOKABLE QVariantMap getPortfolioDetails(const QString &symbol);
+    Q_INVOKABLE QVariantMap getPortfolioChartData(const QString &symbol);
     Q_INVOKABLE void connectToIbkr();
+    Q_INVOKABLE bool startIbkrTradingApp(const QString &programPath);
     Q_INVOKABLE void getIbkrData(const QString &symbol);
     Q_INVOKABLE void getAlphaVantageFundamentals(const QString &symbol);
     Q_INVOKABLE void startYahooFundamentalsBatch();
@@ -145,32 +148,7 @@ public:
         double quantity,
         const QString &analysisConfigName);
 
-    Q_INVOKABLE QVariantList getShares(
-        int firstTo, int firstThreshold, bool firstGreaterThan,
-        int secondTo, int secondThreshold, bool secondGreaterThan,
-        int thirdTo, int thirdThreshold, bool thirdGreaterThan,
-        int fourthTo, int fourthThreshold, bool fourthGreaterThan,
-        int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& symbol);
-
-    Q_INVOKABLE void getSharesAsync(
-        int firstTo, int firstThreshold, bool firstGreaterThan,
-        int secondTo, int secondThreshold, bool secondGreaterThan,
-        int thirdTo, int thirdThreshold, bool thirdGreaterThan,
-        int fourthTo, int fourthThreshold, bool fourthGreaterThan,
-        int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& symbol);
-    Q_INVOKABLE void getSharesByNameAsync(
-        int firstTo, int firstThreshold, bool firstGreaterThan,
-        int secondTo, int secondThreshold, bool secondGreaterThan,
-        int thirdTo, int thirdThreshold, bool thirdGreaterThan,
-        int fourthTo, int fourthThreshold, bool fourthGreaterThan,
-        int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& name);
-
     Q_INVOKABLE void updateAllISINs();
-
-
-    // In DatabaseManager.h, add this signal:
-    Q_SIGNAL void getSharesComplete(const QVariantList &shares);
-
 signals:
     Q_SIGNAL void saveComplete(QString symbol);
     Q_SIGNAL void ibkrConnectionChanged();
@@ -200,6 +178,7 @@ private:
     void finishIbkrQuotesRequest(const QJsonObject &result);
     void finishIbkrQuoteExchangeProbe(const QJsonObject &result);
     bool saveIbkrHistoricalQuotes(const QString &symbol, const QJsonArray &bars);
+    int ibkrMissingQuoteDays(const QString &symbol, int fallbackDays = 90);
     bool saveIbkrQuoteExchange(const QString &symbol,
                                const QString &quoteExchange,
                                double turnover,
@@ -427,18 +406,6 @@ private:
     int m_pendingIbkrNameCheckCandidateIndex = 0;
     QString getISINFromOpenFIGI(const QString &apiKey, const QString &ticker, const QString &exchangeCode);
 
-    void updateShare(const ShareData &share);
-    void saveShare(const ShareData &share);
-    QVariantList runShareQuery(const QString& sql);
-    QString convertToEodTicker(const QString& symbol);
-
-    QString buildShareQuery(
-        int firstTo, int firstThreshold, bool firstGreaterThan,
-        int secondTo, int secondThreshold, bool secondGreaterThan,
-        int thirdTo, int thirdThreshold, bool thirdGreaterThan,
-        int fourthTo, int fourthThreshold, bool fourthGreaterThan,
-        int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& symbol,
-        const QString& name = QString());
 
 
 };

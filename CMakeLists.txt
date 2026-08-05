@@ -4,7 +4,7 @@ project(ShareSelector VERSION 0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Quick Sql QuickControls2 Concurrent Network)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Quick Sql QuickControls2 Network)
 
 if(WIN32)
     set(TWS_API_ROOT "" CACHE PATH "Path to the installed IBKR TWS API")
@@ -60,18 +60,17 @@ qt_add_qml_module(appShareSelector
     VERSION 1.0
     QML_FILES
         Main.qml  # Groß-/Kleinschreibung prüfen!
+        PortfolioChartWindow.qml
+        StockAnalysisConfigPanel.qml
     SOURCES
         databasemanager.cpp
         databasemanager.h
-        SOURCES polygonstockapi.h polygonstockapi.cpp
-        SOURCES sharedata.h sharedata.cpp
-        QML_FILES ExportAktienManager.qml
-        SOURCES stockexportcontroller.h stockexportcontroller.cpp
-        SOURCES alphavantageclient.h alphavantageclient.cpp
-        SOURCES yahoofinanceclient.h yahoofinanceclient.cpp
-        SOURCES marketstackclient.h marketstackclient.cpp
-        SOURCES clipboardhelper.h
-        SOURCES isinfetcher.h isinfetcher.cpp
+        alphavantageclient.h
+        alphavantageclient.cpp
+        yahoofinanceclient.h
+        yahoofinanceclient.cpp
+        marketstackclient.h
+        marketstackclient.cpp
 )
 
 set_target_properties(appShareSelector PROPERTIES
@@ -82,7 +81,7 @@ set_target_properties(appShareSelector PROPERTIES
 )
 
 target_link_libraries(appShareSelector
-    PRIVATE Qt6::Quick Qt6::Sql Qt6::QuickControls2 Qt6::Concurrent Qt6::Network
+    PRIVATE Qt6::Quick Qt6::Sql Qt6::QuickControls2 Qt6::Network
 )
 
 include(GNUInstallDirs)

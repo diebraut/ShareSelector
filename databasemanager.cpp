@@ -14,7 +14,6 @@
 #include <QSet>
 #include <QStringList>
 #include <QUrlQuery>
-#include <QtConcurrent>
 
 #include <utility>
 
@@ -1841,18 +1840,18 @@ void DatabaseManager::startIbkrGetStocks()
 
     QSqlQuery query(db);
     query.prepare(R"SQL(
-        SELECT "Symbol"
-        FROM "Stocks"
-        WHERE COALESCE("Symbol", '') <> ''
-          AND "IBKRConId" IS NOT NULL
-          AND COALESCE("use_marketstack", FALSE) = FALSE
-          AND "IBKRQuoteExchangeLastSuccessAt" IS NULL
-          AND COALESCE("IBKRQuoteExchange", '') = ''
-        ORDER BY "Symbol"
+        SELECT DISTINCT s."Symbol"
+        FROM "Stocks" s
+        JOIN "BoughtStocks" b ON b."Symbol" = s."Symbol"
+        WHERE COALESCE(s."Symbol", '') <> ''
+          AND s."IBKRConId" IS NOT NULL
+          AND COALESCE(s."use_marketstack", FALSE) = FALSE
+          AND b."SellDate" IS NULL
+        ORDER BY s."Symbol"
     )SQL");
     if (!query.exec()) {
         setIbkrConnectionState(
-            QStringLiteral("Fehler: IBKR Get Quotes konnte die Aktienliste nicht laden: %1")
+            QStringLiteral("Fehler: IBKR Get Quotes konnte die Depot-Aktienliste nicht laden: %1")
                 .arg(query.lastError().text()),
             m_ibkrConnected,
             false);
@@ -1864,7 +1863,31 @@ void DatabaseManager::startIbkrGetStocks()
         m_ibkrGetStocksSymbols << query.value(0).toString();
 
     if (m_ibkrGetStocksSymbols.isEmpty()) {
-        setIbkrConnectionState(QStringLiteral("IBKR Get Quotes: Keine Aktien mit IBKRConId gefunden."), m_ibkrConnected, false);
+        query.prepare(R"SQL(
+            SELECT "Symbol"
+            FROM "Stocks"
+            WHERE COALESCE("Symbol", '') <> ''
+              AND "IBKRConId" IS NOT NULL
+              AND COALESCE("use_marketstack", FALSE) = FALSE
+              AND "IBKRQuoteExchangeLastSuccessAt" IS NULL
+              AND COALESCE("IBKRQuoteExchange", '') = ''
+            ORDER BY "Symbol"
+        )SQL");
+        if (!query.exec()) {
+            setIbkrConnectionState(
+                QStringLiteral("Fehler: IBKR Get Quotes konnte die Aktienliste nicht laden: %1")
+                    .arg(query.lastError().text()),
+                m_ibkrConnected,
+                false);
+            return;
+        }
+
+        while (query.next())
+            m_ibkrGetStocksSymbols << query.value(0).toString();
+    }
+
+    if (m_ibkrGetStocksSymbols.isEmpty()) {
+        setIbkrConnectionState(QStringLiteral("IBKR Get Quotes: Keine passenden Aktien mit IBKRConId gefunden."), m_ibkrConnected, false);
         return;
     }
 
@@ -1873,13 +1896,12 @@ void DatabaseManager::startIbkrGetStocks()
     m_ibkrGetStocksSuccessCount = 0;
     m_ibkrGetStocksFailureCount = 0;
     setIbkrConnectionState(
-        QStringLiteral("IBKR Get Quotes gestartet: Fuer %1 Aktien werden Boerse und 90-Tage-Quotes aktualisiert.")
+        QStringLiteral("IBKR Get Quotes gestartet: Fuer %1 Depot-Aktien werden Boerse und neue Quotes aktualisiert.")
             .arg(m_ibkrGetStocksSymbols.size()),
         m_ibkrConnected,
         false);
     scheduleNextIbkrGetStocksSymbol(100);
 }
-
 void DatabaseManager::stopIbkrGetStocks()
 {
     if (!m_ibkrGetStocksBatchActive
@@ -1926,7 +1948,7 @@ void DatabaseManager::loadNextIbkrGetStocksSymbol()
 
     if (m_ibkrGetStocksIndex >= m_ibkrGetStocksSymbols.size()) {
         finishIbkrGetStocksBatch(
-            QStringLiteral("IBKR Get Quotes abgeschlossen: %1 Aktien, %2 mit 90-Tage-Quotes gespeichert, %3 fehlgeschlagen.")
+            QStringLiteral("IBKR Get Quotes abgeschlossen: %1 Aktien, %2 mit neuen Quotes gespeichert, %3 fehlgeschlagen.")
                 .arg(m_ibkrGetStocksSymbols.size())
                 .arg(m_ibkrGetStocksSuccessCount)
                 .arg(m_ibkrGetStocksFailureCount));
@@ -1940,7 +1962,7 @@ void DatabaseManager::loadNextIbkrGetStocksSymbol()
     }
 
     setIbkrConnectionState(
-        QStringLiteral("IBKR Get Quotes: %1/%2 %3 - Boerse pruefen und 90-Tage-Quotes laden. OK: %4, Fehler: %5")
+        QStringLiteral("IBKR Get Quotes: %1/%2 %3 - Boerse pruefen und neue Quotes laden. OK: %4, Fehler: %5")
             .arg(m_ibkrGetStocksIndex)
             .arg(m_ibkrGetStocksSymbols.size())
             .arg(symbol)
@@ -3075,6 +3097,38 @@ bool DatabaseManager::resetMarketstackMapping(const QString &symbol, const QStri
     return true;
 }
 
+int DatabaseManager::ibkrMissingQuoteDays(const QString &symbol, int fallbackDays)
+{
+    const QString normalizedSymbol = symbol.trimmed();
+    const int calendarDaysForTradingWindow = qMax(1, ((fallbackDays * 7 + 4) / 5) + 21);
+    if (normalizedSymbol.isEmpty() || !db.isOpen())
+        return calendarDaysForTradingWindow;
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT
+            MAX("CloseDate") AS last_quote_date,
+            COUNT(*) FILTER (
+                WHERE COALESCE("ClosePrice", 0) > 0
+            ) AS valid_quote_count
+        FROM "Quotes"
+        WHERE "Symbol" = :symbol
+    )SQL");
+    query.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
+    if (!query.exec() || !query.next() || query.value(QStringLiteral("last_quote_date")).isNull())
+        return calendarDaysForTradingWindow;
+
+    const QDate lastQuoteDate = query.value(QStringLiteral("last_quote_date")).toDate();
+    if (!lastQuoteDate.isValid())
+        return calendarDaysForTradingWindow;
+
+    const int validQuoteCount = query.value(QStringLiteral("valid_quote_count")).toInt();
+    const int missingCalendarDays = qMax(1, lastQuoteDate.daysTo(QDate::currentDate()) + 2);
+    if (validQuoteCount < fallbackDays)
+        return qMax(missingCalendarDays, calendarDaysForTradingWindow);
+    return missingCalendarDays;
+}
+
 bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol)
 {
     QSqlQuery stockQuery(db);
@@ -3144,7 +3198,7 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
         }
         m_pendingIbkrQuotesProbeExchanges = ibkrQuoteFallbackExchanges(cachedPrimaryExchange, probeExchanges);
         m_pendingIbkrQuotesConId = conId;
-        m_pendingIbkrQuotesDays = 90;
+        m_pendingIbkrQuotesDays = ibkrMissingQuoteDays(m_pendingIbkrQuotesSymbol, 90);
         m_pendingIbkrQuotesFallbackIndex = 0;
         m_pendingIbkrQuotesSupportsSmart = supportsSmart;
         m_pendingIbkrQuotesForceDirectProbeResult = false;
@@ -3177,7 +3231,7 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
     m_pendingIbkrQuotesPrimaryExchange.clear();
     m_pendingIbkrQuotesProbeExchanges = probeExchanges;
     m_pendingIbkrQuotesConId = conId;
-    m_pendingIbkrQuotesDays = 90;
+    m_pendingIbkrQuotesDays = ibkrMissingQuoteDays(m_pendingIbkrQuotesSymbol, 90);
     m_pendingIbkrQuotesFallbackIndex = 0;
     m_pendingIbkrQuotesSupportsSmart = supportsSmart;
     m_pendingIbkrQuotesForceDirectProbeResult = false;
@@ -3199,7 +3253,7 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
         m_pendingIbkrQuotesPrimaryExchange = supportsSmart ? onlyExchange : QString();
         if (m_ibkrGetStocksBatchActive) {
             setIbkrConnectionState(
-                QStringLiteral("IBKR Get Quotes: %1 -> %2, beste Direktboerse %3. Quotes fuer 90 Tage werden geladen ... OK: %4, Fehler: %5.")
+                QStringLiteral("IBKR Get Quotes: %1 -> %2, beste Direktboerse %3. Neue Quotes werden geladen ... OK: %4, Fehler: %5.")
                     .arg(symbol, quoteExchange, onlyExchange)
                     .arg(m_ibkrGetStocksSuccessCount)
                     .arg(m_ibkrGetStocksFailureCount),
@@ -3465,6 +3519,41 @@ void DatabaseManager::stopIbkrNameCheckBatch()
             .arg(m_ibkrNameCheckBatchFailureCount));
 }
 
+bool DatabaseManager::startIbkrTradingApp(const QString &programPath)
+{
+    const QString trimmedPath = programPath.trimmed();
+    if (trimmedPath.isEmpty()) {
+        setIbkrConnectionState(QStringLiteral("Fehler: Pfad zu TWS/IB Gateway ist leer."), m_ibkrConnected, false);
+        return false;
+    }
+
+    const QFileInfo fileInfo(trimmedPath);
+    if (!fileInfo.exists() || !fileInfo.isFile()) {
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: TWS/IB Gateway wurde nicht gefunden: %1").arg(trimmedPath),
+            m_ibkrConnected,
+            false);
+        return false;
+    }
+
+    const bool started = QProcess::startDetached(
+        fileInfo.absoluteFilePath(),
+        QStringList(),
+        fileInfo.absolutePath());
+    if (!started) {
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: TWS/IB Gateway konnte nicht gestartet werden: %1").arg(trimmedPath),
+            m_ibkrConnected,
+            false);
+        return false;
+    }
+
+    setIbkrConnectionState(
+        QStringLiteral("TWS/IB Gateway wurde gestartet. Warte auf Anmeldung und API-Verbindung ..."),
+        m_ibkrConnected,
+        false);
+    return true;
+}
 void DatabaseManager::connectToIbkr()
 {
     if (m_ibkrSocket.state() == QAbstractSocket::ConnectedState) {
@@ -3885,7 +3974,7 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
             m_pendingIbkrQuotesPrimaryExchange.clear();
             m_pendingIbkrQuotesProbeExchanges = fallbackExchanges;
             m_pendingIbkrQuotesConId = conId;
-            m_pendingIbkrQuotesDays = days <= 0 ? 90 : days;
+            m_pendingIbkrQuotesDays = days <= 0 ? ibkrMissingQuoteDays(symbol, 90) : days;
             m_pendingIbkrQuotesFallbackIndex = 0;
             m_pendingIbkrQuotesSupportsSmart = supportsSmart;
             m_pendingIbkrQuotesForceDirectProbeResult = true;
@@ -3965,7 +4054,7 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
     updateIbkrQuoteExchangeSuccess(symbol);
 
     setIbkrConnectionState(
-        QStringLiteral("IBKR Get Quotes: %1 Quotes fuer %2 (%3) gespeichert; vorhandene Quotes wurden ersetzt.")
+        QStringLiteral("IBKR Get Quotes: %1 neue Quotes fuer %2 (%3) gespeichert.")
             .arg(bars.size())
             .arg(symbol, isin),
         m_ibkrConnected,
@@ -4013,10 +4102,10 @@ void DatabaseManager::finishIbkrQuoteExchangeProbe(const QJsonObject &result)
                 m_pendingIbkrQuotesPrimaryExchange = m_pendingIbkrQuotesSupportsSmart
                     ? fallbackExchange
                     : QString();
-                m_pendingIbkrQuotesDays = 90;
+                m_pendingIbkrQuotesDays = ibkrMissingQuoteDays(m_pendingIbkrQuotesSymbol, 90);
                 m_pendingIbkrProcessIsHistoricalQuotes = true;
                 setIbkrConnectionState(
-                    QStringLiteral("IBKR Get Quotes: %1 -> %2, beste Direktboerse %3 als Fallback. Quotes fuer 90 Tage werden geladen ... OK: %4, Fehler: %5.")
+                    QStringLiteral("IBKR Get Quotes: %1 -> %2, beste Direktboerse %3 als Fallback. Neue Quotes werden geladen ... OK: %4, Fehler: %5.")
                         .arg(m_pendingIbkrQuotesSymbol, quoteExchange, fallbackExchange)
                         .arg(m_ibkrGetStocksSuccessCount)
                         .arg(m_ibkrGetStocksFailureCount),
@@ -4130,10 +4219,10 @@ void DatabaseManager::finishIbkrQuoteExchangeProbe(const QJsonObject &result)
     updateIbkrQuoteExchangeSuccess(m_pendingIbkrQuotesSymbol);
     m_pendingIbkrProcessIsQuoteExchangeProbe = false;
     if (m_ibkrGetStocksBatchActive) {
-        m_pendingIbkrQuotesDays = 90;
+        m_pendingIbkrQuotesDays = ibkrMissingQuoteDays(m_pendingIbkrQuotesSymbol, 90);
         m_pendingIbkrProcessIsHistoricalQuotes = true;
         setIbkrConnectionState(
-            QStringLiteral("IBKR Get Quotes: %1 -> %2, beste Direktboerse %3 gespeichert. Quotes fuer 90 Tage werden geladen ... OK: %4, Fehler: %5.")
+            QStringLiteral("IBKR Get Quotes: %1 -> %2, beste Direktboerse %3 gespeichert. Neue Quotes werden geladen ... OK: %4, Fehler: %5.")
                 .arg(m_pendingIbkrQuotesSymbol, quoteExchange, exchange)
                 .arg(m_ibkrGetStocksSuccessCount)
                 .arg(m_ibkrGetStocksFailureCount),
@@ -4154,19 +4243,6 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol, const QJso
 
     if (!db.transaction()) {
         qCritical() << "IBKR-Quotes konnten keine Transaktion starten:" << db.lastError().text();
-        return false;
-    }
-
-    QSqlQuery deleteQuery(db);
-    deleteQuery.prepare(R"SQL(
-        DELETE FROM "Quotes"
-        WHERE "Symbol" = :symbol
-    )SQL");
-    deleteQuery.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
-    if (!deleteQuery.exec()) {
-        qCritical() << "Bestehende Quotes konnten nicht geloescht werden:"
-                    << deleteQuery.lastError().text() << normalizedSymbol;
-        db.rollback();
         return false;
     }
 
@@ -6474,6 +6550,13 @@ bool DatabaseManager::ensureSchema()
     }
 
     QSqlQuery query(db);
+    if (!query.exec(QStringLiteral("SET LOCAL client_min_messages TO warning"))) {
+        qCritical() << "Schema-Migration konnte PostgreSQL-Hinweise nicht filtern:"
+                    << query.lastError().text();
+        db.rollback();
+        return false;
+    }
+
     for (const QString &statement : statements) {
         if (query.exec(statement))
             continue;
@@ -6635,6 +6718,63 @@ bool DatabaseManager::saveLastStockAnalysisConfigName(const QString &name)
     return true;
 }
 
+QString DatabaseManager::appSetting(const QString &key)
+{
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return QString();
+    }
+
+    const QString trimmedKey = key.trimmed();
+    if (trimmedKey.isEmpty())
+        return QString();
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT "Value"
+        FROM "AppSettings"
+        WHERE "Key" = :key
+        LIMIT 1
+    )SQL");
+    query.bindValue(":key", trimmedKey);
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Laden der App-Einstellung:" << query.lastError().text();
+        return QString();
+    }
+
+    return query.next() ? query.value(0).toString() : QString();
+}
+
+bool DatabaseManager::saveAppSetting(const QString &key, const QString &value)
+{
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return false;
+    }
+
+    const QString trimmedKey = key.trimmed();
+    if (trimmedKey.isEmpty())
+        return false;
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        INSERT INTO "AppSettings" ("Key", "Value", "UpdatedAt")
+        VALUES (:key, :value, CURRENT_TIMESTAMP)
+        ON CONFLICT ("Key") DO UPDATE SET
+            "Value" = EXCLUDED."Value",
+            "UpdatedAt" = CURRENT_TIMESTAMP
+    )SQL");
+    query.bindValue(":key", trimmedKey);
+    query.bindValue(":value", value);
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Speichern der App-Einstellung:" << query.lastError().text();
+        return false;
+    }
+
+    return true;
+}
 QVariantList DatabaseManager::getBoughtStocks()
 {
     QVariantList results;
@@ -6647,18 +6787,34 @@ QVariantList DatabaseManager::getBoughtStocks()
     QSqlQuery query(db);
     query.prepare(R"SQL(
         SELECT
-            "Symbol",
-            "Name",
-            TO_CHAR("BuyDate", 'YYYY-MM-DD') AS "BuyDate",
-            TO_CHAR("SellDate", 'YYYY-MM-DD') AS "SellDate",
-            "CurrentValue",
-            "EntryValue",
-            "ValueIncreasePercent",
-            "Status",
-            COALESCE("Quantity", 1) AS "Quantity",
-            COALESCE("AnalysisConfigName", '') AS "AnalysisConfigName"
-        FROM "BoughtStocks"
-        ORDER BY "BuyDate" DESC, "Symbol" ASC
+            b."Symbol",
+            b."Name",
+            TO_CHAR(b."BuyDate", 'YYYY-MM-DD') AS "BuyDate",
+            TO_CHAR(b."SellDate", 'YYYY-MM-DD') AS "SellDate",
+            CASE
+                WHEN b."Status" = 10 THEN b."CurrentValue"
+                ELSE COALESCE(lq.latest_close, b."CurrentValue")
+            END AS "CurrentValue",
+            b."EntryValue",
+            CASE
+                WHEN NULLIF(b."EntryValue", 0) IS NULL THEN b."ValueIncreasePercent"
+                ELSE ROUND(((CASE WHEN b."Status" = 10 THEN b."CurrentValue" ELSE COALESCE(lq.latest_close, b."CurrentValue") END - b."EntryValue") / NULLIF(b."EntryValue", 0) * 100)::numeric, 2)
+            END AS "ValueIncreasePercent",
+            b."Status",
+            COALESCE(b."Quantity", 1) AS "Quantity",
+            COALESCE(b."AnalysisConfigName", '') AS "AnalysisConfigName"
+        FROM "BoughtStocks" b
+        LEFT JOIN LATERAL (
+            SELECT
+                q."ClosePrice" AS latest_close,
+                q."CloseDate" AS latest_date
+            FROM "Quotes" q
+            WHERE q."Symbol" = b."Symbol"
+              AND COALESCE(q."ClosePrice", 0) > 0
+            ORDER BY q."CloseDate" DESC
+            LIMIT 1
+        ) lq ON true
+        ORDER BY b."BuyDate" DESC, b."Symbol" ASC
     )SQL");
 
     if (!query.exec()) {
@@ -6677,13 +6833,205 @@ QVariantList DatabaseManager::getBoughtStocks()
     return results;
 }
 
-QVariantList DatabaseManager::getTestPortfolio()
+QVariantMap DatabaseManager::getPortfolioChartData(const QString &symbol)
+{
+    QVariantMap result;
+    QVariantList quotes;
+
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        result["quotes"] = quotes;
+        return result;
+    }
+
+    const QString normalizedSymbol = symbol.trimmed();
+    if (normalizedSymbol.isEmpty()) {
+        result["quotes"] = quotes;
+        return result;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        WITH latest_quote AS (
+            SELECT
+                q."Symbol",
+                q."ClosePrice" AS latest_close,
+                q."CloseDate" AS latest_date
+            FROM "Quotes" q
+            WHERE q."Symbol" = :symbol
+              AND COALESCE(q."ClosePrice", 0) > 0
+            ORDER BY q."CloseDate" DESC
+            LIMIT 1
+        ),
+        trading_days AS (
+            SELECT
+                day::date AS trading_date,
+                ROW_NUMBER() OVER (ORDER BY day DESC) - 1 AS trading_days_back
+            FROM latest_quote l
+            CROSS JOIN generate_series(
+                l.latest_date - INTERVAL '220 days',
+                l.latest_date,
+                INTERVAL '1 day'
+            ) AS day
+            WHERE EXTRACT(ISODOW FROM day) BETWEEN 1 AND 5
+        ),
+        boundaries AS (
+            SELECT
+                MAX(trading_date) FILTER (WHERE trading_days_back = 20) AS start_20,
+                MAX(trading_date) FILTER (WHERE trading_days_back = 40) AS start_40,
+                MAX(trading_date) FILTER (WHERE trading_days_back = 60) AS start_60,
+                MAX(trading_date) FILTER (WHERE trading_days_back = 90) AS start_90
+            FROM trading_days
+        ),
+        summary AS (
+            SELECT
+                l.latest_close,
+                l.latest_date,
+                bd.start_20,
+                bd.start_40,
+                bd.start_60,
+                bd.start_90,
+                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_20 AND l.latest_date) AS avg_20,
+                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_40 AND l.latest_date) AS avg_40,
+                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_60 AND l.latest_date) AS avg_60,
+                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_90 AND l.latest_date) AS avg_90,
+                COUNT(q.*) FILTER (WHERE q."CloseDate" BETWEEN bd.start_20 AND l.latest_date) AS quote_count_20,
+                COUNT(q.*) FILTER (WHERE q."CloseDate" BETWEEN bd.start_40 AND l.latest_date) AS quote_count_40,
+                COUNT(q.*) FILTER (WHERE q."CloseDate" BETWEEN bd.start_60 AND l.latest_date) AS quote_count_60,
+                COUNT(q.*) FILTER (WHERE q."CloseDate" BETWEEN bd.start_90 AND l.latest_date) AS quote_count_90
+            FROM latest_quote l
+            CROSS JOIN boundaries bd
+            LEFT JOIN "Quotes" q
+              ON q."Symbol" = :symbol
+             AND COALESCE(q."ClosePrice", 0) > 0
+             AND q."CloseDate" BETWEEN bd.start_90 AND l.latest_date
+            GROUP BY l.latest_close, l.latest_date, bd.start_20, bd.start_40, bd.start_60, bd.start_90
+        ),
+        quote_rows AS (
+            SELECT
+                q."CloseDate",
+                q."OpenPrice",
+                q."ClosePrice",
+                q."HighestPrice",
+                q."LowestPrice",
+                q."Volume"
+            FROM "Quotes" q
+            CROSS JOIN summary s
+            WHERE q."Symbol" = :symbol
+              AND COALESCE(q."ClosePrice", 0) > 0
+              AND q."CloseDate" BETWEEN s.start_90 AND s.latest_date
+        )
+        SELECT
+            'summary' AS row_type,
+            NULL::date AS close_date,
+            NULL::numeric AS open_price,
+            NULL::numeric AS close_price,
+            NULL::numeric AS highest_price,
+            NULL::numeric AS lowest_price,
+            NULL::numeric AS volume,
+            latest_close,
+            latest_date,
+            start_20,
+            start_40,
+            start_60,
+            start_90,
+            avg_20,
+            avg_40,
+            avg_60,
+            avg_90,
+            quote_count_20,
+            quote_count_40,
+            quote_count_60,
+            quote_count_90
+        FROM summary
+        UNION ALL
+        SELECT
+            'quote' AS row_type,
+            "CloseDate" AS close_date,
+            "OpenPrice" AS open_price,
+            "ClosePrice" AS close_price,
+            "HighestPrice" AS highest_price,
+            "LowestPrice" AS lowest_price,
+            "Volume" AS volume,
+            NULL::numeric AS latest_close,
+            NULL::date AS latest_date,
+            NULL::date AS start_20,
+            NULL::date AS start_40,
+            NULL::date AS start_60,
+            NULL::date AS start_90,
+            NULL::numeric AS avg_20,
+            NULL::numeric AS avg_40,
+            NULL::numeric AS avg_60,
+            NULL::numeric AS avg_90,
+            NULL::bigint AS quote_count_20,
+            NULL::bigint AS quote_count_40,
+            NULL::bigint AS quote_count_60,
+            NULL::bigint AS quote_count_90
+        FROM quote_rows
+        ORDER BY row_type DESC, close_date ASC NULLS FIRST
+    )SQL");
+    query.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Laden der Depot-Chartdaten:" << query.lastError().text() << normalizedSymbol;
+        result["quotes"] = quotes;
+        return result;
+    }
+
+    while (query.next()) {
+        const QString rowType = query.value(QStringLiteral("row_type")).toString();
+        if (rowType == QStringLiteral("summary")) {
+            const double latestClose = query.value(QStringLiteral("latest_close")).toDouble();
+            result["symbol"] = normalizedSymbol;
+            result["latestClose"] = latestClose;
+            result["latestDate"] = query.value(QStringLiteral("latest_date")).toDate().toString(QStringLiteral("yyyy-MM-dd"));
+            result["start20"] = query.value(QStringLiteral("start_20")).toDate().toString(QStringLiteral("yyyy-MM-dd"));
+            result["start40"] = query.value(QStringLiteral("start_40")).toDate().toString(QStringLiteral("yyyy-MM-dd"));
+            result["start60"] = query.value(QStringLiteral("start_60")).toDate().toString(QStringLiteral("yyyy-MM-dd"));
+            result["start90"] = query.value(QStringLiteral("start_90")).toDate().toString(QStringLiteral("yyyy-MM-dd"));
+            result["avg20"] = query.value(QStringLiteral("avg_20"));
+            result["avg40"] = query.value(QStringLiteral("avg_40"));
+            result["avg60"] = query.value(QStringLiteral("avg_60"));
+            result["avg90"] = query.value(QStringLiteral("avg_90"));
+            result["quoteCount20"] = query.value(QStringLiteral("quote_count_20"));
+            result["quoteCount40"] = query.value(QStringLiteral("quote_count_40"));
+            result["quoteCount60"] = query.value(QStringLiteral("quote_count_60"));
+            result["quoteCount90"] = query.value(QStringLiteral("quote_count_90"));
+
+            auto percentIncrease = [latestClose](const QVariant &average) -> QVariant {
+                if (!average.isValid() || average.isNull() || average.toDouble() == 0.0)
+                    return QVariant();
+                return QVariant((latestClose - average.toDouble()) / average.toDouble() * 100.0);
+            };
+            result["inc20"] = percentIncrease(query.value(QStringLiteral("avg_20")));
+            result["inc40"] = percentIncrease(query.value(QStringLiteral("avg_40")));
+            result["inc60"] = percentIncrease(query.value(QStringLiteral("avg_60")));
+            result["inc90"] = percentIncrease(query.value(QStringLiteral("avg_90")));
+        } else if (rowType == QStringLiteral("quote")) {
+            QVariantMap quote;
+            quote["closeDate"] = query.value(QStringLiteral("close_date")).toDate().toString(QStringLiteral("yyyy-MM-dd"));
+            quote["displayDate"] = query.value(QStringLiteral("close_date")).toDate().toString(QStringLiteral("dd.MM.yyyy"));
+            quote["openPrice"] = query.value(QStringLiteral("open_price"));
+            quote["closePrice"] = query.value(QStringLiteral("close_price"));
+            quote["highestPrice"] = query.value(QStringLiteral("highest_price"));
+            quote["lowestPrice"] = query.value(QStringLiteral("lowest_price"));
+            quote["volume"] = query.value(QStringLiteral("volume"));
+            quotes << quote;
+        }
+    }
+
+    result["quotes"] = quotes;
+    return result;
+}
+
+QVariantList DatabaseManager::getTestPortfolioSummary()
 {
     QVariantList results;
     if (!db.isOpen()) {
         qWarning() << "Datenbank nicht verbunden!";
         return results;
     }
+
 
     QSqlQuery query(db);
     query.prepare(R"SQL(
@@ -6692,9 +7040,153 @@ QVariantList DatabaseManager::getTestPortfolio()
             b."Name",
             TO_CHAR(b."BuyDate", 'YYYY-MM-DD') AS "BuyDate",
             TO_CHAR(b."SellDate", 'YYYY-MM-DD') AS "SellDate",
-            b."CurrentValue",
+            CASE
+                WHEN b."Status" = 10 THEN b."CurrentValue"
+                ELSE COALESCE(qp.latest_close, b."CurrentValue")
+            END AS "CurrentValue",
             b."EntryValue",
-            b."ValueIncreasePercent",
+            CASE
+                WHEN NULLIF(b."EntryValue", 0) IS NULL THEN b."ValueIncreasePercent"
+                ELSE ROUND(((CASE WHEN b."Status" = 10 THEN b."CurrentValue" ELSE COALESCE(qp.latest_close, b."CurrentValue") END - b."EntryValue") / NULLIF(b."EntryValue", 0) * 100)::numeric, 2)
+            END AS "ValueIncreasePercent",
+            b."Status",
+            COALESCE(b."Quantity", 1) AS "Quantity",
+            COALESCE(b."AnalysisConfigName", '') AS "AnalysisConfigName",
+            s."MIC",
+            s."ISIN",
+            s."Exchange",
+            s."CountryCode",
+            s."City",
+            ROUND(((qp.latest_close - qp.avg_20) / NULLIF(qp.avg_20, 0) * 100)::numeric, 2) AS "Days20ValueInc",
+            ROUND(((qp.latest_close - qp.avg_40) / NULLIF(qp.avg_40, 0) * 100)::numeric, 2) AS "Days40ValueInc",
+            ROUND(((qp.latest_close - qp.avg_60) / NULLIF(qp.avg_60, 0) * 100)::numeric, 2) AS "Days60ValueInc",
+            ROUND(((qp.latest_close - qp.avg_90) / NULLIF(qp.avg_90, 0) * 100)::numeric, 2) AS "Days90ValueInc",
+            TO_CHAR(qp.latest_date, 'YYYY-MM-DD') AS "QuoteLastDate"
+        FROM "BoughtStocks" b
+        LEFT JOIN "Stocks" s ON s."Symbol" = b."Symbol"
+        LEFT JOIN LATERAL (
+            WITH latest_quote AS (
+                SELECT
+                    q."ClosePrice" AS latest_close,
+                    q."CloseDate" AS latest_date
+                FROM "Quotes" q
+                WHERE q."Symbol" = b."Symbol"
+                  AND COALESCE(q."ClosePrice", 0) > 0
+                ORDER BY q."CloseDate" DESC
+                LIMIT 1
+            ),
+            trading_days AS (
+                SELECT
+                    day::date AS trading_date,
+                    ROW_NUMBER() OVER (ORDER BY day DESC) - 1 AS trading_days_back
+                FROM latest_quote l
+                CROSS JOIN generate_series(
+                    l.latest_date - INTERVAL '220 days',
+                    l.latest_date,
+                    INTERVAL '1 day'
+                ) AS day
+                WHERE EXTRACT(ISODOW FROM day) BETWEEN 1 AND 5
+            ),
+            boundaries AS (
+                SELECT
+                    MAX(trading_date) FILTER (WHERE trading_days_back = 20) AS start_20,
+                    MAX(trading_date) FILTER (WHERE trading_days_back = 40) AS start_40,
+                    MAX(trading_date) FILTER (WHERE trading_days_back = 60) AS start_60,
+                    MAX(trading_date) FILTER (WHERE trading_days_back = 90) AS start_90
+                FROM trading_days
+            )
+            SELECT
+                l.latest_close,
+                l.latest_date,
+                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_20 AND l.latest_date) AS avg_20,
+                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_40 AND l.latest_date) AS avg_40,
+                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_60 AND l.latest_date) AS avg_60,
+                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_90 AND l.latest_date) AS avg_90
+            FROM latest_quote l
+            CROSS JOIN boundaries bd
+            LEFT JOIN "Quotes" q
+              ON q."Symbol" = b."Symbol"
+             AND COALESCE(q."ClosePrice", 0) > 0
+             AND q."CloseDate" BETWEEN bd.start_90 AND l.latest_date
+            GROUP BY l.latest_close, l.latest_date
+        ) qp ON true
+        ORDER BY b."BuyDate" DESC, b."Symbol" ASC
+    )SQL");
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Laden der Depot-Uebersicht:" << query.lastError().text();
+        return results;
+    }
+
+    while (query.next()) {
+        QVariantMap row;
+        row["symbol"] = query.value("Symbol");
+        row["name"] = query.value("Name");
+        row["buyDate"] = query.value("BuyDate");
+        row["sellDate"] = query.value("SellDate");
+        row["currentValue"] = query.value("CurrentValue");
+        row["entryValue"] = query.value("EntryValue");
+        row["valueIncreasePercent"] = query.value("ValueIncreasePercent");
+        row["quantity"] = query.value("Quantity");
+        row["analysisConfigName"] = query.value("AnalysisConfigName");
+        row["days20ValueInc"] = query.value("Days20ValueInc");
+        row["days40ValueInc"] = query.value("Days40ValueInc");
+        row["days60ValueInc"] = query.value("Days60ValueInc");
+        row["days90ValueInc"] = query.value("Days90ValueInc");
+        row["quoteLastDate"] = query.value("QuoteLastDate");
+        row["status"] = query.value("Status");
+        row["mic"] = query.value("MIC");
+        row["isin"] = query.value("ISIN");
+        row["exchange"] = query.value("Exchange");
+        row["countryCode"] = query.value("CountryCode");
+        row["city"] = query.value("City");
+
+        const QStringList databaseFields = {
+            QStringLiteral("symbol"), QStringLiteral("name"), QStringLiteral("buyDate"),
+            QStringLiteral("sellDate"), QStringLiteral("currentValue"), QStringLiteral("entryValue"),
+            QStringLiteral("valueIncreasePercent"), QStringLiteral("quantity"), QStringLiteral("analysisConfigName"),
+            QStringLiteral("days20ValueInc"), QStringLiteral("days40ValueInc"), QStringLiteral("days60ValueInc"),
+            QStringLiteral("days90ValueInc"), QStringLiteral("quoteLastDate"), QStringLiteral("status"),
+            QStringLiteral("mic"), QStringLiteral("isin"), QStringLiteral("exchange"),
+            QStringLiteral("countryCode"), QStringLiteral("city")
+        };
+        for (const QString &field : databaseFields)
+            row[field + QStringLiteral("Origin")] = QStringLiteral("db");
+
+        results.append(row);
+    }
+
+    return results;
+}
+
+QVariantMap DatabaseManager::getPortfolioDetails(const QString &symbol)
+{
+    QVariantMap row;
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return row;
+    }
+
+    const QString normalizedSymbol = symbol.trimmed();
+    if (normalizedSymbol.isEmpty())
+        return row;
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT
+            b."Symbol",
+            b."Name",
+            TO_CHAR(b."BuyDate", 'YYYY-MM-DD') AS "BuyDate",
+            TO_CHAR(b."SellDate", 'YYYY-MM-DD') AS "SellDate",
+            CASE
+                WHEN b."Status" = 10 THEN b."CurrentValue"
+                ELSE COALESCE(lq.latest_close, b."CurrentValue")
+            END AS "CurrentValue",
+            b."EntryValue",
+            CASE
+                WHEN NULLIF(b."EntryValue", 0) IS NULL THEN b."ValueIncreasePercent"
+                ELSE ROUND(((CASE WHEN b."Status" = 10 THEN b."CurrentValue" ELSE COALESCE(lq.latest_close, b."CurrentValue") END - b."EntryValue") / NULLIF(b."EntryValue", 0) * 100)::numeric, 2)
+            END AS "ValueIncreasePercent",
             b."Status",
             COALESCE(b."Quantity", 1) AS "Quantity",
             COALESCE(b."AnalysisConfigName", '') AS "AnalysisConfigName",
@@ -6749,12 +7241,312 @@ QVariantList DatabaseManager::getTestPortfolio()
             f."Week52High" AS "FundamentalWeek52High",
             f."Week52Low" AS "FundamentalWeek52Low",
             f."Source" AS "FundamentalSource",
-            f."RawData"::text AS "FundamentalRawData",
+            TO_CHAR(f."UpdatedAt", 'YYYY-MM-DD HH24:MI:SS') AS "FundamentalUpdatedAt"
+        FROM "BoughtStocks" b
+        LEFT JOIN "Stocks" s ON s."Symbol" = b."Symbol"
+        LEFT JOIN LATERAL (
+            SELECT
+                q."ClosePrice" AS latest_close,
+                q."CloseDate" AS latest_date
+            FROM "Quotes" q
+            WHERE q."Symbol" = b."Symbol"
+              AND COALESCE(q."ClosePrice", 0) > 0
+            ORDER BY q."CloseDate" DESC
+            LIMIT 1
+        ) lq ON true
+        LEFT JOIN LATERAL (
+            SELECT *
+            FROM "StockFundamentals" sf
+            WHERE sf."Symbol" = b."Symbol"
+              AND sf."Source" IN ('AlphaVantage', 'Yahoo')
+            ORDER BY
+                sf."AsOfDate" DESC,
+                sf."UpdatedAt" DESC,
+                CASE sf."Source" WHEN 'Yahoo' THEN 0 ELSE 1 END
+            LIMIT 1
+        ) f ON true
+        WHERE b."Symbol" = :symbol
+        LIMIT 1
+    )SQL");
+    query.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Laden der Depot-Details:" << query.lastError().text() << normalizedSymbol;
+        return row;
+    }
+
+    if (!query.next())
+        return row;
+
+    const QString localSymbol = normalizedSymbol.section(QLatin1Char('.'), 0, 0);
+    const quint32 seed = stableSymbolSeed(normalizedSymbol);
+    const double currentValue = query.value("CurrentValue").toDouble();
+    const double price = currentValue > 0.0 ? currentValue : 100.0;
+    const double peRatio = mockValue(seed, 0, 8.0, 32.0);
+    const double priceToSales = mockValue(seed, 8, 0.8, 7.0);
+    const double dividendYield = mockValue(seed, 16, 0.5, 5.0);
+    const double sharesOutstanding = 100000000.0 + (seed % 900u) * 1000000.0;
+    const double marketCapitalization = price * sharesOutstanding;
+    const double revenue = marketCapitalization / priceToSales;
+    const bool isEtf = query.value("Name").toString().contains(QStringLiteral("ETF"), Qt::CaseInsensitive);
+    const QString mic = query.value("MIC").toString();
+
+    auto stringOr = [&query](const char *column, const QString &fallback) {
+        const QString value = query.value(column).toString().trimmed();
+        return value.isEmpty() ? fallback : value;
+    };
+
+    row["symbol"] = normalizedSymbol;
+    row["name"] = query.value("Name");
+    row["buyDate"] = query.value("BuyDate");
+    row["sellDate"] = query.value("SellDate");
+    row["currentValue"] = query.value("CurrentValue");
+    row["entryValue"] = query.value("EntryValue");
+    row["valueIncreasePercent"] = query.value("ValueIncreasePercent");
+    row["quantity"] = query.value("Quantity");
+    row["analysisConfigName"] = query.value("AnalysisConfigName");
+    row["status"] = query.value("Status");
+    row["mic"] = mic;
+    row["isin"] = query.value("ISIN");
+    row["exchange"] = query.value("Exchange");
+    row["countryCode"] = query.value("CountryCode");
+    row["city"] = query.value("City");
+
+    const QStringList databaseFields = {
+        QStringLiteral("symbol"), QStringLiteral("name"), QStringLiteral("buyDate"),
+        QStringLiteral("sellDate"), QStringLiteral("currentValue"), QStringLiteral("entryValue"),
+        QStringLiteral("valueIncreasePercent"), QStringLiteral("quantity"), QStringLiteral("analysisConfigName"), QStringLiteral("status"),
+        QStringLiteral("mic"), QStringLiteral("isin"), QStringLiteral("exchange"), QStringLiteral("countryCode"),
+        QStringLiteral("city")
+    };
+    for (const QString &field : databaseFields)
+        row[field + QStringLiteral("Origin")] = QStringLiteral("db");
+
+    const QStringList industries = {
+        QStringLiteral("Technology"),
+        QStringLiteral("Industrials"),
+        QStringLiteral("Financial"),
+        QStringLiteral("Consumer")
+    };
+    const QStringList categories = {
+        QStringLiteral("Hardware"),
+        QStringLiteral("Manufacturing"),
+        QStringLiteral("Capital Markets"),
+        QStringLiteral("Consumer Products")
+    };
+
+    auto setIbkrString = [&query, &row](const QString &key,
+                                        const char *column,
+                                        const QString &fallback) {
+        const QString value = query.value(column).toString().trimmed();
+        const bool hasIbkrValue = !value.isEmpty();
+        row[key] = hasIbkrValue ? value : fallback;
+        row[key + QStringLiteral("Origin")] = hasIbkrValue ? QStringLiteral("IBKR") : QStringLiteral("mock");
+    };
+
+    const bool hasConId = !query.value("IBKRConId").isNull();
+    row["ibkrConId"] = hasConId ? query.value("IBKRConId") : QVariant::fromValue(-qint64(seed) - 1);
+    row["ibkrConIdOrigin"] = hasConId ? QStringLiteral("IBKR") : QStringLiteral("mock");
+    setIbkrString(QStringLiteral("currency"), "Currency", QStringLiteral("EUR"));
+    setIbkrString(QStringLiteral("primaryExchange"), "PrimaryExchange", mic);
+    setIbkrString(QStringLiteral("localSymbol"), "LocalSymbol", localSymbol);
+    setIbkrString(QStringLiteral("securityType"), "SecurityType", isEtf ? QStringLiteral("ETF") : QStringLiteral("STK"));
+    setIbkrString(QStringLiteral("tradingClass"), "TradingClass", localSymbol);
+    setIbkrString(QStringLiteral("stockType"), "StockType", isEtf ? QStringLiteral("ETF") : QStringLiteral("COMMON"));
+    setIbkrString(QStringLiteral("industry"), "Industry", industries.at(seed % industries.size()));
+    setIbkrString(QStringLiteral("category"), "Category", categories.at(seed % categories.size()));
+    setIbkrString(QStringLiteral("subcategory"), "Subcategory", QStringLiteral("TEST-%1").arg(seed % 10u));
+    setIbkrString(QStringLiteral("timeZoneId"), "TimeZoneId", QStringLiteral("Europe/Berlin"));
+    setIbkrString(QStringLiteral("tradingHours"), "TradingHours", QStringLiteral("08:00-22:00"));
+    setIbkrString(QStringLiteral("liquidHours"), "LiquidHours", QStringLiteral("09:00-17:30"));
+    const bool hasMinTick = !query.value("MinTick").isNull();
+    row["minTick"] = hasMinTick ? query.value("MinTick") : QVariant::fromValue(0.01);
+    row["minTickOrigin"] = hasMinTick ? QStringLiteral("IBKR") : QStringLiteral("mock");
+    setIbkrString(QStringLiteral("marketRuleIds"), "MarketRuleIds", QStringLiteral("TEST-26"));
+    setIbkrString(QStringLiteral("validExchanges"), "ValidExchanges", QStringLiteral("SMART,%1").arg(mic));
+    setIbkrString(QStringLiteral("orderTypes"), "OrderTypes", QStringLiteral("MKT,LMT,STP,STP LMT"));
+    setIbkrString(QStringLiteral("marketName"), "MarketName", stringOr("Exchange", mic));
+    setIbkrString(QStringLiteral("cusip"), "CUSIP", QStringLiteral("TEST%1").arg(seed % 100000u, 5, 10, QLatin1Char('0')));
+    const bool hasSyncTime = !query.value("IBKRLastSyncAt").isNull();
+    row["ibkrLastSyncAt"] = hasSyncTime
+        ? query.value("IBKRLastSyncAt").toDateTime().toString(Qt::ISODate)
+        : QDateTime::currentDateTime().toString(Qt::ISODate);
+    row["ibkrLastSyncAtOrigin"] = hasSyncTime ? QStringLiteral("IBKR") : QStringLiteral("mock");
+    if (hasSyncTime && !query.value("ISIN").toString().trimmed().isEmpty())
+        row["isinOrigin"] = QStringLiteral("IBKR");
+
+    row["asOfDate"] = QDate::currentDate().toString(Qt::ISODate);
+    row["fundamentalCurrency"] = row["currency"];
+    row["marketCapitalization"] = marketCapitalization;
+    row["enterpriseValue"] = marketCapitalization * mockValue(seed, 4, 0.9, 1.35);
+    row["peRatio"] = peRatio;
+    row["forwardPeRatio"] = peRatio * mockValue(seed, 12, 0.75, 1.05);
+    row["priceToBookRatio"] = mockValue(seed, 4, 0.8, 8.0);
+    row["priceToSalesRatio"] = priceToSales;
+    row["priceToCashFlowRatio"] = mockValue(seed, 12, 4.0, 22.0);
+    row["priceToDividendRatio"] = 100.0 / dividendYield;
+    row["eps"] = price / peRatio;
+    row["forwardEps"] = price / row["forwardPeRatio"].toDouble();
+    row["dividendPerShare"] = price * dividendYield / 100.0;
+    row["dividendYield"] = dividendYield;
+    row["payoutRatio"] = row["dividendPerShare"].toDouble() / row["eps"].toDouble() * 100.0;
+    row["beta"] = mockValue(seed, 20, 0.55, 1.8);
+    row["revenue"] = revenue;
+    row["netIncome"] = revenue * mockValue(seed, 2, 0.05, 0.22);
+    row["ebitda"] = revenue * mockValue(seed, 10, 0.1, 0.3);
+    row["returnOnEquity"] = mockValue(seed, 6, 4.0, 30.0);
+    row["returnOnAssets"] = mockValue(seed, 14, 2.0, 18.0);
+    row["debtToEquity"] = mockValue(seed, 18, 0.1, 2.5);
+    row["sharesOutstanding"] = sharesOutstanding;
+    row["week52High"] = price * mockValue(seed, 3, 1.05, 1.35);
+    row["week52Low"] = price * mockValue(seed, 11, 0.55, 0.9);
+    row["source"] = QStringLiteral("TEST");
+    row["fundamentalUpdatedAt"] = QDateTime::currentDateTime().toString(Qt::ISODate);
+
+    const QStringList mockFundamentalFields = {
+        QStringLiteral("asOfDate"), QStringLiteral("fundamentalCurrency"),
+        QStringLiteral("marketCapitalization"), QStringLiteral("enterpriseValue"),
+        QStringLiteral("peRatio"), QStringLiteral("forwardPeRatio"),
+        QStringLiteral("priceToBookRatio"), QStringLiteral("priceToSalesRatio"),
+        QStringLiteral("priceToCashFlowRatio"), QStringLiteral("priceToDividendRatio"),
+        QStringLiteral("eps"), QStringLiteral("forwardEps"),
+        QStringLiteral("dividendPerShare"), QStringLiteral("dividendYield"),
+        QStringLiteral("payoutRatio"), QStringLiteral("beta"),
+        QStringLiteral("revenue"), QStringLiteral("netIncome"),
+        QStringLiteral("ebitda"), QStringLiteral("returnOnEquity"),
+        QStringLiteral("returnOnAssets"), QStringLiteral("debtToEquity"),
+        QStringLiteral("sharesOutstanding"), QStringLiteral("week52High"),
+        QStringLiteral("week52Low"), QStringLiteral("source"),
+        QStringLiteral("fundamentalUpdatedAt"),
+        QStringLiteral("fundamentalYahooSymbol"), QStringLiteral("fundamentalExchange")
+    };
+    for (const QString &field : mockFundamentalFields)
+        row[field + QStringLiteral("Origin")] = QStringLiteral("mock");
+
+    const QHash<QString, QString> fundamentalColumns = {
+        {QStringLiteral("asOfDate"), QStringLiteral("FundamentalAsOfDate")},
+        {QStringLiteral("fundamentalCurrency"), QStringLiteral("FundamentalCurrency")},
+        {QStringLiteral("marketCapitalization"), QStringLiteral("FundamentalMarketCapitalization")},
+        {QStringLiteral("enterpriseValue"), QStringLiteral("FundamentalEnterpriseValue")},
+        {QStringLiteral("peRatio"), QStringLiteral("FundamentalPERatio")},
+        {QStringLiteral("forwardPeRatio"), QStringLiteral("FundamentalForwardPERatio")},
+        {QStringLiteral("priceToBookRatio"), QStringLiteral("FundamentalPriceToBookRatio")},
+        {QStringLiteral("priceToSalesRatio"), QStringLiteral("FundamentalPriceToSalesRatio")},
+        {QStringLiteral("priceToCashFlowRatio"), QStringLiteral("FundamentalPriceToCashFlowRatio")},
+        {QStringLiteral("priceToDividendRatio"), QStringLiteral("FundamentalPriceToDividendRatio")},
+        {QStringLiteral("eps"), QStringLiteral("FundamentalEPS")},
+        {QStringLiteral("forwardEps"), QStringLiteral("FundamentalForwardEPS")},
+        {QStringLiteral("dividendPerShare"), QStringLiteral("FundamentalDividendPerShare")},
+        {QStringLiteral("dividendYield"), QStringLiteral("FundamentalDividendYield")},
+        {QStringLiteral("payoutRatio"), QStringLiteral("FundamentalPayoutRatio")},
+        {QStringLiteral("beta"), QStringLiteral("FundamentalBeta")},
+        {QStringLiteral("revenue"), QStringLiteral("FundamentalRevenue")},
+        {QStringLiteral("netIncome"), QStringLiteral("FundamentalNetIncome")},
+        {QStringLiteral("ebitda"), QStringLiteral("FundamentalEBITDA")},
+        {QStringLiteral("returnOnEquity"), QStringLiteral("FundamentalReturnOnEquity")},
+        {QStringLiteral("returnOnAssets"), QStringLiteral("FundamentalReturnOnAssets")},
+        {QStringLiteral("debtToEquity"), QStringLiteral("FundamentalDebtToEquity")},
+        {QStringLiteral("sharesOutstanding"), QStringLiteral("FundamentalSharesOutstanding")},
+        {QStringLiteral("week52High"), QStringLiteral("FundamentalWeek52High")},
+        {QStringLiteral("week52Low"), QStringLiteral("FundamentalWeek52Low")},
+        {QStringLiteral("source"), QStringLiteral("FundamentalSource")},
+        {QStringLiteral("fundamentalUpdatedAt"), QStringLiteral("FundamentalUpdatedAt")}
+    };
+    const QString fundamentalSource = query.value(QStringLiteral("FundamentalSource")).toString().trimmed();
+    if (!fundamentalSource.isEmpty()) {
+        for (auto it = fundamentalColumns.constBegin(); it != fundamentalColumns.constEnd(); ++it) {
+            const QVariant value = query.value(it.value());
+            row[it.key() + QStringLiteral("Origin")] = fundamentalSource;
+            row[it.key()] = value.isNull() ? QVariant() : value;
+        }
+    }
+
+    return row;
+}
+QVariantList DatabaseManager::getTestPortfolio()
+{
+    QVariantList results;
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return results;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT
+            b."Symbol",
+            b."Name",
+            TO_CHAR(b."BuyDate", 'YYYY-MM-DD') AS "BuyDate",
+            TO_CHAR(b."SellDate", 'YYYY-MM-DD') AS "SellDate",
+            CASE
+                WHEN b."Status" = 10 THEN b."CurrentValue"
+                ELSE COALESCE(qp.latest_close, b."CurrentValue")
+            END AS "CurrentValue",
+            b."EntryValue",
+            CASE
+                WHEN NULLIF(b."EntryValue", 0) IS NULL THEN b."ValueIncreasePercent"
+                ELSE ROUND(((CASE WHEN b."Status" = 10 THEN b."CurrentValue" ELSE COALESCE(qp.latest_close, b."CurrentValue") END - b."EntryValue") / NULLIF(b."EntryValue", 0) * 100)::numeric, 2)
+            END AS "ValueIncreasePercent",
+            b."Status",
+            COALESCE(b."Quantity", 1) AS "Quantity",
+            COALESCE(b."AnalysisConfigName", '') AS "AnalysisConfigName",
+            s."MIC",
+            s."ISIN",
+            s."Exchange",
+            s."CountryCode",
+            s."City",
+            s."IBKRConId",
+            s."Currency",
+            s."PrimaryExchange",
+            s."LocalSymbol",
+            s."SecurityType",
+            s."TradingClass",
+            s."StockType",
+            s."Industry",
+            s."Category",
+            s."Subcategory",
+            s."TimeZoneId",
+            s."TradingHours",
+            s."LiquidHours",
+            s."MinTick",
+            s."MarketRuleIds",
+            s."ValidExchanges",
+            s."OrderTypes",
+            s."MarketName",
+            s."CUSIP",
+            s."IBKRLastSyncAt",
+            TO_CHAR(f."AsOfDate", 'YYYY-MM-DD') AS "FundamentalAsOfDate",
+            f."Currency" AS "FundamentalCurrency",
+            f."MarketCapitalization" AS "FundamentalMarketCapitalization",
+            f."EnterpriseValue" AS "FundamentalEnterpriseValue",
+            f."PERatio" AS "FundamentalPERatio",
+            f."ForwardPERatio" AS "FundamentalForwardPERatio",
+            f."PriceToBookRatio" AS "FundamentalPriceToBookRatio",
+            f."PriceToSalesRatio" AS "FundamentalPriceToSalesRatio",
+            f."PriceToCashFlowRatio" AS "FundamentalPriceToCashFlowRatio",
+            f."PriceToDividendRatio" AS "FundamentalPriceToDividendRatio",
+            f."EPS" AS "FundamentalEPS",
+            f."ForwardEPS" AS "FundamentalForwardEPS",
+            f."DividendPerShare" AS "FundamentalDividendPerShare",
+            f."DividendYield" AS "FundamentalDividendYield",
+            f."PayoutRatio" AS "FundamentalPayoutRatio",
+            f."Beta" AS "FundamentalBeta",
+            f."Revenue" AS "FundamentalRevenue",
+            f."NetIncome" AS "FundamentalNetIncome",
+            f."EBITDA" AS "FundamentalEBITDA",
+            f."ReturnOnEquity" AS "FundamentalReturnOnEquity",
+            f."ReturnOnAssets" AS "FundamentalReturnOnAssets",
+            f."DebtToEquity" AS "FundamentalDebtToEquity",
+            f."SharesOutstanding" AS "FundamentalSharesOutstanding",
+            f."Week52High" AS "FundamentalWeek52High",
+            f."Week52Low" AS "FundamentalWeek52Low",
+            f."Source" AS "FundamentalSource",
             TO_CHAR(f."UpdatedAt", 'YYYY-MM-DD HH24:MI:SS') AS "FundamentalUpdatedAt",
-            ROUND(((qp.latest_close - qp.close_20) / NULLIF(qp.close_20, 0) * 100)::numeric, 2) AS "Days20ValueInc",
-            ROUND(((qp.latest_close - qp.close_40) / NULLIF(qp.close_40, 0) * 100)::numeric, 2) AS "Days40ValueInc",
-            ROUND(((qp.latest_close - qp.close_60) / NULLIF(qp.close_60, 0) * 100)::numeric, 2) AS "Days60ValueInc",
-            ROUND(((qp.latest_close - qp.close_90) / NULLIF(qp.close_90, 0) * 100)::numeric, 2) AS "Days90ValueInc"
+            ROUND(((qp.latest_close - qp.avg_20) / NULLIF(qp.avg_20, 0) * 100)::numeric, 2) AS "Days20ValueInc",
+            ROUND(((qp.latest_close - qp.avg_40) / NULLIF(qp.avg_40, 0) * 100)::numeric, 2) AS "Days40ValueInc",
+            ROUND(((qp.latest_close - qp.avg_60) / NULLIF(qp.avg_60, 0) * 100)::numeric, 2) AS "Days60ValueInc",
+            ROUND(((qp.latest_close - qp.avg_90) / NULLIF(qp.avg_90, 0) * 100)::numeric, 2) AS "Days90ValueInc",
+            TO_CHAR(qp.latest_date, 'YYYY-MM-DD') AS "QuoteLastDate"
         FROM "BoughtStocks" b
         LEFT JOIN "Stocks" s ON s."Symbol" = b."Symbol"
         LEFT JOIN LATERAL (
@@ -6769,23 +7561,50 @@ QVariantList DatabaseManager::getTestPortfolio()
             LIMIT 1
         ) f ON true
         LEFT JOIN LATERAL (
-            WITH ordered_quotes AS (
+            WITH latest_quote AS (
                 SELECT
-                    q."ClosePrice",
-                    ROW_NUMBER() OVER (ORDER BY q."CloseDate" DESC) AS rn_desc
+                    q."ClosePrice" AS latest_close,
+                    q."CloseDate" AS latest_date
                 FROM "Quotes" q
                 WHERE q."Symbol" = b."Symbol"
                   AND COALESCE(q."ClosePrice", 0) > 0
-                  AND COALESCE(q."Volume", 0) > 0
+                ORDER BY q."CloseDate" DESC
+                LIMIT 1
+            ),
+            trading_days AS (
+                SELECT
+                    day::date AS trading_date,
+                    ROW_NUMBER() OVER (ORDER BY day DESC) - 1 AS trading_days_back
+                FROM latest_quote l
+                CROSS JOIN generate_series(
+                    l.latest_date - INTERVAL '220 days',
+                    l.latest_date,
+                    INTERVAL '1 day'
+                ) AS day
+                WHERE EXTRACT(ISODOW FROM day) BETWEEN 1 AND 5
+            ),
+            boundaries AS (
+                SELECT
+                    MAX(trading_date) FILTER (WHERE trading_days_back = 20) AS start_20,
+                    MAX(trading_date) FILTER (WHERE trading_days_back = 40) AS start_40,
+                    MAX(trading_date) FILTER (WHERE trading_days_back = 60) AS start_60,
+                    MAX(trading_date) FILTER (WHERE trading_days_back = 90) AS start_90
+                FROM trading_days
             )
             SELECT
-                MAX("ClosePrice") FILTER (WHERE rn_desc = 1) AS latest_close,
-                MAX("ClosePrice") FILTER (WHERE rn_desc = 20) AS close_20,
-                MAX("ClosePrice") FILTER (WHERE rn_desc = 40) AS close_40,
-                MAX("ClosePrice") FILTER (WHERE rn_desc = 60) AS close_60,
-                MAX("ClosePrice") FILTER (WHERE rn_desc = 90) AS close_90
-            FROM ordered_quotes
-            WHERE rn_desc <= 90
+                l.latest_close,
+                l.latest_date,
+                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_20 AND l.latest_date) AS avg_20,
+                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_40 AND l.latest_date) AS avg_40,
+                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_60 AND l.latest_date) AS avg_60,
+                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_90 AND l.latest_date) AS avg_90
+            FROM latest_quote l
+            CROSS JOIN boundaries bd
+            LEFT JOIN "Quotes" q
+              ON q."Symbol" = b."Symbol"
+             AND COALESCE(q."ClosePrice", 0) > 0
+             AND q."CloseDate" BETWEEN bd.start_90 AND l.latest_date
+            GROUP BY l.latest_close, l.latest_date
         ) qp ON true
         ORDER BY b."BuyDate" DESC, b."Symbol" ASC
     )SQL");
@@ -6843,6 +7662,7 @@ QVariantList DatabaseManager::getTestPortfolio()
         row["days40ValueInc"] = query.value("Days40ValueInc");
         row["days60ValueInc"] = query.value("Days60ValueInc");
         row["days90ValueInc"] = query.value("Days90ValueInc");
+        row["quoteLastDate"] = query.value("QuoteLastDate");
         row["status"] = query.value("Status");
         row["mic"] = mic;
         row["isin"] = query.value("ISIN");
@@ -6928,7 +7748,6 @@ QVariantList DatabaseManager::getTestPortfolio()
         row["week52High"] = price * mockValue(seed, 3, 1.05, 1.35);
         row["week52Low"] = price * mockValue(seed, 11, 0.55, 0.9);
         row["source"] = QStringLiteral("TEST");
-        row["rawData"] = QStringLiteral("{\"environment\":\"mock\"}");
         row["fundamentalUpdatedAt"] = QDateTime::currentDateTime().toString(Qt::ISODate);
         const QStringList mockFundamentalFields = {
             QStringLiteral("asOfDate"), QStringLiteral("fundamentalCurrency"),
@@ -6944,7 +7763,7 @@ QVariantList DatabaseManager::getTestPortfolio()
             QStringLiteral("returnOnAssets"), QStringLiteral("debtToEquity"),
             QStringLiteral("sharesOutstanding"), QStringLiteral("week52High"),
             QStringLiteral("week52Low"), QStringLiteral("source"),
-            QStringLiteral("rawData"), QStringLiteral("fundamentalUpdatedAt"),
+            QStringLiteral("fundamentalUpdatedAt"),
             QStringLiteral("fundamentalYahooSymbol"), QStringLiteral("fundamentalExchange")
         };
         for (const QString &field : mockFundamentalFields)
@@ -6977,7 +7796,6 @@ QVariantList DatabaseManager::getTestPortfolio()
             {QStringLiteral("week52High"), QStringLiteral("FundamentalWeek52High")},
             {QStringLiteral("week52Low"), QStringLiteral("FundamentalWeek52Low")},
             {QStringLiteral("source"), QStringLiteral("FundamentalSource")},
-            {QStringLiteral("rawData"), QStringLiteral("FundamentalRawData")},
             {QStringLiteral("fundamentalUpdatedAt"), QStringLiteral("FundamentalUpdatedAt")}
         };
         const QString fundamentalSource = query.value(QStringLiteral("FundamentalSource")).toString().trimmed();
@@ -6987,14 +7805,7 @@ QVariantList DatabaseManager::getTestPortfolio()
                 row[it.key() + QStringLiteral("Origin")] = fundamentalSource;
                 row[it.key()] = value.isNull() ? QVariant() : value;
             }
-            const QString rawData = query.value(QStringLiteral("FundamentalRawData")).toString();
-            const QString yahooSymbol = yahooSymbolFromRawData(rawData);
-            if (!yahooSymbol.isEmpty()) {
-                row[QStringLiteral("fundamentalYahooSymbol")] = yahooSymbol;
-                row[QStringLiteral("fundamentalYahooSymbolOrigin")] = fundamentalSource;
-                row[QStringLiteral("fundamentalExchange")] = yahooExchangeCodeFromSymbol(yahooSymbol);
-                row[QStringLiteral("fundamentalExchangeOrigin")] = fundamentalSource;
-            }
+
         }
         results.append(row);
     }
@@ -7149,48 +7960,6 @@ bool DatabaseManager::saveBoughtStock(
     return true;
 }
 
-QVariantList DatabaseManager::searchByTickerAndExchange(const QString &symbol, const QString &exchange) {
-    QVariantList results;
-
-    if (!db.isOpen()) {
-        qWarning() << "Datenbank nicht verbunden!";
-        return results;
-    }
-
-    QSqlQuery query(db);
-    query.prepare("SELECT * FROM \"Stocks\" WHERE \"Symbol\" = :symbol ");
-    query.bindValue(":symbol",symbol);
-
-    if (!query.exec()) {
-        qCritical() << "Query error:" << query.lastError().text();
-        return results;
-    }
-
-    while (query.next()) {
-        QVariantMap stock;
-        stock["symbol"] = query.value("Symbol").toString();
-        stock["name"] = query.value("Name").toString();
-        stock["exchange"] = query.value("MIC").toString();
-        stock["lastQuoteDate"] = query.value("LastQuoteDate").toString();
-        stock["days5Success"] = query.value("5DaysSuccess");
-        stock["days10Success"] = query.value("10DaysSuccess");
-        stock["days20Success"] = query.value("20DaysSuccess");
-        stock["days40Success"] = query.value("40DaysSuccess");
-        stock["days5ValueInc"] = query.value("5DaysValueInc");
-        stock["days10ValueInc"] = query.value("10DaysValueInc");
-        stock["days20ValueInc"] = query.value("20DaysValueInc");
-        stock["days40ValueInc"] = query.value("40DaysValueInc");
-        stock["days5Volumen"] = query.value("5DaysVolumen");
-        stock["days10Volumen"] = query.value("10DaysVolumen");
-        stock["days20Volumen"] = query.value("20DaysVolumen");
-        stock["days40Volumen"] = query.value("40DaysVolumen");
-        results.append(stock);
-        break;
-    }
-
-    return results;
-}
-
 QVariantMap DatabaseManager::extractStock(const QSqlQuery &query) {
     return {
             {"ticker", query.value("ticker")},
@@ -7203,56 +7972,7 @@ QVariantMap DatabaseManager::extractStock(const QSqlQuery &query) {
             };
 }
 
-void DatabaseManager::saveShares(const QList<ShareData>& shares) {
-    for (const ShareData &share : shares) {
-        saveShare(share);
-    }
-}
-
-void DatabaseManager::updateShares(const QList<ShareData>& shares) {
-    for (const ShareData &share : shares) {
-        updateShare(share);
-    }
-}
-
-
-
 // databasemanager.cpp
-void DatabaseManager::saveShare(const ShareData &share) {
-    if (!db.isOpen()) {
-        qWarning() << "Datenbank ist nicht verbunden!";
-        return;
-    }
-
-    QSqlQuery query(db);
-    if (!query.prepare(
-            "INSERT INTO \"Stocks\" (\"MIC\", \"ISIN\", \"Name\", \"Symbol\", \"Exchange\", \"CountryCode\", \"City\") "
-            "VALUES (:mic, :name, :symbol, :exchange, :country_code, :city) "
-            "ON CONFLICT (\"Symbol\") DO UPDATE "
-            "SET \"Name\" = EXCLUDED.\"Name\", "
-            "    \"Exchange\" = EXCLUDED.\"Exchange\", "
-            "    \"CountryCode\" = EXCLUDED.\"CountryCode\", "
-            "    \"City\" = EXCLUDED.\"City\";")) {
-        qCritical() << "SQL-Fehler beim Vorbereiten:" << query.lastError().text();
-        return;
-    }
-    query.bindValue(":mic", share.mic);
-    query.bindValue(":isin", share.isin);
-    query.bindValue(":symbol", share.symbol);
-    query.bindValue(":name", share.name);
-    query.bindValue(":exchange", share.exchange);
-    query.bindValue(":country_code", share.countryCode);
-    query.bindValue(":city", share.city);
-
-    if (!query.exec()) {
-        qCritical() << "❌ Fehler beim Speichern der Aktie:" << query.lastError().text();
-        qCritical() << "Fehlerhafte Aktie:" << share.symbol << share.name;
-        return;
-    }
-    qDebug() << "✅ Aktie gespeichert:" << share.symbol;
-    emit saveComplete(share.symbol);  // jetzt eindeutig!
-}
-
 #include <QNetworkRequest>
 
 QString DatabaseManager::getISINFromOpenFIGI(const QString &apiKey, const QString &ticker, const QString &exchangeCode) {
@@ -7357,59 +8077,6 @@ void DatabaseManager::updateAllISINs() {
 
     qDebug() << QString("🏁 ISIN-Update abgeschlossen: %1 von %2 Aktien aktualisiert.").arg(updatedCount).arg(totalCount);
 }
-
-QString DatabaseManager::convertToEodTicker(const QString& symbol) {
-    QString ticker = symbol;
-
-    static const QMap<QString, QString> exchangeMap = {
-        {"XFRA", "F"},
-        {"XETR", "DE"},
-        {"XNAS", "US"},
-        {"XNYS", "US"},
-        // weitere falls nötig
-    };
-
-    QString exch = symbol.section('.', 1, 1);
-    if (exchangeMap.contains(exch)) {
-        ticker = symbol.section('.', 0, 0) + "." + exchangeMap.value(exch);
-    }
-
-    return ticker;
-}
-
-
-
-void DatabaseManager::updateShare(const ShareData &share) {
-    if (!db.isOpen()) {
-        qWarning() << "Datenbank ist nicht verbunden!";
-        return;
-    }
-
-    QSqlQuery query(db);
-    if (!query.prepare(
-            "UPDATE \"Stocks\" "
-            "SET \"ISIN\" = :isin "
-            "WHERE \"Symbol\" = :symbol")) {
-        qCritical() << "SQL-Fehler beim Vorbereiten:" << query.lastError().text();
-        return;
-    }
-
-    query.bindValue(":isin", share.isin);
-    query.bindValue(":symbol", share.symbol);
-
-    if (!query.exec()) {
-        qCritical() << "❌ Fehler beim Aktualisieren der ISIN:" << query.lastError().text();
-        qCritical() << "Symbol:" << share.symbol << " | ISIN:" << share.isin;
-        return;
-    }
-
-    if (query.numRowsAffected() == 0) {
-        qWarning() << "⚠️ Kein Eintrag aktualisiert – Symbol nicht gefunden:" << share.symbol;
-    } else {
-        qDebug() << "✅ ISIN aktualisiert für Symbol:" << share.symbol;
-    }
-}
-
 
 void DatabaseManager::createQuotesForStock(const QString symbol, const QString exchange) {
     qDebug() << "🟢 Starte Verarbeitung für Stock:" << symbol << "| Exchange:" << exchange;
@@ -7800,6 +8467,75 @@ QVariantList DatabaseManager::getStockAnalysisIbkrSymbols()
     return results;
 }
 
+QVariantList DatabaseManager::findStockAnalysisDirectSearchStocks(const QString &isin, const QString &name)
+{
+    QVariantList results;
+
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank ist nicht verbunden!";
+        return results;
+    }
+
+    const QString normalizedIsin = isin.trimmed();
+    const QString normalizedName = name.trimmed();
+    if (normalizedIsin.isEmpty() && normalizedName.isEmpty())
+        return results;
+
+    auto toLikePattern = [](QString value, bool wrapWhenPlain) {
+        value = value.trimmed();
+        const bool hasWildcard = value.contains(QLatin1Char('*'));
+        value.replace(QStringLiteral("\\"), QStringLiteral("\\\\"));
+        value.replace(QStringLiteral("%"), QStringLiteral("\\%"));
+        value.replace(QStringLiteral("_"), QStringLiteral("\\_"));
+        value.replace(QLatin1Char('*'), QLatin1Char('%'));
+        if (wrapWhenPlain && !hasWildcard)
+            value = QStringLiteral("%") + value + QStringLiteral("%");
+        return value;
+    };
+
+    const QString isinPattern = toLikePattern(normalizedIsin, false);
+    const QString namePattern = toLikePattern(normalizedName, true);
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT
+            s."Symbol" AS symbol,
+            s."ISIN" AS isin,
+            s."Name" AS name,
+            s."MIC" AS mic,
+            CASE
+                WHEN COALESCE(s.use_marketstack, false) THEN 'MS'
+                WHEN COALESCE(s."IBKRQuoteExchange", '') <> '' THEN 'IBKR'
+                ELSE '-'
+            END AS quotesource
+        FROM "Stocks" s
+        WHERE (:isinEmpty OR COALESCE(s."ISIN", '') ILIKE :isinPattern ESCAPE '\')
+          AND (:nameEmpty OR COALESCE(s."Name", '') ILIKE :namePattern ESCAPE '\')
+        ORDER BY
+            CASE WHEN NOT :isinEmpty AND COALESCE(s."ISIN", '') ILIKE :isinPattern ESCAPE '\' THEN 0 ELSE 1 END,
+            s."Name" ASC NULLS LAST,
+            s."Symbol" ASC
+        LIMIT 500
+    )SQL");
+    query.bindValue(QStringLiteral(":isinEmpty"), normalizedIsin.isEmpty());
+    query.bindValue(QStringLiteral(":nameEmpty"), normalizedName.isEmpty());
+    query.bindValue(QStringLiteral(":isinPattern"), isinPattern);
+    query.bindValue(QStringLiteral(":namePattern"), namePattern);
+
+    if (!query.exec()) {
+        qCritical() << "SQL-Fehler bei Direktsuche:" << query.lastError().text();
+        return results;
+    }
+
+    while (query.next()) {
+        QVariantMap row;
+        for (int i = 0; i < query.record().count(); ++i)
+            row.insert(query.record().fieldName(i), query.value(i));
+        results << row;
+    }
+
+    return results;
+}
 QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, double minIncreasePercent, int quoteCount)
 {
     QVariantMap result;
@@ -7924,309 +8660,5 @@ QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, do
     }
 
     return result;
-}
-
-QVariantList DatabaseManager::runShareQuery(const QString& sql)
-{
-    QVariantList results;
-
-    QSqlQuery query(db);
-    if (!query.exec(sql)) {
-        qCritical() << "❌ SQL-Fehler:" << query.lastError().text();
-        return results;
-    }
-
-    while (query.next()) {
-        QVariantMap row;
-        for (int i = 0; i < query.record().count(); ++i) {
-            row.insert(query.record().fieldName(i), query.value(i));
-        }
-        results << row;
-    }
-
-    return results;
-}
-
-
-QVariantList DatabaseManager::getShares(
-    int firstTo, int firstThreshold, bool firstGreaterThan,
-    int secondTo, int secondThreshold, bool secondGreaterThan,
-    int thirdTo, int thirdThreshold, bool thirdGreaterThan,
-    int fourthTo, int fourthThreshold, bool fourthGreaterThan,
-    int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& symbol)
-{
-    QString sql = buildShareQuery(
-        firstTo, firstThreshold, firstGreaterThan,
-        secondTo, secondThreshold, secondGreaterThan,
-        thirdTo, thirdThreshold, thirdGreaterThan,
-        fourthTo, fourthThreshold, fourthGreaterThan,
-        greaterThanSalesPrice, sortPeriod, sortAsc, symbol
-        );
-    return runShareQuery(sql);
-}
-
-void DatabaseManager::getSharesAsync(
-    int firstTo, int firstThreshold, bool firstGreaterThan,
-    int secondTo, int secondThreshold, bool secondGreaterThan,
-    int thirdTo, int thirdThreshold, bool thirdGreaterThan,
-    int fourthTo, int fourthThreshold, bool fourthGreaterThan,
-    int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& symbol)
-{
-    (void) QtConcurrent::run([=]() {
-        QString sql = buildShareQuery(
-            firstTo, firstThreshold, firstGreaterThan,
-            secondTo, secondThreshold, secondGreaterThan,
-            thirdTo, thirdThreshold, thirdGreaterThan,
-            fourthTo, fourthThreshold, fourthGreaterThan,
-            greaterThanSalesPrice, sortPeriod, sortAsc, symbol
-            );
-
-        QVariantList results = runShareQuery(sql);
-
-        QMetaObject::invokeMethod(this, [=]() {
-                emit getSharesComplete(results);
-            }, Qt::QueuedConnection);
-    });
-}
-
-void DatabaseManager::getSharesByNameAsync(
-    int firstTo, int firstThreshold, bool firstGreaterThan,
-    int secondTo, int secondThreshold, bool secondGreaterThan,
-    int thirdTo, int thirdThreshold, bool thirdGreaterThan,
-    int fourthTo, int fourthThreshold, bool fourthGreaterThan,
-    int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& name)
-{
-    (void) QtConcurrent::run([=]() {
-        QString sql = buildShareQuery(
-            firstTo, firstThreshold, firstGreaterThan,
-            secondTo, secondThreshold, secondGreaterThan,
-            thirdTo, thirdThreshold, thirdGreaterThan,
-            fourthTo, fourthThreshold, fourthGreaterThan,
-            greaterThanSalesPrice, sortPeriod, sortAsc, "", name
-            );
-
-        QVariantList results = runShareQuery(sql);
-
-        QMetaObject::invokeMethod(this, [=]() {
-                emit getSharesComplete(results);
-            }, Qt::QueuedConnection);
-    });
-}
-
-
-
-QString DatabaseManager::buildShareQuery(
-    int firstTo, int firstThreshold, bool firstGreaterThan,
-    int secondTo, int secondThreshold, bool secondGreaterThan,
-    int thirdTo, int thirdThreshold, bool thirdGreaterThan,
-    int fourthTo, int fourthThreshold, bool fourthGreaterThan,
-    int greaterThanSalesPrice, int sortPeriod, bool sortAsc, const QString& symbol, const QString& name)
-{
-    bool isSymbolMode = !symbol.isNull() && !symbol.trimmed().isEmpty();
-    bool isNameMode = !isSymbolMode && !name.isNull() && !name.trimmed().isEmpty();
-
-    QString sqlTemplate = R"SQL(
-            WITH
-            ordered_quotes AS (
-                SELECT *, ROW_NUMBER() OVER (PARTITION BY "Symbol" ORDER BY "CloseDate" DESC) AS rn_desc
-                FROM "Quotes"
-                WHERE 1=1
-                %13
-            ),
-            quotes_q1 AS (SELECT * FROM ordered_quotes WHERE rn_desc <= %1),
-            quotes_q2 AS (SELECT * FROM ordered_quotes WHERE rn_desc > %2 AND rn_desc <= %3),
-            quotes_q3 AS (SELECT * FROM ordered_quotes WHERE rn_desc > %4 AND rn_desc <= %5),
-            quotes_q4 AS (SELECT * FROM ordered_quotes WHERE rn_desc > %6 AND rn_desc <= %7),
-
-            quotes_q1_lag AS (
-                SELECT *, LAG("ClosePrice") OVER (PARTITION BY "Symbol" ORDER BY "CloseDate" ASC) AS prev_close
-                FROM quotes_q1
-            ),
-            quotes_q2_lag AS (
-                SELECT *, LAG("ClosePrice") OVER (PARTITION BY "Symbol" ORDER BY "CloseDate" ASC) AS prev_close
-                FROM quotes_q2
-            ),
-            quotes_q3_lag AS (
-                SELECT *, LAG("ClosePrice") OVER (PARTITION BY "Symbol" ORDER BY "CloseDate" ASC) AS prev_close
-                FROM quotes_q3
-            ),
-            quotes_q4_lag AS (
-                SELECT *, LAG("ClosePrice") OVER (PARTITION BY "Symbol" ORDER BY "CloseDate" ASC) AS prev_close
-                FROM quotes_q4
-            ),
-
-            q1 AS (
-                SELECT "Symbol",
-                    COUNT(*) FILTER (WHERE prev_close IS NOT NULL AND "ClosePrice" > prev_close) AS daysSuccess,
-                    (MAX("ClosePrice") - MIN("ClosePrice")) / NULLIF(MIN("ClosePrice"), 0) * 100 AS valueInc,
-                    SUM("Volume") AS volumeSum,
-                    SUM("ClosePrice") AS closeSum,
-                    SUM("Volume") * SUM("ClosePrice") AS volumePrice
-                FROM quotes_q1_lag
-                WHERE rn_desc <= %8
-                GROUP BY "Symbol"
-            ),
-            q2 AS (
-                SELECT "Symbol",
-                    COUNT(*) FILTER (WHERE prev_close IS NOT NULL AND "ClosePrice" > prev_close) AS daysSuccess,
-                    (MAX("ClosePrice") - MIN("ClosePrice")) / NULLIF(MIN("ClosePrice"), 0) * 100 AS valueInc,
-                    SUM("Volume") AS volumeSum,
-                    SUM("ClosePrice") AS closeSum,
-                    SUM("Volume") * SUM("ClosePrice") AS volumePrice
-                FROM quotes_q2_lag
-                WHERE rn_desc > %2 AND rn_desc <= %9
-                GROUP BY "Symbol"
-            ),
-            q3 AS (
-                SELECT "Symbol",
-                    COUNT(*) FILTER (WHERE prev_close IS NOT NULL AND "ClosePrice" > prev_close) AS daysSuccess,
-                    (MAX("ClosePrice") - MIN("ClosePrice")) / NULLIF(MIN("ClosePrice"), 0) * 100 AS valueInc,
-                    SUM("Volume") AS volumeSum,
-                    SUM("ClosePrice") AS closeSum,
-                    SUM("Volume") * SUM("ClosePrice") AS volumePrice
-                FROM quotes_q3_lag
-                WHERE rn_desc > %4 AND rn_desc <= %10
-                GROUP BY "Symbol"
-            ),
-            q4 AS (
-                SELECT "Symbol",
-                    COUNT(*) FILTER (WHERE prev_close IS NOT NULL AND "ClosePrice" > prev_close) AS daysSuccess,
-                    (MAX("ClosePrice") - MIN("ClosePrice")) / NULLIF(MIN("ClosePrice"), 0) * 100 AS valueInc,
-                    SUM("Volume") AS volumeSum,
-                    SUM("ClosePrice") AS closeSum,
-                    SUM("Volume") * SUM("ClosePrice") AS volumePrice
-                FROM quotes_q4_lag
-                WHERE rn_desc > %6 AND rn_desc <= %11
-                GROUP BY "Symbol"
-            ),
-
-            "last_close" AS (
-                SELECT q."Symbol", q."ClosePrice" AS lastClosePrice,  q."CloseDate" AS lastClosePriceDate
-                FROM "Quotes" q
-                INNER JOIN (
-                    SELECT "Symbol", MAX("CloseDate") AS maxDate
-                    FROM "Quotes"
-                    GROUP BY "Symbol"
-                ) latest ON q."Symbol" = latest."Symbol" AND q."CloseDate" = latest.maxDate
-            )
-
-            SELECT
-                s."Symbol", s."MIC", s."Name",
-                TO_CHAR(s."LastUpdateDate", 'DD.MM.YYYY') AS "LastUpdateDate",
-
-                q1.daysSuccess AS daysFirstPeriodSuccess,
-                ROUND(q1.valueInc, 2) AS firstPeriodValueInc,
-                q1.volumeSum AS firstPeriodVolume,
-                q1.volumePrice AS firstPeriodVolumePrice,
-
-                q2.daysSuccess AS daysSecondPeriodSuccess,
-                ROUND(q2.valueInc, 2) AS secondPeriodValueInc,
-                q2.volumeSum AS secondPeriodVolume,
-                q2.volumePrice AS secondPeriodVolumePrice,
-
-                q3.daysSuccess AS daysThirdPeriodSuccess,
-                ROUND(q3.valueInc, 2) AS thirdPeriodValueInc,
-                q3.volumeSum AS thirdPeriodVolume,
-                q3.volumePrice AS thirdPeriodVolumePrice,
-
-                q4.daysSuccess AS daysFourthPeriodSuccess,
-                ROUND(q4.valueInc, 2) AS fourthPeriodValueInc,
-                q4.volumeSum AS fourthPeriodVolume,
-                q4.volumePrice AS fourthPeriodVolumePrice,
-
-                "last_close".lastClosePrice     AS lastClosePrice,
-                TO_CHAR("last_close".lastClosePriceDate, 'DD.MM.YYYY') AS lastClosePriceDate
-
-            FROM "Stocks" s
-            LEFT JOIN q1 ON s."Symbol" = q1."Symbol"
-            LEFT JOIN q2 ON s."Symbol" = q2."Symbol"
-            LEFT JOIN q3 ON s."Symbol" = q3."Symbol"
-            LEFT JOIN q4 ON s."Symbol" = q4."Symbol"
-            LEFT JOIN "last_close" ON s."Symbol" = "last_close"."Symbol"
-            WHERE 1=1
-            %12
-        )SQL";
-
-    QString filterClause;
-    QString quotesFilterClause;
-    if (isSymbolMode) {
-        QString escapedSymbol = symbol;
-        escapedSymbol.replace("'", "''");
-        filterClause = QString(" AND s.\"Symbol\" = '%1' LIMIT 1").arg(escapedSymbol);
-        quotesFilterClause = QString(" AND \"Symbol\" = '%1'").arg(escapedSymbol);
-
-    } else {
-        if (isNameMode) {
-            QString escapedName = name.trimmed();
-            escapedName.replace("'", "''");
-            filterClause = QString(" AND s.\"Name\" ILIKE '%%' || '%1' || '%%'").arg(escapedName);
-            quotesFilterClause = QString(R"SQL(
-                AND "Symbol" IN (
-                    SELECT "Symbol"
-                    FROM "Stocks"
-                    WHERE "Name" ILIKE '%%' || '%1' || '%%'
-                )
-            )SQL").arg(escapedName);
-            filterClause += " ORDER BY s.\"Name\" ASC";
-        } else {
-
-            //filterClause = QString(" AND (s.\"Symbol\" = 'R9GA.XFRA' OR s.\"Symbol\" = 'H6F.XFRA') AND q1.volumePrice > %1").arg(greaterThanSalesPrice);
-            filterClause += QString(" AND q1.volumePrice > %1").arg(greaterThanSalesPrice);
-            if (firstThreshold > 0)
-                filterClause += QString(" AND q1.daysSuccess %1 %2")
-                                    .arg(firstGreaterThan ? ">" : "<")
-                                    .arg(firstThreshold);
-            if (secondThreshold > 0)
-                filterClause += QString(" AND q2.daysSuccess %1 %2")
-                                    .arg(secondGreaterThan ? ">" : "<")
-                                    .arg(secondThreshold);
-            if (thirdThreshold > 0)
-                filterClause += QString(" AND q3.daysSuccess %1 %2")
-                                    .arg(thirdGreaterThan ? ">" : "<")
-                                    .arg(thirdThreshold);
-            if (fourthThreshold > 0)
-                filterClause += QString(" AND q4.daysSuccess %1 %2")
-                                    .arg(fourthGreaterThan ? ">" : "<")
-                                    .arg(fourthThreshold);
-
-            QString orderDirection = sortAsc ? "ASC" : "DESC";
-
-            switch (sortPeriod) {
-            case 1:
-                filterClause += QString(" ORDER BY q1.daysSuccess %1").arg(orderDirection);
-                break;
-            case 2:
-                filterClause += QString(" ORDER BY q2.daysSuccess %1").arg(orderDirection);
-                break;
-            case 3:
-                filterClause += QString(" ORDER BY q3.daysSuccess %1").arg(orderDirection);
-                break;
-            case 4:
-                filterClause += QString(" ORDER BY q4.daysSuccess %1").arg(orderDirection);
-                break;
-            default:
-                filterClause += ""; // keine Sortierung
-                break;
-            }
-        }
-    }
-
-    QString sql = sqlTemplate
-                      .arg(firstTo + 1)
-                      .arg(firstTo)
-                      .arg(secondTo + 1)
-                      .arg(secondTo)
-                      .arg(thirdTo + 1)
-                      .arg(thirdTo)
-                      .arg(fourthTo + 1)
-                      .arg(firstTo)
-                      .arg(secondTo)
-                      .arg(thirdTo)
-                      .arg(fourthTo)
-                      .arg(filterClause)
-                      .arg(quotesFilterClause);
-
-    qDebug().noquote() << "\n[DEBUG] Generiertes SQL:\n" << sql;
-    return sql;
 }
 
