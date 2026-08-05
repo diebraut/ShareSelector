@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
@@ -214,50 +215,56 @@ Window {
                                 ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
                                 delegate: Rectangle {
-                                    width: ListView.view.width
+                                    id: portfolioPositionDelegate
+                                    required property int index
+                                    property var rowData: portfolioWindow.portfolioModel && index >= 0 && index < portfolioWindow.portfolioModel.count
+                                        ? portfolioWindow.portfolioModel.get(index)
+                                        : ({})
+
+                                    width: portfolioListView.width
                                     height: 36
-                                    color: app.selectedPortfolioIndex === index
+                                    color: portfolioWindow.app.selectedPortfolioIndex === portfolioPositionDelegate.index
                                         ? "#dbeafe"
-                                        : (index % 2 === 0 ? "#ffffff" : "#f8fafc")
+                                        : (portfolioPositionDelegate.index % 2 === 0 ? "#ffffff" : "#f8fafc")
 
                                     RowLayout {
                                         anchors.fill: parent
                                         spacing: 1
 
                                         Label {
-                                            text: app.cleanDisplayText(model.name || model.symbol || "")
+                                            text: app.cleanDisplayText(portfolioPositionDelegate.rowData.name || portfolioPositionDelegate.rowData.symbol || "")
                                             Layout.fillWidth: true
                                             leftPadding: 10
                                             elide: Text.ElideRight
                                         }
                                         Label {
-                                            text: app.portfolioPositionTotalValue(model).toLocaleString(Qt.locale(), "f", 2)
+                                            text: app.portfolioPositionTotalValue(portfolioPositionDelegate.rowData).toLocaleString(Qt.locale(), "f", 2)
                                             Layout.preferredWidth: 120
                                             horizontalAlignment: Text.AlignRight
                                         }
-                                        Label { text: app.formatPercentValue(model.valueIncreasePercent); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
-                                        Label { text: Number(model.entryValue || 0).toLocaleString(Qt.locale(), "f", 2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
-                                        Label { text: model.quoteLastDate || "-"; Layout.preferredWidth: 95; horizontalAlignment: Text.AlignRight }
-                                        Label { text: app.formatPercentValue(model.days20ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
-                                        Label { text: app.formatPercentValue(model.days40ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
-                                        Label { text: app.formatPercentValue(model.days60ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
-                                        Label { text: app.formatPercentValue(model.days90ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight; rightPadding: 10 }
+                                        Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.valueIncreasePercent); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                        Label { text: Number(portfolioPositionDelegate.rowData.entryValue || 0).toLocaleString(Qt.locale(), "f", 2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
+                                        Label { text: portfolioPositionDelegate.rowData.quoteLastDate || "-"; Layout.preferredWidth: 95; horizontalAlignment: Text.AlignRight }
+                                        Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days20ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                        Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days40ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                        Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days60ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                        Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days90ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight; rightPadding: 10 }
                                     }
 
                                     MouseArea {
                                         anchors.fill: parent
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
                                         onClicked: function(mouse) {
-                                            app.selectedPortfolioIndex = index
+                                            app.selectedPortfolioIndex = portfolioPositionDelegate.index
                                             app.schedulePortfolioDetailsLoad()
                                             if (mouse.button === Qt.RightButton)
                                                 portfolioContextMenu.popup()
                                         }
                                         onDoubleClicked: function(mouse) {
                                             mouse.accepted = true
-                                            app.selectedPortfolioIndex = index
+                                            app.selectedPortfolioIndex = portfolioPositionDelegate.index
                                             app.schedulePortfolioDetailsLoad()
-                                            app.openPortfolioChartWindow(portfolioModel.get(index))
+                                            app.openPortfolioChartWindow(portfolioPositionDelegate.rowData)
                                         }
                                     }
 
@@ -269,14 +276,14 @@ Window {
                                             enabled: dbManager.ibkrConnected
                                                 && !dbManager.ibkrDataLoading
                                             onTriggered: dbManager.getIbkrData(
-                                                portfolioModel.get(index).symbol)
+                                                portfolioPositionDelegate.rowData.symbol)
                                         }
 
                                         MenuItem {
                                             text: "Get Fundamentals from Yahoo"
                                             enabled: !dbManager.fundamentalDataLoading
                                             onTriggered: dbManager.getAlphaVantageFundamentals(
-                                                portfolioModel.get(index).symbol)
+                                                portfolioPositionDelegate.rowData.symbol)
                                         }
                                     }
                                 }
