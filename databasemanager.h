@@ -140,6 +140,15 @@ public:
     bool ibkrNameCheckBatchActive() const;
     Q_INVOKABLE bool isBoughtStock(const QString &symbol);
     Q_INVOKABLE bool deleteBoughtStock(const QString &symbol);
+    Q_INVOKABLE bool exchangeBoughtStock(
+        const QString &sellSymbol,
+        const QString &buySymbol,
+        const QString &buyName,
+        const QString &buyDate,
+        double currentValue,
+        double entryValue,
+        double investedAmount,
+        const QString &analysisConfigName);
     Q_INVOKABLE bool saveBoughtStock(
         const QString &symbol,
         const QString &name,

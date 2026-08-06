@@ -2,22 +2,86 @@ import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
 import QtQuick.LocalStorage 2.15
+import QtQuick.Window 2.15
 
 ApplicationWindow {
     id: mainWindow
     visible: true
-    width: 1600
-    height: 1220
-    minimumWidth: 1200
-    minimumHeight: 1100
+    width: startupWindowWidth()
+    height: startupWindowHeight()
+    minimumWidth: Math.min(1200, startupWindowWidth())
+    minimumHeight: Math.min(1100, startupWindowHeight())
     title: "Stock Analyse"
 
     property var dbManager: databaseManager
+    property alias positionManagementBuyVersion: positionManagementDialog.buyPositionVersion
+    property alias positionManagementSellVersion: positionManagementDialog.sellPositionVersion
+
+    function startupScreenWidth() {
+        return Math.max(1, Screen.width || 1600)
+    }
+
+    function startupScreenHeight() {
+        return Math.max(1, Screen.height || 1220)
+    }
+
+    function startupScreenX() {
+        return Screen.virtualX || 0
+    }
+
+    function startupScreenY() {
+        return Screen.virtualY || 0
+    }
+
+    function startupMargin() {
+        return Math.round(startupScreenHeight() * 0.05)
+    }
+
+    function startupWindowWidth() {
+        return Math.round(startupScreenWidth() * 0.50)
+    }
+
+    function startupWindowHeight() {
+        return Math.round(startupScreenHeight() * 0.90)
+    }
+
+    function applyStartupWindowGeometry() {
+        const margin = startupMargin()
+        x = startupScreenX() + margin
+        y = startupScreenY() + margin
+        width = startupWindowWidth()
+        height = startupWindowHeight()
+    }
+
+    function applyPortfolioWindowGeometry() {
+        const margin = startupMargin()
+        const horizontalSpacing = 8
+        const verticalSpacing = 40
+        const left = x + width + horizontalSpacing
+        const right = startupScreenX() + startupScreenWidth() - margin
+        const positionDialogMinimumHeight = positionManagementDialog.minimumHeight || 260
+        const maximumPortfolioHeight = height - positionDialogMinimumHeight - verticalSpacing
+        const preferredPortfolioHeight = Math.round(height * 0.58)
+
+        portfolioWindow.x = left
+        portfolioWindow.y = y
+        portfolioWindow.width = Math.max(portfolioWindow.minimumWidth, right - left)
+        portfolioWindow.height = Math.max(
+            portfolioWindow.minimumHeight,
+            Math.min(preferredPortfolioHeight, maximumPortfolioHeight)
+        )
+
+        if (positionManagementDialog.visible)
+            positionManagementDialog.open()
+    }
 
     Component.onCompleted: Qt.callLater(function() {
+        applyStartupWindowGeometry()
         loadIbkrQuoteSchedule()
         loadStockAnalysisConfigs()
         loadLastStockAnalysisConfig()
+        openPortfolioWindow()
+        openPositionManagementDialog()
     })
 
     Timer {
@@ -889,6 +953,23 @@ ApplicationWindow {
         return removed
     }
 
+    function removeStockAnalysisResultsBySymbolsAlways(symbols) {
+        if (symbols.length === 0)
+            return 0
+        let normalizedSymbols = symbols.map(symbol => String(symbol || ""))
+        let removed = 0
+        for (let i = stockAnalysisResultModel.count - 1; i >= 0; i--) {
+            let row = stockAnalysisResultModel.get(i)
+            if (normalizedSymbols.indexOf(String(row.symbol || "")) >= 0) {
+                stockAnalysisResultModel.remove(i)
+                removed++
+            }
+        }
+        if (removed > 0)
+            resetStockAnalysisSelectionState()
+        return removed
+    }
+
     function runStockAnalysis() {
         let increasePercent = Number(stockAnalysisConfigPanel.increaseText.replace(",", "."))
         if (isNaN(increasePercent)) {
@@ -1522,10 +1603,110 @@ ApplicationWindow {
     }
 
     function openPortfolioWindow() {
+        applyPortfolioWindowGeometry()
         portfolioWindow.show()
         portfolioWindow.raise()
         portfolioWindow.requestActivate()
     }
+    function openPositionManagementDialog() {
+        positionManagementDialog.open()
+    }
+
+    function addStockAnalysisPositionToBuy(row) {
+        if (!row)
+            return
+        const position = cloneStockAnalysisResult(row)
+        if (positionManagementDialog.addBuyPosition(position))
+            stockAnalysisMessage = "Position fuer Kauf abgelegt: " + (position.symbol || position.name || "-")
+    }
+
+    function addPortfolioPositionToSell(row) {
+        if (!row)
+            return
+        if (positionManagementDialog.addSellPosition(row))
+            stockAnalysisMessage = "Position fuer Verkauf abgelegt: " + (row.symbol || row.name || "-")
+    }
+
+    function stockAnalysisPositionInBuy(row) {
+        return positionManagementDialog.containsBuyPosition(row)
+    }
+
+    function portfolioPositionInSell(row) {
+        return positionManagementDialog.containsSellPosition(row)
+    }
+
+    function exchangeCheckedPositions() {
+        const pairs = positionManagementDialog.checkedExchangePairs()
+        if (pairs.length === 0) {
+            stockAnalysisMessage = "Keine Austausch-Zeile ausgewaehlt"
+            return
+        }
+
+        positionManagementDialog.setExchangeStatus(true, "Aktien austauschen laeuft ...")
+        Qt.callLater(function() {
+            processCheckedPositionExchange(pairs)
+        })
+    }
+
+    function processCheckedPositionExchange(pairs) {
+        const buyDate = currentIsoDate()
+        const analysisConfigName = currentStockAnalysisConfigName()
+        let exchanged = 0
+        let failed = 0
+        let removedAnalysis = 0
+        let successfulIndexes = []
+        let boughtSymbols = []
+
+        pairs.forEach(pair => {
+            const buy = pair.buy || ({})
+            const sell = pair.sell || ({})
+            const amount = Number(sell.totalValue || 0)
+            let entryPrice = Number(dbManager.closePriceOnOrBefore(buy.symbol || "", buyDate) || 0)
+            if (entryPrice <= 0)
+                entryPrice = Number(buy.value || 0)
+            const currentValue = Number(buy.value || entryPrice)
+
+            if (amount <= 0 || entryPrice <= 0 || currentValue <= 0) {
+                failed++
+                return
+            }
+
+            const ok = dbManager.exchangeBoughtStock(
+                sell.symbol || "",
+                buy.symbol || "",
+                buy.name || buy.symbol || "",
+                buyDate,
+                currentValue,
+                entryPrice,
+                amount,
+                analysisConfigName
+            )
+
+            if (ok) {
+                exchanged++
+                successfulIndexes.push(pair.index)
+                boughtSymbols.push(buy.symbol || "")
+            } else {
+                failed++
+            }
+        })
+
+        if (successfulIndexes.length > 0) {
+            positionManagementDialog.removeExchangeRows(successfulIndexes)
+            removedAnalysis = removeStockAnalysisResultsBySymbolsAlways(boughtSymbols)
+            loadTestPortfolio("", true)
+        }
+
+        stockAnalysisMessage = exchanged + " Aktien ausgetauscht"
+            + (failed > 0 ? ", " + failed + " fehlgeschlagen" : "")
+            + (removedAnalysis > 0 ? ", " + removedAnalysis + " aus Analyse entfernt" : "")
+        positionManagementDialog.setExchangeStatus(
+            false,
+            exchanged + " Aktien ausgetauscht"
+                + (failed > 0 ? ", " + failed + " fehlgeschlagen" : "")
+        )
+    }
+
     function openPortfolioChartWindow(row) {
         if (!row || !row.symbol)
             return
@@ -1685,19 +1866,83 @@ ApplicationWindow {
                                     enabled: selectedStockAnalysisRows.length > 0
                                     onTriggered: openStockAnalysisBuyDialog()
                                 }
+                                MenuItem {
+                                    text: "In Kauf ablegen"
+                                    enabled: selectedStockAnalysisIndex >= 0
+                                        && !stockAnalysisPositionInBuy(stockAnalysisResultModel.get(selectedStockAnalysisIndex))
+                                    onTriggered: addStockAnalysisPositionToBuy(stockAnalysisResultModel.get(selectedStockAnalysisIndex))
+                                }
                             }
 
                             delegate: Rectangle {
+                                id: stockAnalysisDelegate
+                                property string positionType: "stock-analysis"
+                                property var positionData: cloneStockAnalysisResult(model)
+                                property bool positionUsed: positionManagementBuyVersion >= 0
+                                    && stockAnalysisPositionInBuy(positionData)
+                                property bool dragActive: false
+                                property real pressX: 0
+                                property real pressY: 0
+
                                 width: ListView.view.width
                                 height: 34
                                 color: stockAnalysisIndexSelected(index)
                                     ? "lightsteelblue"
-                                    : (index % 2 === 0 ? "#ffffff" : "#eef2f4")
+                                    : (stockAnalysisDelegate.positionUsed
+                                        ? "#e5e7eb"
+                                        : (index % 2 === 0 ? "#ffffff" : "#eef2f4"))
+
+                                Item {
+                                    id: stockAnalysisDragProxy
+                                    width: stockAnalysisDelegate.width
+                                    height: stockAnalysisDelegate.height
+                                    opacity: 0
+                                    property string positionType: stockAnalysisDelegate.positionType
+                                    property var positionData: stockAnalysisDelegate.positionData
+
+                                    Drag.active: stockAnalysisDelegate.dragActive
+                                    Drag.dragType: Drag.Automatic
+                                    Drag.keys: ["stock-analysis-position"]
+                                    Drag.mimeData: {
+                                        "application/x-shareselector-position": JSON.stringify({
+                                            positionType: stockAnalysisDragProxy.positionType,
+                                            positionData: stockAnalysisDragProxy.positionData
+                                        })
+                                    }
+                                    Drag.supportedActions: Qt.CopyAction
+                                    Drag.hotSpot.x: width / 2
+                                    Drag.hotSpot.y: height / 2
+                                    Drag.onDragFinished: {
+                                        stockAnalysisDragProxy.x = 0
+                                        stockAnalysisDragProxy.y = 0
+                                    }
+                                }
 
                                 MouseArea {
+                                    id: stockAnalysisDragMouse
                                     anchors.fill: parent
                                     z: 0
                                     acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                    preventStealing: stockAnalysisDelegate.positionUsed
+                                    drag.target: stockAnalysisDelegate.positionUsed ? null : stockAnalysisDragProxy
+                                    onPressed: function(mouse) {
+                                        stockAnalysisDelegate.pressX = mouse.x
+                                        stockAnalysisDelegate.pressY = mouse.y
+                                        stockAnalysisDelegate.dragActive = false
+                                    }
+                                    onPositionChanged: function(mouse) {
+                                        if (stockAnalysisDelegate.positionUsed) {
+                                            mouse.accepted = true
+                                            return
+                                        }
+                                        if (mouse.buttons & Qt.LeftButton) {
+                                            const dx = mouse.x - stockAnalysisDelegate.pressX
+                                            const dy = mouse.y - stockAnalysisDelegate.pressY
+                                            if (!stockAnalysisDelegate.dragActive
+                                                    && dx * dx + dy * dy >= 64)
+                                                stockAnalysisDelegate.dragActive = true
+                                        }
+                                    }
                                     onClicked: function(mouse) {
                                         if (mouse.button === Qt.RightButton) {
                                             if (!stockAnalysisIndexSelected(index))
@@ -1712,6 +1957,16 @@ ApplicationWindow {
                                             toggleStockAnalysisRow(index)
                                         else
                                             selectSingleStockAnalysisRow(index)
+                                    }
+                                    onReleased: {
+                                        stockAnalysisDelegate.dragActive = false
+                                        stockAnalysisDragProxy.x = 0
+                                        stockAnalysisDragProxy.y = 0
+                                    }
+                                    onCanceled: {
+                                        stockAnalysisDelegate.dragActive = false
+                                        stockAnalysisDragProxy.x = 0
+                                        stockAnalysisDragProxy.y = 0
                                     }
                                 }
 
@@ -1738,6 +1993,18 @@ ApplicationWindow {
                                     Label { text: Number(model.corridorhitpercent || 0).toFixed(1) + "%"; Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
                                     Label { text: Number(model.increasepercent || 0).toFixed(2) + "%"; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight }
                                     Item { Layout.fillWidth: true }
+                                }
+
+                                Label {
+                                    visible: stockAnalysisDelegate.positionUsed
+                                    z: 2
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: 8
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: "abgelegt"
+                                    color: "#64748b"
+                                    font.pixelSize: 11
+                                    font.bold: true
                                 }
                             }
                         }
@@ -1778,6 +2045,12 @@ ApplicationWindow {
         id: stockAnalysisBuyDialog
         app: mainWindow
         hostWindow: mainWindow
+    }
+    PositionManagementDialog {
+        id: positionManagementDialog
+        app: mainWindow
+        hostWindow: portfolioWindow
+        stockAnalysisWindow: mainWindow
     }
     PortfolioBatchWindow {
         id: portfolioBatchWindow

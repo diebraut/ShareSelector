@@ -229,21 +229,64 @@ Window {
                                     required property int index
                                     required property var modelData
                                     property var rowData: modelData || ({})
+                                    property string positionType: "portfolio"
+                                    property bool positionUsed: app.positionManagementSellVersion >= 0
+                                        && app.portfolioPositionInSell(rowData)
+                                    property bool dragActive: false
+                                    property real pressX: 0
+                                    property real pressY: 0
 
                                     width: ListView.view ? ListView.view.width : 0
                                     height: 36
                                     color: portfolioWindow.app.selectedPortfolioIndex === portfolioPositionDelegate.index
                                         ? "#dbeafe"
-                                        : (portfolioPositionDelegate.index % 2 === 0 ? "#ffffff" : "#f8fafc")
+                                        : (portfolioPositionDelegate.positionUsed
+                                            ? "#e5e7eb"
+                                            : (portfolioPositionDelegate.index % 2 === 0 ? "#ffffff" : "#f8fafc"))
+
+                                    Item {
+                                        id: portfolioPositionDragProxy
+                                        width: portfolioPositionDelegate.width
+                                        height: portfolioPositionDelegate.height
+                                        opacity: 0
+                                        property string positionType: portfolioPositionDelegate.positionType
+                                        property var positionData: portfolioPositionDelegate.rowData
+
+                                        Drag.active: portfolioPositionDelegate.dragActive
+                                        Drag.dragType: Drag.Automatic
+                                        Drag.keys: ["portfolio-position"]
+                                        Drag.mimeData: {
+                                            "application/x-shareselector-position": JSON.stringify({
+                                                positionType: portfolioPositionDragProxy.positionType,
+                                                positionData: portfolioPositionDragProxy.positionData
+                                            })
+                                        }
+                                        Drag.supportedActions: Qt.CopyAction
+                                        Drag.hotSpot.x: width / 2
+                                        Drag.hotSpot.y: height / 2
+                                        Drag.onDragFinished: {
+                                            portfolioPositionDragProxy.x = 0
+                                            portfolioPositionDragProxy.y = 0
+                                        }
+                                    }
 
                                     RowLayout {
                                         anchors.fill: parent
                                         spacing: 1
 
+                                        Rectangle {
+                                            visible: portfolioPositionDelegate.positionUsed
+                                            Layout.preferredWidth: 6
+                                            Layout.preferredHeight: 6
+                                            radius: 3
+                                            color: "#64748b"
+                                            Layout.leftMargin: 6
+                                        }
+
                                         Label {
                                             text: app.cleanDisplayText(portfolioPositionDelegate.rowData.name || portfolioPositionDelegate.rowData.symbol || "")
                                             Layout.fillWidth: true
-                                            leftPadding: 10
+                                            leftPadding: portfolioPositionDelegate.positionUsed ? 4 : 10
                                             elide: Text.ElideRight
                                         }
                                         Label {
@@ -261,8 +304,29 @@ Window {
                                     }
 
                                     MouseArea {
+                                        id: portfolioPositionDragMouse
                                         anchors.fill: parent
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                        preventStealing: portfolioPositionDelegate.positionUsed
+                                        drag.target: portfolioPositionDelegate.positionUsed ? null : portfolioPositionDragProxy
+                                        onPressed: function(mouse) {
+                                            portfolioPositionDelegate.pressX = mouse.x
+                                            portfolioPositionDelegate.pressY = mouse.y
+                                            portfolioPositionDelegate.dragActive = false
+                                        }
+                                        onPositionChanged: function(mouse) {
+                                            if (portfolioPositionDelegate.positionUsed) {
+                                                mouse.accepted = true
+                                                return
+                                            }
+                                            if (mouse.buttons & Qt.LeftButton) {
+                                                const dx = mouse.x - portfolioPositionDelegate.pressX
+                                                const dy = mouse.y - portfolioPositionDelegate.pressY
+                                                if (!portfolioPositionDelegate.dragActive
+                                                        && dx * dx + dy * dy >= 64)
+                                                    portfolioPositionDelegate.dragActive = true
+                                            }
+                                        }
                                         onClicked: function(mouse) {
                                             app.selectedPortfolioIndex = portfolioPositionDelegate.index
                                             app.schedulePortfolioDetailsLoad()
@@ -275,10 +339,26 @@ Window {
                                             app.schedulePortfolioDetailsLoad()
                                             app.openPortfolioChartWindow(portfolioPositionDelegate.rowData)
                                         }
+                                        onReleased: {
+                                            portfolioPositionDelegate.dragActive = false
+                                            portfolioPositionDragProxy.x = 0
+                                            portfolioPositionDragProxy.y = 0
+                                        }
+                                        onCanceled: {
+                                            portfolioPositionDelegate.dragActive = false
+                                            portfolioPositionDragProxy.x = 0
+                                            portfolioPositionDragProxy.y = 0
+                                        }
                                     }
 
                                     Menu {
                                         id: portfolioContextMenu
+
+                                        MenuItem {
+                                            text: "In Verkauf ablegen"
+                                            enabled: !portfolioPositionDelegate.positionUsed
+                                            onTriggered: app.addPortfolioPositionToSell(portfolioPositionDelegate.rowData)
+                                        }
 
                                         MenuItem {
                                             text: "Get Data from IBKR"
@@ -602,9 +682,20 @@ Window {
                             background: null
                         }
 
-                        Button {
-                            text: "Schließen"
-                            onClicked: portfolioWindow.close()
+                        ColumnLayout {
+                            spacing: 4
+
+                            Button {
+                                text: "Positionen verwalten"
+                                Layout.fillWidth: true
+                                onClicked: app.openPositionManagementDialog()
+                            }
+
+                            Button {
+                                text: "Schließen"
+                                Layout.fillWidth: true
+                                onClicked: portfolioWindow.close()
+                            }
                         }
                     }
 

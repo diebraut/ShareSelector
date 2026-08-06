@@ -1132,6 +1132,121 @@ bool DatabaseManager::deleteBoughtStock(const QString &symbol)
     return query.numRowsAffected() > 0;
 }
 
+bool DatabaseManager::exchangeBoughtStock(
+    const QString &sellSymbol,
+    const QString &buySymbol,
+    const QString &buyName,
+    const QString &buyDate,
+    double currentValue,
+    double entryValue,
+    double investedAmount,
+    const QString &analysisConfigName)
+{
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return false;
+    }
+
+    const QString normalizedSellSymbol = sellSymbol.trimmed();
+    const QString normalizedBuySymbol = buySymbol.trimmed();
+    const QString normalizedBuyName = buyName.trimmed();
+    const QString normalizedBuyDate = buyDate.trimmed();
+    if (normalizedSellSymbol.isEmpty()
+            || normalizedBuySymbol.isEmpty()
+            || normalizedBuyName.isEmpty()
+            || normalizedBuyDate.isEmpty()
+            || currentValue <= 0.0
+            || entryValue <= 0.0
+            || investedAmount <= 0.0) {
+        qWarning() << "Pflichtfelder fuer Aktienaustausch fehlen.";
+        return false;
+    }
+
+    const double quantity = investedAmount / entryValue;
+    const double valueIncreasePercent = entryValue > 0.0
+        ? (currentValue - entryValue) / entryValue * 100.0
+        : 0.0;
+
+    if (!db.transaction()) {
+        qCritical() << "Fehler beim Starten der Austausch-Transaktion:" << db.lastError().text();
+        return false;
+    }
+
+    QSqlQuery deleteQuery(db);
+    deleteQuery.prepare(R"SQL(
+        DELETE FROM "BoughtStocks"
+        WHERE "Symbol" = :sellSymbol
+    )SQL");
+    deleteQuery.bindValue(QStringLiteral(":sellSymbol"), normalizedSellSymbol);
+    if (!deleteQuery.exec() || deleteQuery.numRowsAffected() <= 0) {
+        qCritical() << "Fehler beim Entfernen der Verkaufsposition:"
+                    << deleteQuery.lastError().text() << normalizedSellSymbol;
+        db.rollback();
+        return false;
+    }
+
+    QSqlQuery insertQuery(db);
+    insertQuery.prepare(R"SQL(
+        INSERT INTO "BoughtStocks" (
+            "Symbol",
+            "Name",
+            "BuyDate",
+            "SellDate",
+            "CurrentValue",
+            "EntryValue",
+            "ValueIncreasePercent",
+            "Status",
+            "Quantity",
+            "AnalysisConfigName"
+        )
+        VALUES (
+            :symbol,
+            :name,
+            :buyDate,
+            NULL,
+            :currentValue,
+            :entryValue,
+            :valueIncreasePercent,
+            0,
+            :quantity,
+            NULLIF(:analysisConfigName, '')
+        )
+        ON CONFLICT ("Symbol") DO UPDATE SET
+            "Name" = EXCLUDED."Name",
+            "BuyDate" = EXCLUDED."BuyDate",
+            "SellDate" = EXCLUDED."SellDate",
+            "CurrentValue" = EXCLUDED."CurrentValue",
+            "EntryValue" = EXCLUDED."EntryValue",
+            "ValueIncreasePercent" = EXCLUDED."ValueIncreasePercent",
+            "Status" = EXCLUDED."Status",
+            "Quantity" = EXCLUDED."Quantity",
+            "AnalysisConfigName" = EXCLUDED."AnalysisConfigName"
+    )SQL");
+    insertQuery.bindValue(QStringLiteral(":symbol"), normalizedBuySymbol);
+    insertQuery.bindValue(QStringLiteral(":name"), normalizedBuyName);
+    insertQuery.bindValue(QStringLiteral(":buyDate"), normalizedBuyDate);
+    insertQuery.bindValue(QStringLiteral(":currentValue"), currentValue);
+    insertQuery.bindValue(QStringLiteral(":entryValue"), entryValue);
+    insertQuery.bindValue(QStringLiteral(":valueIncreasePercent"), valueIncreasePercent);
+    insertQuery.bindValue(QStringLiteral(":quantity"), quantity);
+    insertQuery.bindValue(QStringLiteral(":analysisConfigName"), analysisConfigName.trimmed());
+
+    if (!insertQuery.exec()) {
+        qCritical() << "Fehler beim Speichern der Kaufposition:"
+                    << insertQuery.lastError().text() << normalizedBuySymbol;
+        db.rollback();
+        return false;
+    }
+
+    if (!db.commit()) {
+        qCritical() << "Fehler beim Abschliessen der Austausch-Transaktion:" << db.lastError().text();
+        db.rollback();
+        return false;
+    }
+
+    return true;
+}
+
 bool DatabaseManager::saveBoughtStock(
     const QString &symbol,
     const QString &name,
