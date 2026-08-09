@@ -12,6 +12,15 @@ GroupBox {
     property alias directSearchIsinText: directSearchIsinInput.text
     property alias directSearchNameText: directSearchNameInput.text
     property bool directSearchActive: directSearchActivateCheckBox.checked
+    property var directSearchTradingDayValues: [20, 40, 60, 90]
+    function directSearchTradingDayIndex(days) {
+        let normalizedDays = Number(days || 90)
+        for (let i = 0; i < directSearchTradingDayValues.length; i++) {
+            if (directSearchTradingDayValues[i] === normalizedDays)
+                return i
+        }
+        return directSearchTradingDayValues.length - 1
+    }
                     title: "Suchparameter"
                     topPadding: 22
                     label: Label {
@@ -218,36 +227,13 @@ GroupBox {
                                     }
                                 }
 
-                                RowLayout {
-                                    Layout.preferredWidth: 380
-                                    Layout.minimumWidth: 360
-                                    spacing: 10
-
-                                    Label {
-                                        text: app.stockAnalysisStockSelected ? Number(app.stockAnalysisActualIncreasePercent || 0).toFixed(1) + "%" : "---"
-                                        Layout.preferredWidth: 62
-                                        horizontalAlignment: Text.AlignLeft
-                                        verticalAlignment: Text.AlignVCenter
-                                        font.bold: true
-                                        color: "#475569"
-                                    }
-
-                                    CheckBox {
-                                        id: stockAnalysisHideBoughtCheckBox
-                                        enabled: !directSearchActive
-                                        text: "Gekaufte Stocks nicht anzeigen"
-                                        checked: app.stockAnalysisHideBoughtStocks
-                                        Layout.preferredWidth: 280
-                                        Layout.minimumWidth: 260
-                                        onCheckedChanged: {
-                                            app.stockAnalysisHideBoughtStocks = checked
-                                            if (checked) {
-                                                let removed = app.removeBoughtStocksFromStockAnalysisResults()
-                                                if (removed > 0)
-                                                    app.stockAnalysisMessage = removed + " gekaufte Stocks ausgeblendet"
-                                            }
-                                        }
-                                    }
+                                Label {
+                                    text: app.stockAnalysisStockSelected ? Number(app.stockAnalysisActualIncreasePercent || 0).toFixed(1) + "%" : "---"
+                                    Layout.preferredWidth: 100
+                                    horizontalAlignment: Text.AlignLeft
+                                    verticalAlignment: Text.AlignVCenter
+                                    font.bold: true
+                                    color: "#475569"
                                 }
 
                                 Label {
@@ -425,15 +411,31 @@ GroupBox {
                                 }
 
                                 ColumnLayout {
-                                    Layout.fillWidth: true
-                                    Layout.leftMargin: -270
-                                    Layout.preferredWidth: 446
-                                    Layout.minimumWidth: 426
+                                    Layout.fillWidth: false
+                                    Layout.leftMargin: -115
+                                    Layout.preferredWidth: 368
+                                    Layout.minimumWidth: 368
+                                    Layout.maximumWidth: 368
                                     Layout.preferredHeight: stockAnalysisSearchParameterGrid.implicitHeight + 36
                                     Layout.maximumHeight: stockAnalysisSearchParameterGrid.implicitHeight + 36
-                                    spacing: 0
+                                    spacing: 2
 
-                                    Item { Layout.preferredHeight: 58 }
+                                    CheckBox {
+                                        id: stockAnalysisHideBoughtCheckBox
+                                        enabled: !directSearchActive
+                                        text: "Gekaufte Stocks nicht anzeigen"
+                                        checked: app.stockAnalysisHideBoughtStocks
+                                        Layout.fillWidth: true
+                                        Layout.preferredHeight: 28
+                                        onCheckedChanged: {
+                                            app.stockAnalysisHideBoughtStocks = checked
+                                            if (checked) {
+                                                let removed = app.removeBoughtStocksFromStockAnalysisResults()
+                                                if (removed > 0)
+                                                    app.stockAnalysisMessage = removed + " gekaufte Stocks ausgeblendet"
+                                            }
+                                        }
+                                    }
 
                                     GroupBox {
                                         id: directSearchGroupBox
@@ -470,15 +472,15 @@ GroupBox {
                                             anchors.fill: parent
                                             columns: 2
                                             columnSpacing: 8
-                                            rowSpacing: 8
+                                            rowSpacing: 6
 
-                                            Item { Layout.columnSpan: 2; Layout.fillHeight: true }
+                                            Item { Layout.columnSpan: 2; Layout.preferredHeight: 0 }
 
                                             Label {
                                                 visible: directSearchActive
                                                 text: "ISIN"
                                                 opacity: directSearchActive ? 1 : 0.45
-                                                Layout.preferredWidth: 54
+                                                Layout.preferredWidth: 156
                                                 verticalAlignment: Text.AlignVCenter
                                             }
 
@@ -487,7 +489,8 @@ GroupBox {
                                                 visible: directSearchActive
                                                 enabled: directSearchActive
                                                 opacity: directSearchActive ? 1 : 0.55
-                                                Layout.fillWidth: true
+                                                Layout.preferredWidth: 180
+                                                Layout.maximumWidth: 180
                                                 placeholderText: "ISIN"
                                             }
 
@@ -495,7 +498,7 @@ GroupBox {
                                                 visible: directSearchActive
                                                 text: "Name"
                                                 opacity: directSearchActive ? 1 : 0.45
-                                                Layout.preferredWidth: 54
+                                                Layout.preferredWidth: 156
                                                 verticalAlignment: Text.AlignVCenter
                                             }
 
@@ -504,11 +507,58 @@ GroupBox {
                                                 visible: directSearchActive
                                                 enabled: directSearchActive
                                                 opacity: directSearchActive ? 1 : 0.55
-                                                Layout.fillWidth: true
+                                                Layout.preferredWidth: 180
+                                                Layout.maximumWidth: 180
                                                 placeholderText: "Name, Wildcard *"
                                             }
 
-                                            Item { Layout.columnSpan: 2; Layout.fillHeight: true }
+                                            Label {
+                                                visible: directSearchActive
+                                                text: "Anzeige f\u00fcr Handelstage"
+                                                opacity: directSearchActive ? 1 : 0.45
+                                                Layout.preferredWidth: 156
+                                                verticalAlignment: Text.AlignVCenter
+                                            }
+
+                                            RowLayout {
+                                                visible: directSearchActive
+                                                enabled: directSearchActive
+                                                opacity: directSearchActive ? 1 : 0.55
+                                                Layout.preferredWidth: 180
+                                                Layout.maximumWidth: 180
+                                                spacing: 8
+
+                                                Slider {
+                                                    id: directSearchTradingDaySlider
+                                                    from: 0
+                                                    to: 3
+                                                    stepSize: 1
+                                                    snapMode: Slider.SnapAlways
+                                                    live: true
+                                                    value: stockAnalysisSearchParametersGroupBox.directSearchTradingDayIndex(app.stockAnalysisDirectSearchTradingDays)
+                                                    Layout.fillWidth: true
+                                                    onMoved: app.setDirectSearchTradingDays(
+                                                        stockAnalysisSearchParametersGroupBox.directSearchTradingDayValues[Math.round(value)],
+                                                        false
+                                                    )
+                                                    onPressedChanged: {
+                                                        if (!pressed)
+                                                            app.setDirectSearchTradingDays(
+                                                                stockAnalysisSearchParametersGroupBox.directSearchTradingDayValues[Math.round(value)],
+                                                                true
+                                                            )
+                                                    }
+                                                }
+
+                                                Label {
+                                                    text: Number(app.stockAnalysisDirectSearchTradingDays || 90).toFixed(0)
+                                                    Layout.preferredWidth: 34
+                                                    horizontalAlignment: Text.AlignRight
+                                                    verticalAlignment: Text.AlignVCenter
+                                                }
+                                            }
+
+                                            Item { Layout.columnSpan: 2; Layout.preferredHeight: 4 }
 
                                             RowLayout {
                                                 Layout.columnSpan: 2
@@ -550,7 +600,7 @@ GroupBox {
                                 onClicked: app.stockAnalysisScanActive ? app.stopStockAnalysisScan() : app.startStockAnalysisSearch()
                             }
 
-                            Item { Layout.fillHeight: true }
+                            Item { Layout.preferredHeight: directSearchActive ? 80 : 92 }
 
                             Button {
                                 text: "Depot"

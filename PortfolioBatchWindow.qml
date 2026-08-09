@@ -33,7 +33,7 @@ Window {
                 }
 
                 Label {
-                    text: "Geplanter IBKR-Quote-Batch Ã¼ber IB Gateway"
+                    text: "Geplanter IBKR-Quote-Batch über IB Gateway"
                     font.bold: true
                     Layout.fillWidth: true
                 }
@@ -87,7 +87,7 @@ Window {
 
                     Item { Layout.columnSpan: 4; Layout.fillWidth: true }
                     Button {
-                        text: "Gateway/API prÃ¼fen"
+                        text: "Gateway/API prüfen"
                         Layout.fillWidth: true
                         enabled: app.canProbeIbkrGateway()
                         onClicked: app.checkIbkrGatewayOnly()
@@ -179,7 +179,7 @@ Window {
                 RowLayout {
                     Layout.fillWidth: true
                     Item { Layout.fillWidth: true }
-                    Button { text: "SchlieÃŸen"; onClicked: portfolioBatchWindow.close() }
+                    Button { text: "Schließen"; onClicked: portfolioBatchWindow.close() }
                 }
             }
         }

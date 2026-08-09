@@ -172,6 +172,49 @@ void DatabaseManager::startIbkrGetAllStocks()
     startIbkrGetStocksBatch(false);
 }
 
+void DatabaseManager::startIbkrGetStocksForSymbols(const QVariantList &symbols)
+{
+    if (m_ibkrGetStocksBatchActive || m_ibkrDataLoading || m_ibkrNameCheckBatchActive)
+        return;
+
+    if (!m_ibkrConnected || m_ibkrConnectedPort == 0) {
+        setIbkrConnectionState(QStringLiteral("Fehler: Zuerst eine Verbindung zu IBKR herstellen."), false, false);
+        return;
+    }
+    if (!db.isOpen()) {
+        setIbkrConnectionState(QStringLiteral("Fehler: Datenbank ist nicht verbunden."), m_ibkrConnected, false);
+        return;
+    }
+
+    QStringList uniqueSymbols;
+    for (const QVariant &value : symbols) {
+        const QString symbol = value.toString().trimmed();
+        if (!symbol.isEmpty() && !uniqueSymbols.contains(symbol, Qt::CaseInsensitive))
+            uniqueSymbols << symbol;
+    }
+
+    if (uniqueSymbols.isEmpty()) {
+        setIbkrConnectionState(QStringLiteral("Get Quotes: Keine Aktien ausgewaehlt."), m_ibkrConnected, false);
+        return;
+    }
+
+    m_ibkrGetStocksBatchName = QStringLiteral("Get Quotes");
+    m_ibkrGetStocksSymbols = uniqueSymbols;
+    m_ibkrGetStocksIndex = 0;
+    m_ibkrGetStocksSuccessCount = 0;
+    m_ibkrGetStocksFailureCount = 0;
+    m_ibkrGetStocksChangedQuoteCount = 0;
+    m_ibkrGetStocksBatchActive = true;
+
+    setIbkrConnectionState(
+        QStringLiteral("%1 gestartet: Fuer %2 ausgewaehlte Aktien werden Quotes aktualisiert.")
+            .arg(m_ibkrGetStocksBatchName)
+            .arg(m_ibkrGetStocksSymbols.size()),
+        m_ibkrConnected,
+        false);
+    scheduleNextIbkrGetStocksSymbol(100);
+}
+
 void DatabaseManager::startIbkrGetStocksBatch(bool depotOnly)
 {
     if (m_ibkrGetStocksBatchActive || m_ibkrDataLoading || m_ibkrNameCheckBatchActive)

@@ -140,21 +140,88 @@ QVariantMap DatabaseManager::getPortfolioChartData(const QString &symbol)
                 bd.start_40,
                 bd.start_60,
                 bd.start_90,
-                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_20 AND l.latest_date) AS avg_20,
-                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_40 AND l.latest_date) AS avg_40,
-                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_60 AND l.latest_date) AS avg_60,
-                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_90 AND l.latest_date) AS avg_90,
-                COUNT(q.*) FILTER (WHERE q."CloseDate" BETWEEN bd.start_20 AND l.latest_date) AS quote_count_20,
-                COUNT(q.*) FILTER (WHERE q."CloseDate" BETWEEN bd.start_40 AND l.latest_date) AS quote_count_40,
-                COUNT(q.*) FILTER (WHERE q."CloseDate" BETWEEN bd.start_60 AND l.latest_date) AS quote_count_60,
-                COUNT(q.*) FILTER (WHERE q."CloseDate" BETWEEN bd.start_90 AND l.latest_date) AS quote_count_90
+                p20.new_avg AS avg_20,
+                p40.new_avg AS avg_40,
+                p60.new_avg AS avg_60,
+                p90.new_avg AS avg_90,
+                ROUND(((p20.new_avg - p20.old_avg) / NULLIF(p20.old_avg, 0) * 100)::numeric, 2) AS inc_20,
+                ROUND(((p40.new_avg - p40.old_avg) / NULLIF(p40.old_avg, 0) * 100)::numeric, 2) AS inc_40,
+                ROUND(((p60.new_avg - p60.old_avg) / NULLIF(p60.old_avg, 0) * 100)::numeric, 2) AS inc_60,
+                ROUND(((p90.new_avg - p90.old_avg) / NULLIF(p90.old_avg, 0) * 100)::numeric, 2) AS inc_90,
+                p20.quote_count AS quote_count_20,
+                p40.quote_count AS quote_count_40,
+                p60.quote_count AS quote_count_60,
+                p90.quote_count AS quote_count_90
             FROM latest_quote l
             CROSS JOIN boundaries bd
-            LEFT JOIN "Quotes" q
-              ON q."Symbol" = :symbol
-             AND COALESCE(q."ClosePrice", 0) > 0
-             AND q."CloseDate" BETWEEN bd.start_90 AND l.latest_date
-            GROUP BY l.latest_close, l.latest_date, bd.start_20, bd.start_40, bd.start_60, bd.start_90
+            LEFT JOIN LATERAL (
+                SELECT
+                    AVG(close_price) FILTER (WHERE rn_asc <= LEAST(5::bigint, total_count)) AS old_avg,
+                    AVG(close_price) FILTER (WHERE rn_desc <= LEAST(5::bigint, total_count)) AS new_avg,
+                    COUNT(*) AS quote_count
+                FROM (
+                    SELECT
+                        q."ClosePrice" AS close_price,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" ASC) AS rn_asc,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" DESC) AS rn_desc,
+                        COUNT(*) OVER () AS total_count
+                    FROM "Quotes" q
+                    WHERE q."Symbol" = :symbol
+                      AND COALESCE(q."ClosePrice", 0) > 0
+                      AND q."CloseDate" BETWEEN bd.start_20 AND l.latest_date
+                ) ranked
+            ) p20 ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    AVG(close_price) FILTER (WHERE rn_asc <= LEAST(5::bigint, total_count)) AS old_avg,
+                    AVG(close_price) FILTER (WHERE rn_desc <= LEAST(5::bigint, total_count)) AS new_avg,
+                    COUNT(*) AS quote_count
+                FROM (
+                    SELECT
+                        q."ClosePrice" AS close_price,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" ASC) AS rn_asc,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" DESC) AS rn_desc,
+                        COUNT(*) OVER () AS total_count
+                    FROM "Quotes" q
+                    WHERE q."Symbol" = :symbol
+                      AND COALESCE(q."ClosePrice", 0) > 0
+                      AND q."CloseDate" BETWEEN bd.start_40 AND l.latest_date
+                ) ranked
+            ) p40 ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    AVG(close_price) FILTER (WHERE rn_asc <= LEAST(5::bigint, total_count)) AS old_avg,
+                    AVG(close_price) FILTER (WHERE rn_desc <= LEAST(5::bigint, total_count)) AS new_avg,
+                    COUNT(*) AS quote_count
+                FROM (
+                    SELECT
+                        q."ClosePrice" AS close_price,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" ASC) AS rn_asc,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" DESC) AS rn_desc,
+                        COUNT(*) OVER () AS total_count
+                    FROM "Quotes" q
+                    WHERE q."Symbol" = :symbol
+                      AND COALESCE(q."ClosePrice", 0) > 0
+                      AND q."CloseDate" BETWEEN bd.start_60 AND l.latest_date
+                ) ranked
+            ) p60 ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    AVG(close_price) FILTER (WHERE rn_asc <= LEAST(5::bigint, total_count)) AS old_avg,
+                    AVG(close_price) FILTER (WHERE rn_desc <= LEAST(5::bigint, total_count)) AS new_avg,
+                    COUNT(*) AS quote_count
+                FROM (
+                    SELECT
+                        q."ClosePrice" AS close_price,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" ASC) AS rn_asc,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" DESC) AS rn_desc,
+                        COUNT(*) OVER () AS total_count
+                    FROM "Quotes" q
+                    WHERE q."Symbol" = :symbol
+                      AND COALESCE(q."ClosePrice", 0) > 0
+                      AND q."CloseDate" BETWEEN bd.start_90 AND l.latest_date
+                ) ranked
+            ) p90 ON true
         ),
         quote_rows AS (
             SELECT
@@ -188,6 +255,10 @@ QVariantMap DatabaseManager::getPortfolioChartData(const QString &symbol)
             avg_40,
             avg_60,
             avg_90,
+            inc_20,
+            inc_40,
+            inc_60,
+            inc_90,
             quote_count_20,
             quote_count_40,
             quote_count_60,
@@ -212,6 +283,10 @@ QVariantMap DatabaseManager::getPortfolioChartData(const QString &symbol)
             NULL::numeric AS avg_40,
             NULL::numeric AS avg_60,
             NULL::numeric AS avg_90,
+            NULL::numeric AS inc_20,
+            NULL::numeric AS inc_40,
+            NULL::numeric AS inc_60,
+            NULL::numeric AS inc_90,
             NULL::bigint AS quote_count_20,
             NULL::bigint AS quote_count_40,
             NULL::bigint AS quote_count_60,
@@ -246,16 +321,10 @@ QVariantMap DatabaseManager::getPortfolioChartData(const QString &symbol)
             result["quoteCount40"] = query.value(QStringLiteral("quote_count_40"));
             result["quoteCount60"] = query.value(QStringLiteral("quote_count_60"));
             result["quoteCount90"] = query.value(QStringLiteral("quote_count_90"));
-
-            auto percentIncrease = [latestClose](const QVariant &average) -> QVariant {
-                if (!average.isValid() || average.isNull() || average.toDouble() == 0.0)
-                    return QVariant();
-                return QVariant((latestClose - average.toDouble()) / average.toDouble() * 100.0);
-            };
-            result["inc20"] = percentIncrease(query.value(QStringLiteral("avg_20")));
-            result["inc40"] = percentIncrease(query.value(QStringLiteral("avg_40")));
-            result["inc60"] = percentIncrease(query.value(QStringLiteral("avg_60")));
-            result["inc90"] = percentIncrease(query.value(QStringLiteral("avg_90")));
+            result["inc20"] = query.value(QStringLiteral("inc_20"));
+            result["inc40"] = query.value(QStringLiteral("inc_40"));
+            result["inc60"] = query.value(QStringLiteral("inc_60"));
+            result["inc90"] = query.value(QStringLiteral("inc_90"));
         } else if (rowType == QStringLiteral("quote")) {
             QVariantMap quote;
             quote["closeDate"] = query.value(QStringLiteral("close_date")).toDate().toString(QStringLiteral("yyyy-MM-dd"));
@@ -306,10 +375,10 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
             s."Exchange",
             s."CountryCode",
             s."City",
-            ROUND(((qp.latest_close - qp.avg_20) / NULLIF(qp.avg_20, 0) * 100)::numeric, 2) AS "Days20ValueInc",
-            ROUND(((qp.latest_close - qp.avg_40) / NULLIF(qp.avg_40, 0) * 100)::numeric, 2) AS "Days40ValueInc",
-            ROUND(((qp.latest_close - qp.avg_60) / NULLIF(qp.avg_60, 0) * 100)::numeric, 2) AS "Days60ValueInc",
-            ROUND(((qp.latest_close - qp.avg_90) / NULLIF(qp.avg_90, 0) * 100)::numeric, 2) AS "Days90ValueInc",
+            qp.days20_value_inc AS "Days20ValueInc",
+            qp.days40_value_inc AS "Days40ValueInc",
+            qp.days60_value_inc AS "Days60ValueInc",
+            qp.days90_value_inc AS "Days90ValueInc",
             TO_CHAR(qp.latest_date, 'YYYY-MM-DD') AS "QuoteLastDate"
         FROM "BoughtStocks" b
         LEFT JOIN "Stocks" s ON s."Symbol" = b."Symbol"
@@ -347,17 +416,76 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
             SELECT
                 l.latest_close,
                 l.latest_date,
-                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_20 AND l.latest_date) AS avg_20,
-                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_40 AND l.latest_date) AS avg_40,
-                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_60 AND l.latest_date) AS avg_60,
-                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_90 AND l.latest_date) AS avg_90
+                ROUND(((p20.new_avg - p20.old_avg) / NULLIF(p20.old_avg, 0) * 100)::numeric, 2) AS days20_value_inc,
+                ROUND(((p40.new_avg - p40.old_avg) / NULLIF(p40.old_avg, 0) * 100)::numeric, 2) AS days40_value_inc,
+                ROUND(((p60.new_avg - p60.old_avg) / NULLIF(p60.old_avg, 0) * 100)::numeric, 2) AS days60_value_inc,
+                ROUND(((p90.new_avg - p90.old_avg) / NULLIF(p90.old_avg, 0) * 100)::numeric, 2) AS days90_value_inc
             FROM latest_quote l
             CROSS JOIN boundaries bd
-            LEFT JOIN "Quotes" q
-              ON q."Symbol" = b."Symbol"
-             AND COALESCE(q."ClosePrice", 0) > 0
-             AND q."CloseDate" BETWEEN bd.start_90 AND l.latest_date
-            GROUP BY l.latest_close, l.latest_date
+            LEFT JOIN LATERAL (
+                SELECT
+                    AVG(close_price) FILTER (WHERE rn_asc <= LEAST(5::bigint, total_count)) AS old_avg,
+                    AVG(close_price) FILTER (WHERE rn_desc <= LEAST(5::bigint, total_count)) AS new_avg
+                FROM (
+                    SELECT
+                        q."ClosePrice" AS close_price,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" ASC) AS rn_asc,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" DESC) AS rn_desc,
+                        COUNT(*) OVER () AS total_count
+                    FROM "Quotes" q
+                    WHERE q."Symbol" = b."Symbol"
+                      AND COALESCE(q."ClosePrice", 0) > 0
+                      AND q."CloseDate" BETWEEN bd.start_20 AND l.latest_date
+                ) ranked
+            ) p20 ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    AVG(close_price) FILTER (WHERE rn_asc <= LEAST(5::bigint, total_count)) AS old_avg,
+                    AVG(close_price) FILTER (WHERE rn_desc <= LEAST(5::bigint, total_count)) AS new_avg
+                FROM (
+                    SELECT
+                        q."ClosePrice" AS close_price,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" ASC) AS rn_asc,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" DESC) AS rn_desc,
+                        COUNT(*) OVER () AS total_count
+                    FROM "Quotes" q
+                    WHERE q."Symbol" = b."Symbol"
+                      AND COALESCE(q."ClosePrice", 0) > 0
+                      AND q."CloseDate" BETWEEN bd.start_40 AND l.latest_date
+                ) ranked
+            ) p40 ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    AVG(close_price) FILTER (WHERE rn_asc <= LEAST(5::bigint, total_count)) AS old_avg,
+                    AVG(close_price) FILTER (WHERE rn_desc <= LEAST(5::bigint, total_count)) AS new_avg
+                FROM (
+                    SELECT
+                        q."ClosePrice" AS close_price,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" ASC) AS rn_asc,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" DESC) AS rn_desc,
+                        COUNT(*) OVER () AS total_count
+                    FROM "Quotes" q
+                    WHERE q."Symbol" = b."Symbol"
+                      AND COALESCE(q."ClosePrice", 0) > 0
+                      AND q."CloseDate" BETWEEN bd.start_60 AND l.latest_date
+                ) ranked
+            ) p60 ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    AVG(close_price) FILTER (WHERE rn_asc <= LEAST(5::bigint, total_count)) AS old_avg,
+                    AVG(close_price) FILTER (WHERE rn_desc <= LEAST(5::bigint, total_count)) AS new_avg
+                FROM (
+                    SELECT
+                        q."ClosePrice" AS close_price,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" ASC) AS rn_asc,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" DESC) AS rn_desc,
+                        COUNT(*) OVER () AS total_count
+                    FROM "Quotes" q
+                    WHERE q."Symbol" = b."Symbol"
+                      AND COALESCE(q."ClosePrice", 0) > 0
+                      AND q."CloseDate" BETWEEN bd.start_90 AND l.latest_date
+                ) ranked
+            ) p90 ON true
         ) qp ON true
         ORDER BY b."BuyDate" DESC, b."Symbol" ASC
     )SQL");
@@ -792,10 +920,10 @@ QVariantList DatabaseManager::getTestPortfolio()
             f."Week52Low" AS "FundamentalWeek52Low",
             f."Source" AS "FundamentalSource",
             TO_CHAR(f."UpdatedAt", 'YYYY-MM-DD HH24:MI:SS') AS "FundamentalUpdatedAt",
-            ROUND(((qp.latest_close - qp.avg_20) / NULLIF(qp.avg_20, 0) * 100)::numeric, 2) AS "Days20ValueInc",
-            ROUND(((qp.latest_close - qp.avg_40) / NULLIF(qp.avg_40, 0) * 100)::numeric, 2) AS "Days40ValueInc",
-            ROUND(((qp.latest_close - qp.avg_60) / NULLIF(qp.avg_60, 0) * 100)::numeric, 2) AS "Days60ValueInc",
-            ROUND(((qp.latest_close - qp.avg_90) / NULLIF(qp.avg_90, 0) * 100)::numeric, 2) AS "Days90ValueInc",
+            qp.days20_value_inc AS "Days20ValueInc",
+            qp.days40_value_inc AS "Days40ValueInc",
+            qp.days60_value_inc AS "Days60ValueInc",
+            qp.days90_value_inc AS "Days90ValueInc",
             TO_CHAR(qp.latest_date, 'YYYY-MM-DD') AS "QuoteLastDate"
         FROM "BoughtStocks" b
         LEFT JOIN "Stocks" s ON s."Symbol" = b."Symbol"
@@ -844,17 +972,76 @@ QVariantList DatabaseManager::getTestPortfolio()
             SELECT
                 l.latest_close,
                 l.latest_date,
-                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_20 AND l.latest_date) AS avg_20,
-                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_40 AND l.latest_date) AS avg_40,
-                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_60 AND l.latest_date) AS avg_60,
-                AVG(q."ClosePrice") FILTER (WHERE q."CloseDate" BETWEEN bd.start_90 AND l.latest_date) AS avg_90
+                ROUND(((p20.new_avg - p20.old_avg) / NULLIF(p20.old_avg, 0) * 100)::numeric, 2) AS days20_value_inc,
+                ROUND(((p40.new_avg - p40.old_avg) / NULLIF(p40.old_avg, 0) * 100)::numeric, 2) AS days40_value_inc,
+                ROUND(((p60.new_avg - p60.old_avg) / NULLIF(p60.old_avg, 0) * 100)::numeric, 2) AS days60_value_inc,
+                ROUND(((p90.new_avg - p90.old_avg) / NULLIF(p90.old_avg, 0) * 100)::numeric, 2) AS days90_value_inc
             FROM latest_quote l
             CROSS JOIN boundaries bd
-            LEFT JOIN "Quotes" q
-              ON q."Symbol" = b."Symbol"
-             AND COALESCE(q."ClosePrice", 0) > 0
-             AND q."CloseDate" BETWEEN bd.start_90 AND l.latest_date
-            GROUP BY l.latest_close, l.latest_date
+            LEFT JOIN LATERAL (
+                SELECT
+                    AVG(close_price) FILTER (WHERE rn_asc <= LEAST(5::bigint, total_count)) AS old_avg,
+                    AVG(close_price) FILTER (WHERE rn_desc <= LEAST(5::bigint, total_count)) AS new_avg
+                FROM (
+                    SELECT
+                        q."ClosePrice" AS close_price,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" ASC) AS rn_asc,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" DESC) AS rn_desc,
+                        COUNT(*) OVER () AS total_count
+                    FROM "Quotes" q
+                    WHERE q."Symbol" = b."Symbol"
+                      AND COALESCE(q."ClosePrice", 0) > 0
+                      AND q."CloseDate" BETWEEN bd.start_20 AND l.latest_date
+                ) ranked
+            ) p20 ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    AVG(close_price) FILTER (WHERE rn_asc <= LEAST(5::bigint, total_count)) AS old_avg,
+                    AVG(close_price) FILTER (WHERE rn_desc <= LEAST(5::bigint, total_count)) AS new_avg
+                FROM (
+                    SELECT
+                        q."ClosePrice" AS close_price,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" ASC) AS rn_asc,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" DESC) AS rn_desc,
+                        COUNT(*) OVER () AS total_count
+                    FROM "Quotes" q
+                    WHERE q."Symbol" = b."Symbol"
+                      AND COALESCE(q."ClosePrice", 0) > 0
+                      AND q."CloseDate" BETWEEN bd.start_40 AND l.latest_date
+                ) ranked
+            ) p40 ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    AVG(close_price) FILTER (WHERE rn_asc <= LEAST(5::bigint, total_count)) AS old_avg,
+                    AVG(close_price) FILTER (WHERE rn_desc <= LEAST(5::bigint, total_count)) AS new_avg
+                FROM (
+                    SELECT
+                        q."ClosePrice" AS close_price,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" ASC) AS rn_asc,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" DESC) AS rn_desc,
+                        COUNT(*) OVER () AS total_count
+                    FROM "Quotes" q
+                    WHERE q."Symbol" = b."Symbol"
+                      AND COALESCE(q."ClosePrice", 0) > 0
+                      AND q."CloseDate" BETWEEN bd.start_60 AND l.latest_date
+                ) ranked
+            ) p60 ON true
+            LEFT JOIN LATERAL (
+                SELECT
+                    AVG(close_price) FILTER (WHERE rn_asc <= LEAST(5::bigint, total_count)) AS old_avg,
+                    AVG(close_price) FILTER (WHERE rn_desc <= LEAST(5::bigint, total_count)) AS new_avg
+                FROM (
+                    SELECT
+                        q."ClosePrice" AS close_price,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" ASC) AS rn_asc,
+                        ROW_NUMBER() OVER (ORDER BY q."CloseDate" DESC) AS rn_desc,
+                        COUNT(*) OVER () AS total_count
+                    FROM "Quotes" q
+                    WHERE q."Symbol" = b."Symbol"
+                      AND COALESCE(q."ClosePrice", 0) > 0
+                      AND q."CloseDate" BETWEEN bd.start_90 AND l.latest_date
+                ) ranked
+            ) p90 ON true
         ) qp ON true
         ORDER BY b."BuyDate" DESC, b."Symbol" ASC
     )SQL");
@@ -1172,15 +1359,22 @@ bool DatabaseManager::exchangeBoughtStock(
         return false;
     }
 
-    QSqlQuery deleteQuery(db);
-    deleteQuery.prepare(R"SQL(
-        DELETE FROM "BoughtStocks"
+    QSqlQuery sellQuery(db);
+    sellQuery.prepare(R"SQL(
+        UPDATE "BoughtStocks"
+        SET
+            "SellDate" = :sellDate,
+            "CurrentValue" = CAST(:saleValue AS numeric) / NULLIF(COALESCE("Quantity", 1), 0),
+            "ValueIncreasePercent" = ROUND(((CAST(:saleValue AS numeric) / NULLIF(COALESCE("Quantity", 1), 0) - "EntryValue") / NULLIF("EntryValue", 0) * 100)::numeric, 2),
+            "Status" = 10
         WHERE "Symbol" = :sellSymbol
     )SQL");
-    deleteQuery.bindValue(QStringLiteral(":sellSymbol"), normalizedSellSymbol);
-    if (!deleteQuery.exec() || deleteQuery.numRowsAffected() <= 0) {
-        qCritical() << "Fehler beim Entfernen der Verkaufsposition:"
-                    << deleteQuery.lastError().text() << normalizedSellSymbol;
+    sellQuery.bindValue(QStringLiteral(":sellSymbol"), normalizedSellSymbol);
+    sellQuery.bindValue(QStringLiteral(":sellDate"), normalizedBuyDate);
+    sellQuery.bindValue(QStringLiteral(":saleValue"), investedAmount);
+    if (!sellQuery.exec() || sellQuery.numRowsAffected() <= 0) {
+        qCritical() << "Fehler beim Markieren der Verkaufsposition:"
+                    << sellQuery.lastError().text() << normalizedSellSymbol;
         db.rollback();
         return false;
     }

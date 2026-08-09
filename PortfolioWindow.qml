@@ -162,6 +162,7 @@ Window {
                                 Layout.preferredHeight: 28
                                 Layout.minimumHeight: 28
                                 Layout.maximumHeight: 28
+                                Label { text: "Nr"; Layout.preferredWidth: 36; font.bold: true; leftPadding: 10 }
                                 Label { text: "Name"; Layout.fillWidth: true; font.bold: true; leftPadding: 10 }
                                 Rectangle {
                                     Layout.preferredWidth: 120
@@ -184,6 +185,7 @@ Window {
                                 }
                                 Rectangle {
                                     Layout.preferredWidth: 90
+                                    Layout.leftMargin: 12
                                     Layout.preferredHeight: 28
                                     Layout.minimumHeight: 28
                                     Layout.maximumHeight: 28
@@ -203,7 +205,25 @@ Window {
                                 }
                                 Label { text: "Einstiegswert"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
                                 Label { text: "Aktualisiert"; Layout.preferredWidth: 95; font.bold: true; horizontalAlignment: Text.AlignRight }
-                                Label { text: "20 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Rectangle {
+                                    Layout.preferredWidth: 90
+                                    Layout.preferredHeight: 28
+                                    Layout.minimumHeight: 28
+                                    Layout.maximumHeight: 28
+                                    color: app.portfolioSortKey === "days20ValueInc" ? "#e0f2fe" : "transparent"
+                                    Label {
+                                        anchors.fill: parent
+                                        text: "20 Tage " + app.portfolioSortIcon("days20ValueInc")
+                                        font.bold: true
+                                        horizontalAlignment: Text.AlignRight
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: app.sortPortfolioBy("days20ValueInc")
+                                    }
+                                }
                                 Label { text: "40 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
                                 Label { text: "60 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
                                 Label { text: "90 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight; rightPadding: 10 }
@@ -273,6 +293,12 @@ Window {
                                     RowLayout {
                                         anchors.fill: parent
                                         spacing: 1
+                                        Label {
+                                            text: Number(portfolioPositionDelegate.index + 1).toFixed(0)
+                                            Layout.preferredWidth: 36
+                                            leftPadding: 10
+                                            horizontalAlignment: Text.AlignLeft
+                                        }
 
                                         Rectangle {
                                             visible: portfolioPositionDelegate.positionUsed
@@ -294,10 +320,16 @@ Window {
                                             Layout.preferredWidth: 120
                                             horizontalAlignment: Text.AlignRight
                                         }
-                                        Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.valueIncreasePercent); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                        Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.valueIncreasePercent); Layout.preferredWidth: 90; Layout.leftMargin: 12; horizontalAlignment: Text.AlignRight }
                                         Label { text: Number(portfolioPositionDelegate.rowData.entryValue || 0).toLocaleString(Qt.locale(), "f", 2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
                                         Label { text: portfolioPositionDelegate.rowData.quoteLastDate || "-"; Layout.preferredWidth: 95; horizontalAlignment: Text.AlignRight }
-                                        Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days20ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                        Label {
+                                            text: app.formatPercentValue(portfolioPositionDelegate.rowData.days20ValueInc)
+                                            color: app.portfolioTwentyDayTrendColor(portfolioPositionDelegate.rowData.days20ValueInc)
+                                            font.bold: true
+                                            Layout.preferredWidth: 90
+                                            horizontalAlignment: Text.AlignRight
+                                        }
                                         Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days40ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
                                         Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days60ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
                                         Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days90ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight; rightPadding: 10 }

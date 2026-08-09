@@ -68,6 +68,7 @@ public:
     Q_INVOKABLE void generateQuotesForAllStocks(); // Neue Methode für alle Stocks
     Q_INVOKABLE void generateQuoteForStock(const QString symbol, const QString exchange);
     Q_INVOKABLE QVariantList getQuoteDetails(const QString &symbol, int fromDay, int toDay);
+    Q_INVOKABLE QVariantList getQuoteDetailsForTradingDays(const QString &symbol, int tradingDays);
     Q_INVOKABLE QVariantList getStockAnalysisResults(double minIncreasePercent, int quoteCount);
     Q_INVOKABLE QVariantList getStockAnalysisConfigs();
     Q_INVOKABLE bool saveStockAnalysisConfig(
@@ -100,6 +101,7 @@ public:
     Q_INVOKABLE void stopIbkrBatch();
     Q_INVOKABLE void startIbkrGetStocks();
     Q_INVOKABLE void startIbkrGetAllStocks();
+    Q_INVOKABLE void startIbkrGetStocksForSymbols(const QVariantList &symbols);
     Q_INVOKABLE void stopIbkrGetStocks();
     Q_INVOKABLE void startMarketstackBatch();
     Q_INVOKABLE void stopMarketstackBatch();

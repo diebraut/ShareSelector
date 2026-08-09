@@ -82,6 +82,111 @@ QVariantList DatabaseManager::getQuoteDetails(const QString &symbol, int fromDay
     return results;
 }
 
+QVariantList DatabaseManager::getQuoteDetailsForTradingDays(const QString &symbol, int tradingDays)
+{
+    QVariantList results;
+
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank ist nicht verbunden!";
+        return results;
+    }
+
+    const QString normalizedSymbol = symbol.trimmed();
+    const int boundedTradingDays = qBound(20, tradingDays, 90);
+    if (normalizedSymbol.isEmpty()) {
+        qWarning() << "UngÃ¼ltiges Symbol fÃ¼r Kursdetails nach Handelstagen:" << symbol;
+        return results;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        WITH symbol_median AS (
+            SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY "ClosePrice"::double precision) AS median_close
+            FROM "Quotes"
+            WHERE "Symbol" = :symbol
+              AND COALESCE("Volume", 0) > 0
+              AND COALESCE("ClosePrice", 0) > 0
+        ),
+        valid_quotes AS (
+            SELECT q.*
+            FROM "Quotes" q, symbol_median
+            WHERE q."Symbol" = :symbol
+              AND COALESCE(q."Volume", 0) > 0
+              AND COALESCE(q."ClosePrice", 0) > 0
+              AND (
+                  symbol_median.median_close IS NULL
+                  OR q."ClosePrice"::double precision BETWEEN symbol_median.median_close / 20.0
+                                                        AND symbol_median.median_close * 20.0
+              )
+        ),
+        latest_quote AS (
+            SELECT MAX("CloseDate") AS latest_date
+            FROM valid_quotes
+        ),
+        trading_days AS (
+            SELECT
+                day::date AS trading_date,
+                ROW_NUMBER() OVER (ORDER BY day DESC) - 1 AS trading_days_back
+            FROM latest_quote l
+            CROSS JOIN generate_series(
+                l.latest_date - INTERVAL '220 days',
+                l.latest_date,
+                INTERVAL '1 day'
+            ) AS day
+            WHERE EXTRACT(ISODOW FROM day) BETWEEN 1 AND 5
+        ),
+        boundary AS (
+            SELECT MAX(trading_date) AS start_date
+            FROM trading_days
+            WHERE trading_days_back = :tradingDays
+        ),
+        ordered_quotes AS (
+            SELECT
+                vq."Symbol",
+                vq."CloseDate",
+                vq."OpenPrice",
+                vq."ClosePrice",
+                vq."HighestPrice",
+                vq."LowestPrice",
+                vq."Volume",
+                ROW_NUMBER() OVER (PARTITION BY vq."Symbol" ORDER BY vq."CloseDate" DESC) AS dayIndex,
+                LAG(vq."ClosePrice") OVER (PARTITION BY vq."Symbol" ORDER BY vq."CloseDate" ASC) AS previousClosePrice
+            FROM valid_quotes vq
+            CROSS JOIN latest_quote l
+            CROSS JOIN boundary b
+            WHERE vq."CloseDate" BETWEEN b.start_date AND l.latest_date
+        )
+        SELECT
+            dayIndex,
+            TO_CHAR("CloseDate", 'DD.MM.YYYY') AS closeDate,
+            "OpenPrice" AS openPrice,
+            "ClosePrice" AS closePrice,
+            "HighestPrice" AS highestPrice,
+            "LowestPrice" AS lowestPrice,
+            "Volume" AS volume,
+            ROUND((("ClosePrice" - previousClosePrice) / NULLIF(previousClosePrice, 0) * 100)::numeric, 2) AS changePercent
+        FROM ordered_quotes
+        ORDER BY dayIndex ASC
+    )SQL");
+    query.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
+    query.bindValue(QStringLiteral(":tradingDays"), boundedTradingDays);
+
+    if (!query.exec()) {
+        qCritical() << "SQL-Fehler bei Kursdetails nach Handelstagen:" << query.lastError().text();
+        return results;
+    }
+
+    while (query.next()) {
+        QVariantMap row;
+        for (int i = 0; i < query.record().count(); ++i) {
+            row.insert(query.record().fieldName(i), query.value(i));
+        }
+        results << row;
+    }
+
+    return results;
+}
+
 QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent, int quoteCount)
 {
     QVariantList results;

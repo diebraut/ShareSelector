@@ -119,6 +119,8 @@ ApplicationWindow {
     property var portfolioRows: []
     property double portfolioTotalCurrentAmount: 0
     property double portfolioTotalEntryAmount: 0
+    property double portfolioTotalGainAmount: 0
+    property double portfolioRealizedGainAmount: 0
     property int portfolioActiveCountValue: 0
     property bool portfolioLoaded: false
     property var portfolioDetails: ({})
@@ -137,6 +139,7 @@ ApplicationWindow {
     property real stockAnalysisActualMaxDrawdownPercent: 0
     property real stockAnalysisCorridorRequiredPercent: 0
     property int stockAnalysisQuoteCount: 90
+    property int stockAnalysisDirectSearchTradingDays: 90
     property string stockAnalysisQuoteDateRangeText: ""
     property bool stockAnalysisScanActive: false
     property var stockAnalysisScanSymbols: []
@@ -374,6 +377,35 @@ ApplicationWindow {
         }
     }
 
+    function normalizedDirectSearchTradingDays(value) {
+        let allowed = [20, 40, 60, 90]
+        let numberValue = Number(value)
+        let best = allowed[0]
+        let bestDistance = Math.abs(numberValue - best)
+        for (let i = 1; i < allowed.length; i++) {
+            let distance = Math.abs(numberValue - allowed[i])
+            if (distance < bestDistance) {
+                best = allowed[i]
+                bestDistance = distance
+            }
+        }
+        return best
+    }
+
+    function setDirectSearchTradingDays(value, forceReload) {
+        let normalizedValue = normalizedDirectSearchTradingDays(value)
+        if (stockAnalysisDirectSearchTradingDays !== normalizedValue)
+            stockAnalysisDirectSearchTradingDays = normalizedValue
+        else if (forceReload && stockAnalysisConfigPanel.directSearchActive)
+            reloadSelectedStockAnalysisQuotes()
+    }
+
+    function quoteDetailsForStockAnalysisSymbol(symbol) {
+        if (stockAnalysisConfigPanel.directSearchActive)
+            return dbManager.getQuoteDetailsForTradingDays(symbol, stockAnalysisDirectSearchTradingDays)
+        return dbManager.getQuoteDetails(symbol, 1, stockAnalysisQuoteCount)
+    }
+
     function updateStockAnalysisQuoteDateRangeText() {
         let count = stockAnalysisQuoteModel.count
         if (count === 0) {
@@ -389,6 +421,10 @@ ApplicationWindow {
     }
 
     onStockAnalysisQuoteCountChanged: reloadSelectedStockAnalysisQuotes()
+    onStockAnalysisDirectSearchTradingDaysChanged: {
+        if (stockAnalysisConfigPanel.directSearchActive)
+            refreshStockAnalysisResultQuotes("")
+    }
     property var portfolioFields: [
         { heading: true, label: "Position" },
         { key: "symbol", label: "Symbol" },
@@ -482,6 +518,7 @@ ApplicationWindow {
     Connections {
         target: dbManager
         function onIbkrStockDataUpdated(symbol) {
+            refreshStockAnalysisResultQuotes(symbol)
             if (dbManager.ibkrGetStocksActive)
                 return
             loadTestPortfolio(symbol)
@@ -532,6 +569,9 @@ ApplicationWindow {
             } else if (portfolioSortKey === "gainPercent") {
                 valueA = Number(a.valueIncreasePercent || 0)
                 valueB = Number(b.valueIncreasePercent || 0)
+            } else if (portfolioSortKey === "days20ValueInc") {
+                valueA = Number(a.days20ValueInc || 0)
+                valueB = Number(b.days20ValueInc || 0)
             }
 
             if (valueA === valueB)
@@ -624,16 +664,30 @@ ApplicationWindow {
     function updatePortfolioTotals() {
         let currentTotal = 0
         let entryTotal = 0
+        let realizedGain = 0
+        let realizedEntryTotal = 0
         let activeCount = 0
         portfolioRows.forEach(row => {
             const quantity = portfolioPositionQuantity(row)
-            currentTotal += quantity * Number(row.currentValue || 0)
-            entryTotal += quantity * Number(row.entryValue || 0)
-            if (Number(row.status || 0) !== 10)
+            const currentValue = quantity * Number(row.currentValue || 0)
+            const entryValue = quantity * Number(row.entryValue || 0)
+            if (Number(row.status || 0) === 10) {
+                realizedGain += currentValue - entryValue
+                realizedEntryTotal += entryValue
+            } else {
+                currentTotal += currentValue
+                entryTotal += entryValue
                 activeCount++
+            }
         })
+        const totalGain = currentTotal - entryTotal + realizedGain
+        let performanceBase = entryTotal - realizedGain
+        if (performanceBase <= 0 && realizedEntryTotal > 0)
+            performanceBase = realizedEntryTotal
         portfolioTotalCurrentAmount = currentTotal
-        portfolioTotalEntryAmount = entryTotal
+        portfolioTotalEntryAmount = performanceBase
+        portfolioTotalGainAmount = totalGain
+        portfolioRealizedGainAmount = realizedGain
         portfolioActiveCountValue = activeCount
     }
     function selectedPortfolioValue(key) {
@@ -655,7 +709,7 @@ ApplicationWindow {
     }
 
     function portfolioTotalGainValue() {
-        return portfolioTotalCurrentAmount - portfolioTotalEntryAmount
+        return portfolioTotalGainAmount
     }
 
     function portfolioStatusCount(sold) {
@@ -663,7 +717,7 @@ ApplicationWindow {
     }
 
     function portfolioPerformancePercent() {
-        return portfolioTotalEntryAmount > 0 ? (portfolioTotalCurrentAmount - portfolioTotalEntryAmount) / portfolioTotalEntryAmount * 100 : 0
+        return portfolioTotalEntryAmount > 0 ? portfolioTotalGainAmount / portfolioTotalEntryAmount * 100 : 0
     }
 
     function portfolioPositionQuantity(row) {
@@ -683,6 +737,38 @@ ApplicationWindow {
     function formatPercentValue(value) {
         let numberValue = Number(value)
         return isNaN(numberValue) ? "-" : numberValue.toLocaleString(Qt.locale(), "f", 2) + " %"
+    }
+
+    function portfolioTwentyDayTrendColor(value) {
+        const target = 3.27
+        const numberValue = Number(value)
+        if (isNaN(numberValue))
+            return "#475569"
+
+        const difference = numberValue - target
+        if (difference === 0)
+            return Qt.rgba(21 / 255, 128 / 255, 61 / 255, 1)
+
+        const steps = Math.min(16, Math.max(1, Math.ceil(Math.abs(difference) / 0.1)))
+        const intensity = steps / 16.0
+        function blend(start, end) {
+            return start + (end - start) * intensity
+        }
+
+        if (difference > 0)
+            return Qt.rgba(
+                blend(21, 6) / 255,
+                blend(128, 95) / 255,
+                blend(61, 70) / 255,
+                1
+            )
+
+        return Qt.rgba(
+            blend(185, 127) / 255,
+            blend(28, 29) / 255,
+            blend(28, 29) / 255,
+            1
+        )
     }
 
     function formatPortfolioValue(key, format) {
@@ -1278,7 +1364,7 @@ ApplicationWindow {
                 }
             }
 
-            let quotes = dbManager.getQuoteDetails(row.symbol, 1, stockAnalysisQuoteCount)
+            let quotes = quoteDetailsForStockAnalysisSymbol(row.symbol)
             if (quotes.length > 0) {
                 let newestQuote = quotes[0]
                 let oldestQuote = quotes[quotes.length - 1]
@@ -1506,6 +1592,60 @@ ApplicationWindow {
         return rows
     }
 
+    function stockAnalysisSelectedSymbols() {
+        let symbols = []
+        stockAnalysisSelectedRowsData().forEach(row => {
+            let symbol = String(row.symbol || "").trim()
+            if (symbol.length > 0 && symbols.indexOf(symbol) < 0)
+                symbols.push(symbol)
+        })
+        return symbols
+    }
+
+    function getQuotesForSelectedStockAnalysisRows() {
+        let symbols = stockAnalysisSelectedSymbols()
+        if (symbols.length === 0) {
+            stockAnalysisMessage = "Keine Aktie ausgewaehlt"
+            return
+        }
+        dbManager.startIbkrGetStocksForSymbols(symbols)
+    }
+
+    function refreshStockAnalysisResultQuotes(symbol) {
+        let normalizedSymbol = String(symbol || "").trim()
+
+        for (let i = 0; i < stockAnalysisResultModel.count; i++) {
+            let row = stockAnalysisResultModel.get(i)
+            if (normalizedSymbol.length > 0 && row.symbol !== normalizedSymbol)
+                continue
+
+            let quotes = quoteDetailsForStockAnalysisSymbol(row.symbol)
+            if (quotes.length === 0)
+                continue
+
+            let newestQuote = quotes[0]
+            let oldestQuote = quotes[quotes.length - 1]
+            let turnover = 0
+            quotes.forEach(quote => {
+                turnover += Number(quote.volume || 0) * Number(quote.closeprice || 0)
+            })
+
+            stockAnalysisResultModel.setProperty(i, "firstquotedate", oldestQuote.closedate || "")
+            stockAnalysisResultModel.setProperty(i, "firstcloseprice", Number(oldestQuote.closeprice || 0))
+            stockAnalysisResultModel.setProperty(i, "lastquotedate", newestQuote.closedate || "")
+            stockAnalysisResultModel.setProperty(i, "lastcloseprice", Number(newestQuote.closeprice || 0))
+            stockAnalysisResultModel.setProperty(i, "periodturnover", turnover)
+            stockAnalysisResultModel.setProperty(i, "totalquotecount", quotes.length)
+            stockAnalysisResultModel.setProperty(i, "quotecount", quotes.length)
+            stockAnalysisResultModel.setProperty(i, "increasepercent", trendIncreasePercentForQuotes(quotes))
+            stockAnalysisResultModel.setProperty(i, "corridorhitpercent", corridorHitPercentForQuotes(quotes))
+            stockAnalysisResultModel.setProperty(i, "maxdrawdownpercent", maxDrawdownForQuotes(quotes).percent)
+
+            if (i === selectedStockAnalysisIndex)
+                reloadSelectedStockAnalysisQuotes()
+        }
+    }
+
     function stockAnalysisDateToIso(dateText) {
         let text = String(dateText || "").trim()
         if (/^\d{4}-\d{2}-\d{2}$/.test(text))
@@ -1726,6 +1866,8 @@ ApplicationWindow {
         }
 
         if (targetIndex < 0) {
+            let quotes = dbManager.getQuoteDetails(row.symbol, 1, stockAnalysisQuoteCount)
+            let newestQuote = quotes.length > 0 ? quotes[0] : ({})
             stockAnalysisResultModel.append({
                 nr: stockAnalysisResultModel.count + 1,
                 symbol: row.symbol,
@@ -1737,7 +1879,8 @@ ApplicationWindow {
                 ibkrsource: "Depot",
                 corridorhitpercent: 0,
                 increasepercent: Number(row.valueIncreasePercent || 0),
-                maxdrawdownpercent: 0
+                maxdrawdownpercent: 0,
+                lastquotedate: newestQuote.closedate || ""
             })
             targetIndex = stockAnalysisResultModel.count - 1
         }
@@ -1756,7 +1899,7 @@ ApplicationWindow {
         selectedStockAnalysisIndex = rowIndex
         stockAnalysisStockSelected = true
         let stock = stockAnalysisResultModel.get(rowIndex)
-        let quotes = dbManager.getQuoteDetails(stock.symbol, 1, stockAnalysisQuoteCount)
+        let quotes = quoteDetailsForStockAnalysisSymbol(stock.symbol)
         stockAnalysisQuoteModel.clear()
         quotes.forEach(row => stockAnalysisQuoteModel.append(row))
         updateStockAnalysisQuoteDateRangeText()
@@ -1836,6 +1979,7 @@ ApplicationWindow {
                             Label { text: "IBKR/MS"; Layout.preferredWidth: 75; font.bold: true; horizontalAlignment: Text.AlignHCenter }
                             Label { text: "Korridor"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
                             Label { text: "Steigerung"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignRight }
+                            Label { text: "Quote-Datum"; Layout.preferredWidth: 110; Layout.leftMargin: 12; font.bold: true; horizontalAlignment: Text.AlignRight }
                             Item { Layout.fillWidth: true }
                         }
 
@@ -1871,6 +2015,15 @@ ApplicationWindow {
                                     enabled: selectedStockAnalysisIndex >= 0
                                         && !stockAnalysisPositionInBuy(stockAnalysisResultModel.get(selectedStockAnalysisIndex))
                                     onTriggered: addStockAnalysisPositionToBuy(stockAnalysisResultModel.get(selectedStockAnalysisIndex))
+                                }
+                                MenuItem {
+                                    text: "Get Quotes"
+                                    enabled: selectedStockAnalysisRows.length > 0
+                                        && dbManager.ibkrConnected
+                                        && !dbManager.ibkrDataLoading
+                                        && !dbManager.ibkrGetStocksActive
+                                        && !dbManager.ibkrNameCheckBatchActive
+                                    onTriggered: getQuotesForSelectedStockAnalysisRows()
                                 }
                             }
 
@@ -1992,6 +2145,7 @@ ApplicationWindow {
                                     Label { text: model.quotesource || "-"; Layout.preferredWidth: 75; horizontalAlignment: Text.AlignHCenter }
                                     Label { text: Number(model.corridorhitpercent || 0).toFixed(1) + "%"; Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
                                     Label { text: Number(model.increasepercent || 0).toFixed(2) + "%"; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight }
+                                    Label { text: model.lastquotedate || "-"; Layout.preferredWidth: 110; Layout.leftMargin: 12; horizontalAlignment: Text.AlignRight }
                                     Item { Layout.fillWidth: true }
                                 }
 

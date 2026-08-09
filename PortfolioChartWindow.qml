@@ -192,15 +192,61 @@ import QtQuick.Layouts 1.15
                                 { label: "40", start: portfolioChartData.start40, avg: Number(portfolioChartData.avg40 || 0), inc: Number(portfolioChartData.inc40 || 0), color: "#059669" },
                                 { label: "20", start: portfolioChartData.start20, avg: Number(portfolioChartData.avg20 || 0), inc: Number(portfolioChartData.inc20 || 0), color: "#2563eb" }
                             ]
+                            function quoteIndexOnOrAfter(startDate) {
+                                let start = dateMs(startDate)
+                                if (!isFinite(start))
+                                    return 0
+                                for (let i = 0; i < count; i++) {
+                                    if (dateMs(portfolioChartQuoteModel.get(i).closeDate) >= start)
+                                        return i
+                                }
+                                return Math.max(0, count - 1)
+                            }
+
+                            function trendForPeriod(startIndex) {
+                                let periodCount = count - startIndex
+                                if (periodCount <= 0)
+                                    return null
+
+                                let averageWindow = Math.min(5, periodCount)
+                                let oldestAverage = 0
+                                let newestAverage = 0
+                                for (let avgIndex = 0; avgIndex < averageWindow; avgIndex++) {
+                                    oldestAverage += Number(portfolioChartQuoteModel.get(startIndex + avgIndex).closePrice)
+                                    newestAverage += Number(portfolioChartQuoteModel.get(count - averageWindow + avgIndex).closePrice)
+                                }
+                                oldestAverage /= averageWindow
+                                newestAverage /= averageWindow
+
+                                let oldestCenterIndex = startIndex + (averageWindow - 1) / 2
+                                let newestCenterIndex = count - averageWindow + (averageWindow - 1) / 2
+                                let trendDenominator = Math.max(1, newestCenterIndex - oldestCenterIndex)
+                                let trendSlope = (newestAverage - oldestAverage) / trendDenominator
+
+                                function trendPriceAtIndex(index) {
+                                    return oldestAverage + trendSlope * (index - oldestCenterIndex)
+                                }
+
+                                return {
+                                    firstIndex: startIndex,
+                                    lastIndex: count - 1,
+                                    firstPrice: trendPriceAtIndex(startIndex),
+                                    lastPrice: trendPriceAtIndex(count - 1),
+                                    percent: oldestAverage > 0 ? (newestAverage - oldestAverage) / oldestAverage * 100 : 0
+                                }
+                            }
+
                             for (let i = 0; i < count; i++) {
                                 let price = Number(portfolioChartQuoteModel.get(i).closePrice)
                                 minPrice = Math.min(minPrice, price)
                                 maxPrice = Math.max(maxPrice, price)
                             }
                             for (let p = 0; p < periods.length; p++) {
-                                if (periods[p].avg > 0) {
-                                    minPrice = Math.min(minPrice, periods[p].avg)
-                                    maxPrice = Math.max(maxPrice, periods[p].avg)
+                                let trend = trendForPeriod(quoteIndexOnOrAfter(periods[p].start))
+                                periods[p].trend = trend
+                                if (trend) {
+                                    minPrice = Math.min(minPrice, trend.firstPrice, trend.lastPrice)
+                                    maxPrice = Math.max(maxPrice, trend.firstPrice, trend.lastPrice)
                                 }
                             }
 
@@ -277,17 +323,6 @@ import QtQuick.Layouts 1.15
                                 return (numberValue >= 0 ? "+" : "") + numberValue.toFixed(2) + "%"
                             }
 
-                            function quoteIndexOnOrAfter(startDate) {
-                                let start = dateMs(startDate)
-                                if (!isFinite(start))
-                                    return 0
-                                for (let i = 0; i < count; i++) {
-                                    if (dateMs(portfolioChartQuoteModel.get(i).closeDate) >= start)
-                                        return i
-                                }
-                                return Math.max(0, count - 1)
-                            }
-
                             for (let b = 0; b < periods.length; b++) {
                                 let period = periods[b]
                                 let startIndex = quoteIndexOnOrAfter(period.start)
@@ -318,28 +353,30 @@ import QtQuick.Layouts 1.15
                                 ctx.stroke()
                                 ctx.globalAlpha = 1
 
-                                if (period.avg > 0) {
-                                    let latestClose = Number(portfolioChartData.latestClose || portfolioChartQuoteModel.get(count - 1).closePrice || 0)
-                                    let latestX = xForDate(portfolioChartData.latestDate || portfolioChartQuoteModel.get(count - 1).closeDate)
-                                    let avgY = yForPrice(period.avg)
-                                    let latestY = yForPrice(latestClose)
+                                if (period.trend) {
+                                    let firstTrendRow = portfolioChartQuoteModel.get(period.trend.firstIndex)
+                                    let lastTrendRow = portfolioChartQuoteModel.get(period.trend.lastIndex)
+                                    let firstTrendX = xForDate(firstTrendRow.closeDate)
+                                    let lastTrendX = xForDate(lastTrendRow.closeDate)
+                                    let firstTrendY = yForPrice(period.trend.firstPrice)
+                                    let lastTrendY = yForPrice(period.trend.lastPrice)
 
                                     ctx.strokeStyle = period.color
                                     ctx.lineWidth = 3.5
                                     ctx.beginPath()
-                                    ctx.moveTo(startXLine, avgY)
-                                    ctx.lineTo(latestX, latestY)
+                                    ctx.moveTo(firstTrendX, firstTrendY)
+                                    ctx.lineTo(lastTrendX, lastTrendY)
                                     ctx.stroke()
 
                                     ctx.fillStyle = period.color
                                     ctx.beginPath()
-                                    ctx.arc(startXLine, avgY, 4, 0, Math.PI * 2)
-                                    ctx.arc(latestX, latestY, 4, 0, Math.PI * 2)
+                                    ctx.arc(firstTrendX, firstTrendY, 4, 0, Math.PI * 2)
+                                    ctx.arc(lastTrendX, lastTrendY, 4, 0, Math.PI * 2)
                                     ctx.fill()
 
-                                    let labelText = period.label + "T " + signedPercent(period.inc)
-                                    let labelX = startXLine + (latestX - startXLine) * 0.52 + 6
-                                    let labelY = avgY + (latestY - avgY) * 0.52 - 8 - b * 9
+                                    let labelText = period.label + "T " + signedPercent(period.trend.percent)
+                                    let labelX = firstTrendX + (lastTrendX - firstTrendX) * 0.52 + 6
+                                    let labelY = firstTrendY + (lastTrendY - firstTrendY) * 0.52 - 8 - b * 9
                                     ctx.font = "bold 12px sans-serif"
                                     let labelWidth = ctx.measureText(labelText).width + 10
                                     labelX = Math.min(width - labelWidth - 4, Math.max(leftPad + 4, labelX))
@@ -348,9 +385,6 @@ import QtQuick.Layouts 1.15
                                     ctx.fillRect(labelX - 4, labelY - 13, labelWidth, 17)
                                     ctx.fillStyle = period.color
                                     ctx.fillText(labelText, labelX, labelY)
-
-                                    ctx.font = "10px sans-serif"
-                                    ctx.fillText("Mittel " + period.avg.toFixed(2), Math.min(width - 84, startXLine + 5), Math.max(topPad + 12, avgY - 6))
                                 }
                             }
 
