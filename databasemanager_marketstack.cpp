@@ -512,6 +512,13 @@ void DatabaseManager::startMarketstackQuotesBatch()
         FROM "Stocks" s
         WHERE COALESCE(s."from_IBKR", TRUE) = FALSE
           AND COALESCE(s."marketplace_sym", '') <> ''
+          AND EXISTS (
+              SELECT 1
+              FROM "BoughtStocks" b
+              WHERE b."Symbol" = s."Symbol"
+                AND b."SellDate" IS NULL
+                AND COALESCE(b."Status", 0) <> 10
+          )
         ORDER BY s."Symbol"
     )SQL");
     if (!query.exec()) {

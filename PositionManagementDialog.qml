@@ -145,11 +145,12 @@ Window {
         if (containsSellPosition(row))
             return false
         const currentValue = Number(row.currentValue || row.lastcloseprice || 0)
-        const quantity = Number(row.quantity || 0)
+        const quantity = app ? app.portfolioPositionQuantity(row) : Number(row.quantity || 1)
         sellPositionModel.append({
             symbol: row.symbol || "",
             isin: row.isin || "",
             name: row.name || row.symbol || "",
+            quantity: quantity,
             currentValue: currentValue,
             totalValue: currentValue * quantity
         })

@@ -1289,7 +1289,14 @@ bool DatabaseManager::isBoughtStock(const QString &symbol)
     }
 
     QSqlQuery query(db);
-    query.prepare("SELECT 1 FROM \"BoughtStocks\" WHERE \"Symbol\" = :symbol LIMIT 1");
+    query.prepare(R"SQL(
+        SELECT 1
+        FROM "BoughtStocks"
+        WHERE "Symbol" = :symbol
+          AND "SellDate" IS NULL
+          AND COALESCE("Status", 0) <> 10
+        LIMIT 1
+    )SQL");
     query.bindValue(":symbol", symbol.trimmed());
 
     if (!query.exec()) {

@@ -243,6 +243,7 @@ void DatabaseManager::startIbkrGetStocksBatch(bool depotOnly)
               AND s."IBKRConId" IS NOT NULL
               AND COALESCE(s."from_IBKR", TRUE) = TRUE
               AND b."SellDate" IS NULL
+              AND COALESCE(b."Status", 0) <> 10
             ORDER BY s."Symbol"
         )SQL");
     } else {

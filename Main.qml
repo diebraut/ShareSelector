@@ -82,6 +82,7 @@ ApplicationWindow {
         loadLastStockAnalysisConfig()
         openPortfolioWindow()
         openPositionManagementDialog()
+        checkIbkrConnectionOnStartup()
     })
 
     Timer {
@@ -96,6 +97,7 @@ ApplicationWindow {
         id: portfolioModel
         dynamicRoles: true
     }
+    property alias portfolioListModel: portfolioModel
 
 
     ListModel {
@@ -116,7 +118,15 @@ ApplicationWindow {
     property int selectedPortfolioIndex: -1
     property string portfolioSortKey: "gainPercent"
     property bool portfolioSortAscending: true
+    property bool portfolioSortingActive: false
+    property bool portfolioUpdatingActive: false
+    property bool portfolioBusyVisible: portfolioSortingActive || portfolioUpdatingActive
+    property string portfolioBusyMessage: portfolioUpdatingActive ? "Aktualisiere ..." : "Sortiere ..."
+    property string portfolioStatusFilter: "active"
     property var portfolioRows: []
+    property string portfolioPendingPreferredSymbol: ""
+    property bool portfolioPendingPreserveView: false
+    property string portfolioPendingFilterSymbol: ""
     property double portfolioTotalCurrentAmount: 0
     property double portfolioTotalEntryAmount: 0
     property double portfolioTotalGainAmount: 0
@@ -200,6 +210,14 @@ ApplicationWindow {
             return false
         }
         ibkrQuoteScheduleStatus = "Prüfe, ob IB Gateway/TWS bereits läuft und per API erreichbar ist ..."
+        dbManager.connectToIbkr()
+        return true
+    }
+
+    function checkIbkrConnectionOnStartup() {
+        if (dbManager.ibkrConnected || !canProbeIbkrGateway())
+            return false
+
         dbManager.connectToIbkr()
         return true
     }
@@ -515,6 +533,52 @@ ApplicationWindow {
         onTriggered: processStockAnalysisScanBatch()
     }
 
+    Timer {
+        id: portfolioSortTimer
+        interval: 80
+        running: false
+        repeat: false
+        onTriggered: {
+            rebuildPortfolioModel("", false, true)
+            portfolioSortDoneTimer.restart()
+        }
+    }
+
+    Timer {
+        id: portfolioSortDoneTimer
+        interval: 250
+        running: false
+        repeat: false
+        onTriggered: portfolioSortingActive = false
+    }
+
+    Timer {
+        id: portfolioLoadTimer
+        interval: 1
+        running: false
+        repeat: false
+        onTriggered: executePortfolioLoad(portfolioPendingPreferredSymbol, portfolioPendingPreserveView)
+    }
+
+    Timer {
+        id: portfolioUpdateDoneTimer
+        interval: 600
+        running: false
+        repeat: false
+        onTriggered: portfolioUpdatingActive = false
+    }
+
+    Timer {
+        id: portfolioFilterTimer
+        interval: 1
+        running: false
+        repeat: false
+        onTriggered: {
+            rebuildPortfolioModel(portfolioPendingFilterSymbol, true, true)
+            portfolioUpdateDoneTimer.restart()
+        }
+    }
+
     Connections {
         target: dbManager
         function onIbkrStockDataUpdated(symbol) {
@@ -534,6 +598,14 @@ ApplicationWindow {
     }
 
     function loadTestPortfolio(preferredSymbol, preserveView) {
+        portfolioPendingPreferredSymbol = preferredSymbol || ""
+        portfolioPendingPreserveView = Boolean(preserveView)
+        portfolioUpdatingActive = true
+        portfolioUpdateDoneTimer.stop()
+        portfolioLoadTimer.restart()
+    }
+
+    function executePortfolioLoad(preferredSymbol, preserveView) {
         let selectedSymbol = ""
         if (preserveView && selectedPortfolioIndex >= 0 && selectedPortfolioIndex < portfolioModel.count)
             selectedSymbol = portfolioModel.get(selectedPortfolioIndex).symbol || ""
@@ -553,10 +625,20 @@ ApplicationWindow {
 
         if (preserveView && previousContentY >= 0)
             portfolioWindow.restorePortfolioListContentY(previousContentY)
+        portfolioUpdateDoneTimer.restart()
     }
 
     function sortedPortfolioRows() {
-        let rows = portfolioRows.slice()
+        let rows = portfolioRows.filter(row => portfolioRowMatchesStatusFilter(row))
+        if (portfolioStatusFilter === "sold") {
+            rows.sort((a, b) => {
+                const dateCompare = String(b.sellDate || "").localeCompare(String(a.sellDate || ""))
+                if (dateCompare !== 0)
+                    return dateCompare
+                return String(a.name || a.symbol || "").localeCompare(String(b.name || b.symbol || ""))
+            })
+            return rows
+        }
         if (portfolioSortKey.length === 0)
             return rows
 
@@ -579,6 +661,39 @@ ApplicationWindow {
             return portfolioSortAscending ? valueA - valueB : valueB - valueA
         })
         return rows
+    }
+
+    function portfolioRowSold(row) {
+        return Number(row.status || 0) === 10
+    }
+
+    function portfolioRowMatchesStatusFilter(row) {
+        if (portfolioStatusFilter === "sold")
+            return portfolioRowSold(row)
+        return !portfolioRowSold(row)
+    }
+
+    function setPortfolioStatusFilter(filter) {
+        if (portfolioStatusFilter === filter)
+            return
+        let selectedSymbol = ""
+        if (selectedPortfolioIndex >= 0 && selectedPortfolioIndex < portfolioModel.count)
+            selectedSymbol = portfolioModel.get(selectedPortfolioIndex).symbol || ""
+        portfolioStatusFilter = filter
+        portfolioPendingFilterSymbol = selectedSymbol
+        portfolioUpdatingActive = true
+        portfolioUpdateDoneTimer.stop()
+        portfolioFilterTimer.restart()
+    }
+
+    function portfolioStatusFilterIndex() {
+        if (portfolioStatusFilter === "sold")
+            return 1
+        return 0
+    }
+
+    function portfolioPositionDateColumnTitle() {
+        return "Gekauft am"
     }
 
     function rebuildPortfolioModel(preferredSymbol, refreshDetails, scrollToTop) {
@@ -639,7 +754,9 @@ ApplicationWindow {
             portfolioSortKey = key
             portfolioSortAscending = true
         }
-        rebuildPortfolioModel("", false, true)
+        portfolioSortingActive = true
+        portfolioSortDoneTimer.stop()
+        portfolioSortTimer.restart()
     }
 
     function cleanDisplayText(value) {
@@ -721,7 +838,7 @@ ApplicationWindow {
     }
 
     function portfolioPositionQuantity(row) {
-        let candidates = ["quantity", "amount", "shares", "count", "anzahl"]
+        let candidates = ["quantity", "Quantity", "amount", "Amount", "shares", "Shares", "count", "Count", "anzahl", "Anzahl"]
         for (let i = 0; i < candidates.length; i++) {
             let value = Number(row[candidates[i]] || 0)
             if (value > 0)
@@ -732,6 +849,14 @@ ApplicationWindow {
 
     function portfolioPositionTotalValue(row) {
         return portfolioPositionQuantity(row) * Number(row.currentValue || 0)
+    }
+
+    function portfolioPositionEntryTotal(row) {
+        return portfolioPositionQuantity(row) * Number(row.entryValue || 0)
+    }
+
+    function portfolioPositionGainTotal(row) {
+        return portfolioPositionTotalValue(row) - portfolioPositionEntryTotal(row)
     }
 
     function formatPercentValue(value) {
@@ -1800,7 +1925,11 @@ ApplicationWindow {
         pairs.forEach(pair => {
             const buy = pair.buy || ({})
             const sell = pair.sell || ({})
-            const amount = Number(sell.totalValue || 0)
+            const sellQuantity = portfolioPositionQuantity(sell)
+            const sellCurrentValue = Number(sell.currentValue || sell.lastcloseprice || 0)
+            const amount = Number(sell.totalValue || 0) > 0
+                ? Number(sell.totalValue || 0)
+                : sellCurrentValue * sellQuantity
             let entryPrice = Number(dbManager.closePriceOnOrBefore(buy.symbol || "", buyDate) || 0)
             if (entryPrice <= 0)
                 entryPrice = Number(buy.value || 0)
@@ -1808,6 +1937,13 @@ ApplicationWindow {
 
             if (amount <= 0 || entryPrice <= 0 || currentValue <= 0) {
                 failed++
+                positionManagementDialog.setExchangeStatus(
+                    false,
+                    "Fehler beim Austausch: " + (sell.symbol || "?") + " -> " + (buy.symbol || "?")
+                        + " Betrag " + amount.toLocaleString(Qt.locale(), "f", 2)
+                        + ", Einstieg " + entryPrice.toLocaleString(Qt.locale(), "f", 2)
+                        + ", Kurs " + currentValue.toLocaleString(Qt.locale(), "f", 2)
+                )
                 return
             }
 
@@ -1914,7 +2050,6 @@ ApplicationWindow {
         id: portfolioWindow
         app: mainWindow
         dbManager: mainWindow.dbManager
-        portfolioModel: mainWindow.portfolioModel
     }
 
 

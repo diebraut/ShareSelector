@@ -6,7 +6,33 @@ Window {
     id: portfolioWindow
     property var app
     property var dbManager
-    property var portfolioModel
+    property bool localPortfolioBusyVisible: false
+    property string localPortfolioBusyMessage: ""
+    property bool portfolioBusyVisible: localPortfolioBusyVisible || (app && app.portfolioBusyVisible)
+    property string portfolioBusyMessage: localPortfolioBusyVisible
+        ? localPortfolioBusyMessage
+        : (app ? app.portfolioBusyMessage : "")
+    property int pendingPortfolioFilterIndex: -1
+    property int soldNameColumnWidth: 300
+    property int soldNrColumnWidth: 36
+    property int soldGainTotalColumnX: soldNrColumnWidth + soldNameColumnWidth
+    property int soldGainTotalColumnWidth: 120
+    property int soldGainPercentColumnX: soldGainTotalColumnX + soldGainTotalColumnWidth + 14
+    property int soldGainPercentColumnWidth: 100
+    property int soldEntryColumnX: soldGainPercentColumnX + soldGainPercentColumnWidth + 14
+    property int soldEntryColumnWidth: 110
+    property int soldExitColumnX: soldEntryColumnX + soldEntryColumnWidth + 14
+    property int soldExitColumnWidth: 110
+    property int soldBuyDateColumnX: soldExitColumnX + soldExitColumnWidth + 16
+    property int soldBuyDateColumnWidth: 105
+    property int soldSellDateColumnX: soldBuyDateColumnX + soldBuyDateColumnWidth + 22
+    property int soldSellDateColumnWidth: 115
+
+    function showLocalPortfolioBusy(message) {
+        localPortfolioBusyMessage = message
+        localPortfolioBusyVisible = true
+        localPortfolioBusyTimer.restart()
+    }
 
     function positionListAtBeginning() {
         portfolioListView.positionViewAtBeginning()
@@ -22,6 +48,27 @@ Window {
             portfolioListView.contentY = Math.max(0, Math.min(contentY, maxY))
         })
     }
+
+        Timer {
+            id: localPortfolioBusyTimer
+            interval: 700
+            running: false
+            repeat: false
+            onTriggered: portfolioWindow.localPortfolioBusyVisible = false
+        }
+
+        Timer {
+            id: applyPortfolioFilterTimer
+            interval: 80
+            running: false
+            repeat: false
+            onTriggered: {
+                const index = portfolioWindow.pendingPortfolioFilterIndex
+                portfolioWindow.pendingPortfolioFilterIndex = -1
+                app.setPortfolioStatusFilter(index === 1 ? "sold" : "active")
+            }
+        }
+
         title: "Mein Depot (Test)"
         width: 1360
         height: 760
@@ -143,11 +190,50 @@ Window {
                             anchors.margins: 1
                             spacing: 0
 
-                            Label {
-                                text: "Positionen"
-                                font.bold: true
-                                padding: 10
+                            RowLayout {
                                 Layout.fillWidth: true
+                                Layout.preferredHeight: 36
+                                spacing: 8
+
+                                Label {
+                                    text: "Positionen"
+                                    font.bold: true
+                                    leftPadding: 10
+                                    Layout.fillWidth: true
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+
+                                Label {
+                                    text: app.portfolioListModel.count + " angezeigt"
+                                    color: "#475569"
+                                    verticalAlignment: Text.AlignVCenter
+                                }
+
+                                ComboBox {
+                                    model: ["Gekauft", "Verkauft"]
+                                    currentIndex: app.portfolioStatusFilterIndex()
+                                    Layout.preferredWidth: 118
+                                    onActivated: function(index) {
+                                        portfolioWindow.showLocalPortfolioBusy("Aktualisiere ...")
+                                        portfolioWindow.pendingPortfolioFilterIndex = index
+                                        applyPortfolioFilterTimer.restart()
+                                    }
+                                }
+
+                                BusyIndicator {
+                                    running: portfolioWindow.portfolioBusyVisible
+                                    visible: portfolioWindow.portfolioBusyVisible
+                                    Layout.preferredWidth: 24
+                                    Layout.preferredHeight: 24
+                                }
+
+                                Label {
+                                    visible: portfolioWindow.portfolioBusyVisible
+                                    text: portfolioWindow.portfolioBusyMessage
+                                    color: "#475569"
+                                    rightPadding: 10
+                                    verticalAlignment: Text.AlignVCenter
+                                }
                             }
 
                             Rectangle {
@@ -157,6 +243,7 @@ Window {
                             }
 
                             RowLayout {
+                                visible: app.portfolioStatusFilter !== "sold"
                                 Layout.fillWidth: true
                                 spacing: 1
                                 Layout.preferredHeight: 28
@@ -204,7 +291,13 @@ Window {
                                     }
                                 }
                                 Label { text: "Einstiegswert"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
-                                Label { text: "Aktualisiert"; Layout.preferredWidth: 95; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label {
+                                    text: app.portfolioPositionDateColumnTitle()
+                                    Layout.preferredWidth: 110
+                                    Layout.leftMargin: 14
+                                    font.bold: true
+                                    horizontalAlignment: Text.AlignRight
+                                }
                                 Rectangle {
                                     Layout.preferredWidth: 90
                                     Layout.preferredHeight: 28
@@ -226,7 +319,24 @@ Window {
                                 }
                                 Label { text: "40 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
                                 Label { text: "60 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
-                                Label { text: "90 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight; rightPadding: 10 }
+                                Label { text: "90 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { text: "Aktualisiert"; Layout.preferredWidth: 95; font.bold: true; horizontalAlignment: Text.AlignRight; rightPadding: 10 }
+                            }
+
+                            Item {
+                                visible: app.portfolioStatusFilter === "sold"
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 28
+                                Layout.minimumHeight: 28
+                                Layout.maximumHeight: 28
+                                Label { x: 0; width: portfolioWindow.soldNrColumnWidth; anchors.verticalCenter: parent.verticalCenter; text: "Nr"; font.bold: true; leftPadding: 10 }
+                                Label { x: portfolioWindow.soldNrColumnWidth; width: portfolioWindow.soldNameColumnWidth; anchors.verticalCenter: parent.verticalCenter; text: "Name"; font.bold: true; leftPadding: 10 }
+                                Label { x: portfolioWindow.soldGainTotalColumnX; width: portfolioWindow.soldGainTotalColumnWidth; anchors.verticalCenter: parent.verticalCenter; text: "Gewinn (total)"; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { x: portfolioWindow.soldGainPercentColumnX; width: portfolioWindow.soldGainPercentColumnWidth; anchors.verticalCenter: parent.verticalCenter; text: "Gewinn (%)"; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { x: portfolioWindow.soldEntryColumnX; width: portfolioWindow.soldEntryColumnWidth; anchors.verticalCenter: parent.verticalCenter; text: "Einstiegswert"; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { x: portfolioWindow.soldExitColumnX; width: portfolioWindow.soldExitColumnWidth; anchors.verticalCenter: parent.verticalCenter; text: "Ausstiegswert"; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { x: portfolioWindow.soldBuyDateColumnX; width: portfolioWindow.soldBuyDateColumnWidth; anchors.verticalCenter: parent.verticalCenter; text: "Kaufdatum"; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { x: portfolioWindow.soldSellDateColumnX; width: portfolioWindow.soldSellDateColumnWidth; anchors.verticalCenter: parent.verticalCenter; text: "Verkaufsdatum"; font.bold: true; horizontalAlignment: Text.AlignRight; rightPadding: 10 }
                             }
 
                             Rectangle {
@@ -235,34 +345,41 @@ Window {
                                 color: "#c9d0d5"
                             }
 
-                            ListView {
-                                id: portfolioListView
+                            Item {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
-                                clip: true
-                                model: app.sortedPortfolioRows()
-                                currentIndex: app.selectedPortfolioIndex
-                                ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-                                delegate: Rectangle {
-                                    id: portfolioPositionDelegate
-                                    required property int index
-                                    required property var modelData
-                                    property var rowData: modelData || ({})
-                                    property string positionType: "portfolio"
-                                    property bool positionUsed: app.positionManagementSellVersion >= 0
-                                        && app.portfolioPositionInSell(rowData)
-                                    property bool dragActive: false
-                                    property real pressX: 0
-                                    property real pressY: 0
+                                ListView {
+                                    id: portfolioListView
+                                    anchors.fill: parent
+                                    clip: true
+                                    model: app.portfolioListModel
+                                    currentIndex: app.selectedPortfolioIndex
+                                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-                                    width: ListView.view ? ListView.view.width : 0
-                                    height: 36
-                                    color: portfolioWindow.app.selectedPortfolioIndex === portfolioPositionDelegate.index
-                                        ? "#dbeafe"
-                                        : (portfolioPositionDelegate.positionUsed
-                                            ? "#e5e7eb"
-                                            : (portfolioPositionDelegate.index % 2 === 0 ? "#ffffff" : "#f8fafc"))
+                                    delegate: Rectangle {
+                                        id: portfolioPositionDelegate
+                                        required property int index
+                                        property var rowData: app.portfolioListModel && portfolioPositionDelegate.index >= 0
+                                            ? app.portfolioListModel.get(portfolioPositionDelegate.index)
+                                            : ({})
+                                        property string positionType: "portfolio"
+                                        property bool positionUsed: app.positionManagementSellVersion >= 0
+                                            && app.portfolioPositionInSell(rowData)
+                                        property bool positionSold: app.portfolioRowSold(rowData)
+                                        property bool dragActive: false
+                                        property real pressX: 0
+                                        property real pressY: 0
+
+                                        width: ListView.view ? ListView.view.width : 0
+                                        height: 36
+                                        color: portfolioWindow.app.selectedPortfolioIndex === portfolioPositionDelegate.index
+                                            ? (portfolioPositionDelegate.positionSold ? "#fecaca" : "#dbeafe")
+                                            : (portfolioPositionDelegate.positionSold
+                                                ? "#fff1f2"
+                                                : (portfolioPositionDelegate.positionUsed
+                                                ? "#e5e7eb"
+                                                : (portfolioPositionDelegate.index % 2 === 0 ? "#ffffff" : "#f8fafc")))
 
                                     Item {
                                         id: portfolioPositionDragProxy
@@ -291,6 +408,7 @@ Window {
                                     }
 
                                     RowLayout {
+                                        visible: app.portfolioStatusFilter !== "sold"
                                         anchors.fill: parent
                                         spacing: 1
                                         Label {
@@ -309,10 +427,30 @@ Window {
                                             Layout.leftMargin: 6
                                         }
 
+                                        Rectangle {
+                                            visible: portfolioPositionDelegate.positionSold
+                                            Layout.preferredWidth: 58
+                                            Layout.preferredHeight: 20
+                                            radius: 3
+                                            color: "#fee2e2"
+                                            border.color: "#fca5a5"
+                                            border.width: 1
+
+                                            Label {
+                                                anchors.fill: parent
+                                                text: "Verkauft"
+                                                color: "#991b1b"
+                                                font.pixelSize: 11
+                                                horizontalAlignment: Text.AlignHCenter
+                                                verticalAlignment: Text.AlignVCenter
+                                            }
+                                        }
+
                                         Label {
                                             text: app.cleanDisplayText(portfolioPositionDelegate.rowData.name || portfolioPositionDelegate.rowData.symbol || "")
                                             Layout.fillWidth: true
-                                            leftPadding: portfolioPositionDelegate.positionUsed ? 4 : 10
+                                            leftPadding: portfolioPositionDelegate.positionUsed || portfolioPositionDelegate.positionSold ? 4 : 10
+                                            color: portfolioPositionDelegate.positionSold ? "#64748b" : "#0f172a"
                                             elide: Text.ElideRight
                                         }
                                         Label {
@@ -322,7 +460,14 @@ Window {
                                         }
                                         Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.valueIncreasePercent); Layout.preferredWidth: 90; Layout.leftMargin: 12; horizontalAlignment: Text.AlignRight }
                                         Label { text: Number(portfolioPositionDelegate.rowData.entryValue || 0).toLocaleString(Qt.locale(), "f", 2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
-                                        Label { text: portfolioPositionDelegate.rowData.quoteLastDate || "-"; Layout.preferredWidth: 95; horizontalAlignment: Text.AlignRight }
+                                        Label {
+                                            text: portfolioPositionDelegate.positionSold
+                                                ? (portfolioPositionDelegate.rowData.sellDate || "-")
+                                                : (portfolioPositionDelegate.rowData.buyDate || "-")
+                                            Layout.preferredWidth: 110
+                                            Layout.leftMargin: 14
+                                            horizontalAlignment: Text.AlignRight
+                                        }
                                         Label {
                                             text: app.formatPercentValue(portfolioPositionDelegate.rowData.days20ValueInc)
                                             color: app.portfolioTwentyDayTrendColor(portfolioPositionDelegate.rowData.days20ValueInc)
@@ -332,22 +477,98 @@ Window {
                                         }
                                         Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days40ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
                                         Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days60ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
-                                        Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days90ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight; rightPadding: 10 }
+                                        Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days90ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                        Label {
+                                            text: portfolioPositionDelegate.positionSold ? "" : (portfolioPositionDelegate.rowData.quoteLastDate || "-")
+                                            Layout.preferredWidth: 95
+                                            horizontalAlignment: Text.AlignRight
+                                            rightPadding: 10
+                                        }
+                                    }
+
+                                    Item {
+                                        visible: app.portfolioStatusFilter === "sold"
+                                        anchors.fill: parent
+                                        Label {
+                                            text: Number(portfolioPositionDelegate.index + 1).toFixed(0)
+                                            x: 0
+                                            width: portfolioWindow.soldNrColumnWidth
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            leftPadding: 10
+                                            horizontalAlignment: Text.AlignLeft
+                                        }
+
+                                        Label {
+                                            text: app.cleanDisplayText(portfolioPositionDelegate.rowData.name || portfolioPositionDelegate.rowData.symbol || "")
+                                            x: portfolioWindow.soldNrColumnWidth
+                                            width: portfolioWindow.soldNameColumnWidth
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            leftPadding: 10
+                                            color: "#64748b"
+                                            elide: Text.ElideRight
+                                        }
+                                        Label {
+                                            text: app.portfolioPositionGainTotal(portfolioPositionDelegate.rowData).toLocaleString(Qt.locale(), "f", 2)
+                                            color: app.portfolioPositionGainTotal(portfolioPositionDelegate.rowData) >= 0 ? "#15803d" : "#b91c1c"
+                                            font.bold: true
+                                            x: portfolioWindow.soldGainTotalColumnX
+                                            width: portfolioWindow.soldGainTotalColumnWidth
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            horizontalAlignment: Text.AlignRight
+                                        }
+                                        Label {
+                                            text: app.formatPercentValue(portfolioPositionDelegate.rowData.valueIncreasePercent)
+                                            color: Number(portfolioPositionDelegate.rowData.valueIncreasePercent || 0) >= 0 ? "#15803d" : "#b91c1c"
+                                            font.bold: true
+                                            x: portfolioWindow.soldGainPercentColumnX
+                                            width: portfolioWindow.soldGainPercentColumnWidth
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            horizontalAlignment: Text.AlignRight
+                                        }
+                                        Label {
+                                            text: app.portfolioPositionEntryTotal(portfolioPositionDelegate.rowData).toLocaleString(Qt.locale(), "f", 2)
+                                            x: portfolioWindow.soldEntryColumnX
+                                            width: portfolioWindow.soldEntryColumnWidth
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            horizontalAlignment: Text.AlignRight
+                                        }
+                                        Label {
+                                            text: app.portfolioPositionTotalValue(portfolioPositionDelegate.rowData).toLocaleString(Qt.locale(), "f", 2)
+                                            x: portfolioWindow.soldExitColumnX
+                                            width: portfolioWindow.soldExitColumnWidth
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            horizontalAlignment: Text.AlignRight
+                                        }
+                                        Label {
+                                            text: portfolioPositionDelegate.rowData.buyDate || "-"
+                                            x: portfolioWindow.soldBuyDateColumnX
+                                            width: portfolioWindow.soldBuyDateColumnWidth
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            horizontalAlignment: Text.AlignRight
+                                        }
+                                        Label {
+                                            text: portfolioPositionDelegate.rowData.sellDate || "-"
+                                            x: portfolioWindow.soldSellDateColumnX
+                                            width: portfolioWindow.soldSellDateColumnWidth
+                                            anchors.verticalCenter: parent.verticalCenter
+                                            horizontalAlignment: Text.AlignRight
+                                            rightPadding: 10
+                                        }
                                     }
 
                                     MouseArea {
                                         id: portfolioPositionDragMouse
                                         anchors.fill: parent
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                        preventStealing: portfolioPositionDelegate.positionUsed
-                                        drag.target: portfolioPositionDelegate.positionUsed ? null : portfolioPositionDragProxy
+                                        preventStealing: portfolioPositionDelegate.positionUsed || portfolioPositionDelegate.positionSold
+                                        drag.target: portfolioPositionDelegate.positionUsed || portfolioPositionDelegate.positionSold ? null : portfolioPositionDragProxy
                                         onPressed: function(mouse) {
                                             portfolioPositionDelegate.pressX = mouse.x
                                             portfolioPositionDelegate.pressY = mouse.y
                                             portfolioPositionDelegate.dragActive = false
                                         }
                                         onPositionChanged: function(mouse) {
-                                            if (portfolioPositionDelegate.positionUsed) {
+                                            if (portfolioPositionDelegate.positionUsed || portfolioPositionDelegate.positionSold) {
                                                 mouse.accepted = true
                                                 return
                                             }
@@ -389,6 +610,7 @@ Window {
                                         MenuItem {
                                             text: "In Verkauf ablegen"
                                             enabled: !portfolioPositionDelegate.positionUsed
+                                                && !portfolioPositionDelegate.positionSold
                                             onTriggered: app.addPortfolioPositionToSell(portfolioPositionDelegate.rowData)
                                         }
 
@@ -396,6 +618,7 @@ Window {
                                             text: "Get Data from IBKR"
                                             enabled: dbManager.ibkrConnected
                                                 && !dbManager.ibkrDataLoading
+                                                && !portfolioPositionDelegate.positionSold
                                             onTriggered: dbManager.getIbkrData(
                                                 portfolioPositionDelegate.rowData.symbol)
                                         }
@@ -405,6 +628,36 @@ Window {
                                             enabled: !dbManager.fundamentalDataLoading
                                             onTriggered: dbManager.getAlphaVantageFundamentals(
                                                 portfolioPositionDelegate.rowData.symbol)
+                                        }
+                                    }
+                                }
+                                }
+
+                                Rectangle {
+                                    visible: portfolioWindow.portfolioBusyVisible
+                                    anchors.centerIn: parent
+                                    width: 180
+                                    height: 48
+                                    radius: 4
+                                    color: "#f8fafc"
+                                    border.color: "#94a3b8"
+                                    border.width: 1
+                                    z: 10
+
+                                    RowLayout {
+                                        anchors.centerIn: parent
+                                        spacing: 10
+
+                                        BusyIndicator {
+                                            running: portfolioWindow.portfolioBusyVisible
+                                            Layout.preferredWidth: 24
+                                            Layout.preferredHeight: 24
+                                        }
+
+                                        Label {
+                                            text: portfolioWindow.portfolioBusyMessage
+                                            font.bold: true
+                                            color: "#334155"
                                         }
                                     }
                                 }
