@@ -38,6 +38,12 @@ Window {
         portfolioListView.positionViewAtBeginning()
     }
 
+    function positionListAtIndex(index) {
+        if (index < 0)
+            return
+        portfolioListView.positionViewAtIndex(index, ListView.Beginning)
+    }
+
     function portfolioListContentY() {
         return portfolioListView.contentY
     }
@@ -98,71 +104,177 @@ Window {
                         font.bold: true
                     }
 
+                    ComboBox {
+                        model: app.depotListModel
+                        textRole: "name"
+                        valueRole: "depotId"
+                        currentIndex: app.selectedDepotIndex
+                        Layout.preferredWidth: 180
+                        onActivated: function(index) {
+                            app.selectedDepotIndex = index
+                            app.selectedDepotId = app.depotListModel.get(index).depotId
+                            app.selectedDepotName = app.depotListModel.get(index).name
+                        }
+                    }
+
                     Item { Layout.fillWidth: true }
 
                     Button {
-                        text: "Connect to IBKR"
-                        Layout.preferredWidth: 118
-                        font.pixelSize: 11
-                        enabled: !dbManager.ibkrConnecting && !dbManager.ibkrDataLoading && !dbManager.ibkrBatchActive
-                        onClicked: dbManager.connectToIbkr()
+                        text: "Konfiguration Par."
+                        Layout.preferredWidth: 132
+                        ToolTip.visible: hovered
+                        ToolTip.text: dbManager.ibkrConnected ? "IBKR verbunden" : "IBKR getrennt"
+                        contentItem: Text {
+                            text: parent.text
+                            color: "#ffffff"
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                            elide: Text.ElideRight
+                        }
+                        background: Rectangle {
+                            color: dbManager.ibkrConnected ? "#15803d" : "#b91c1c"
+                            border.color: dbManager.ibkrConnected ? "#166534" : "#991b1b"
+                            border.width: 1
+                        }
+                        onClicked: app.openPortfolioBatchWindow()
                     }
                 }
 
                 GroupBox {
+                    id: portfolioMasterDataGroupBox
                     title: "Depotstammdaten"
+                    topPadding: 22
+                    label: Label {
+                        text: portfolioMasterDataGroupBox.title
+                        x: 10
+                        y: 0
+                        padding: 2
+                        font.bold: true
+                        background: Rectangle { color: "#f4f6f7" }
+                    }
+                    background: Rectangle {
+                        y: portfolioMasterDataGroupBox.label.height / 2
+                        width: parent.width
+                        height: parent.height - y
+                        color: "transparent"
+                        border.color: "#8b8b8b"
+                        border.width: 1
+                    }
+                    clip: false
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 150
+                    Layout.preferredHeight: 170
 
-                    RowLayout {
+                    ColumnLayout {
                         anchors.fill: parent
-                        anchors.margins: 4
-                        spacing: 18
+                        anchors.margins: 10
+                        spacing: 5
 
-                        GridLayout {
+                        RowLayout {
                             Layout.fillWidth: true
-                            Layout.alignment: Qt.AlignTop
-                            columns: 4
-                            columnSpacing: 18
-                            rowSpacing: 6
-
-                            Label { text: "Depot"; color: "#475569"; Layout.preferredWidth: 130 }
-                            Label { text: "Gekaufte Positionen"; font.bold: true; Layout.preferredWidth: 180 }
-                            Label { text: "Positionen"; color: "#475569"; Layout.preferredWidth: 130 }
-                            Label { text: app.portfolioRows.length + " gesamt, " + app.portfolioActiveCountValue + " aktiv"; font.bold: true; Layout.preferredWidth: 180 }
-
-                            Label { text: "Depotwert"; color: "#475569"; Layout.preferredWidth: 130 }
-                            Label { text: app.portfolioTotalCurrentAmount.toLocaleString(Qt.locale(), "f", 2); font.bold: true; Layout.preferredWidth: 180 }
-                            Label { text: "Investiert"; color: "#475569"; Layout.preferredWidth: 130 }
-                            Label { text: app.portfolioTotalEntryAmount.toLocaleString(Qt.locale(), "f", 2); font.bold: true; Layout.preferredWidth: 180 }
-
-                            Label { text: "Gewinn/Verlust"; color: "#475569"; Layout.preferredWidth: 130 }
-                            Label {
-                                text: app.portfolioTotalGainValue().toLocaleString(Qt.locale(), "f", 2) + " / " + app.portfolioPerformancePercent().toLocaleString(Qt.locale(), "f", 2) + " %"
-                                font.bold: true
-                                color: app.portfolioTotalGainValue() >= 0 ? "#15803d" : "#b91c1c"
-                                Layout.preferredWidth: 180
-                            }
-                            Label { text: "Datenstatus"; color: "#475569"; Layout.preferredWidth: 130 }
-                            Label {
-                                text: dbManager.ibkrConnected ? "IBKR verbunden" : app.cleanDisplayText(dbManager.ibkrConnectionStatus || "IBKR getrennt")
-                                font.bold: dbManager.ibkrConnected
-                                color: dbManager.ibkrConnected ? "#15803d" : "#475569"
-                                Layout.preferredWidth: 260
-                                elide: Text.ElideRight
-                            }
-                        }
-
-                        ColumnLayout {
-                            Layout.alignment: Qt.AlignRight | Qt.AlignBottom
                             spacing: 8
 
-                            Button {
-                                text: "Konfiguration Par."
-                                Layout.preferredWidth: 132
-                                onClicked: app.openPortfolioBatchWindow()
-                            }
+                            Label { text: "Letzte Änderung (%)"; color: "#475569"; font.bold: true; Layout.preferredWidth: 150; horizontalAlignment: Text.AlignRight }
+                            Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                            Label { text: "Letzte Änderung (Euro)"; color: "#475569"; font.bold: true; Layout.preferredWidth: 160; horizontalAlignment: Text.AlignRight }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label { text: "Depotwert"; color: "#475569"; font.bold: true; Layout.preferredWidth: 115; horizontalAlignment: Text.AlignRight }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label { text: "Gewinn"; color: "#475569"; font.bold: true; Layout.preferredWidth: 115; horizontalAlignment: Text.AlignRight }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label { text: "20 Tage"; color: "#475569"; font.bold: true; Layout.preferredWidth: 82; horizontalAlignment: Text.AlignRight }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label { text: "40 Tage"; color: "#475569"; font.bold: true; Layout.preferredWidth: 82; horizontalAlignment: Text.AlignRight }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label { text: "60 Tage"; color: "#475569"; font.bold: true; Layout.preferredWidth: 82; horizontalAlignment: Text.AlignRight }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label { text: "90 Tage"; color: "#475569"; font.bold: true; Layout.preferredWidth: 82; horizontalAlignment: Text.AlignRight }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label { text: "Investiert seit"; color: "#475569"; font.bold: true; Layout.preferredWidth: 115; horizontalAlignment: Text.AlignRight }
                         }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 1
+                            color: "#c9d0d5"
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                        Label {
+                            text: app.formatPercentValue(app.portfolioLatestChangePercent)
+                            font.bold: true
+                            color: app.portfolioSignedPercentColor(app.portfolioLatestChangePercent)
+                            Layout.preferredWidth: 150
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label {
+                            text: app.portfolioLatestChangeAmount.toLocaleString(Qt.locale(), "f", 2)
+                            font.bold: true
+                            color: app.portfolioLatestChangeAmount > 0 ? "#15803d" : (app.portfolioLatestChangeAmount < 0 ? "#b91c1c" : "#475569")
+                            Layout.preferredWidth: 160
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label {
+                            text: app.portfolioTotalCurrentAmount.toLocaleString(Qt.locale(), "f", 2)
+                            font.bold: true
+                            Layout.preferredWidth: 115
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label {
+                            text: app.portfolioTotalGainValue() > 0 ? app.portfolioTotalGainValue().toLocaleString(Qt.locale(), "f", 2) : "-"
+                            font.bold: true
+                            color: app.portfolioTotalGainValue() > 0 ? "#15803d" : "#475569"
+                            Layout.preferredWidth: 115
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label {
+                            text: app.formatPercentValue(app.portfolioDays20Percent)
+                            font.bold: true
+                            color: app.portfolioSignedPercentColor(app.portfolioDays20Percent)
+                            Layout.preferredWidth: 82
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label {
+                            text: app.formatPercentValue(app.portfolioDays40Percent)
+                            font.bold: true
+                            color: app.portfolioSignedPercentColor(app.portfolioDays40Percent)
+                            Layout.preferredWidth: 82
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label {
+                            text: app.formatPercentValue(app.portfolioDays60Percent)
+                            font.bold: true
+                            color: app.portfolioSignedPercentColor(app.portfolioDays60Percent)
+                            Layout.preferredWidth: 82
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label {
+                            text: app.formatPercentValue(app.portfolioDays90Percent)
+                            font.bold: true
+                            color: app.portfolioSignedPercentColor(app.portfolioDays90Percent)
+                            Layout.preferredWidth: 82
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label {
+                            text: app.portfolioStartInvest || "-"
+                            font.bold: true
+                            Layout.preferredWidth: 115
+                            horizontalAlignment: Text.AlignRight
+                        }
+
+                        }
+
+                        Item { Layout.fillHeight: true }
                     }
                 }
 
@@ -175,15 +287,32 @@ Window {
                 RowLayout {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    spacing: 12
+                            spacing: 8
 
-                    Rectangle {
+                    GroupBox {
+                        id: portfolioPositionsGroupBox
+                        title: "Positionen"
+                        topPadding: 22
+                        label: Label {
+                            text: portfolioPositionsGroupBox.title
+                            x: 10
+                            y: 0
+                            padding: 2
+                            font.bold: true
+                            background: Rectangle { color: "#f4f6f7" }
+                        }
+                        background: Rectangle {
+                            y: portfolioPositionsGroupBox.label.height / 2
+                            width: parent.width
+                            height: parent.height - y
+                            color: "transparent"
+                            border.color: "#8b8b8b"
+                            border.width: 1
+                        }
+                        clip: false
                         Layout.fillWidth: true
                         Layout.preferredWidth: Math.max(1, portfolioWindow.width * 0.75)
                         Layout.fillHeight: true
-                        color: "#ffffff"
-                        border.color: "#c9d0d5"
-                        border.width: 1
 
                         ColumnLayout {
                             anchors.fill: parent
@@ -195,14 +324,7 @@ Window {
                                 Layout.preferredHeight: 36
                                 spacing: 8
 
-                                Label {
-                                    text: "Positionen"
-                                    font.bold: true
-                                    leftPadding: 10
-                                    Layout.fillWidth: true
-                                    verticalAlignment: Text.AlignVCenter
-                                }
-
+                                Item { Layout.fillWidth: true }
                                 Label {
                                     text: app.portfolioListModel.count + " angezeigt"
                                     color: "#475569"
@@ -252,6 +374,28 @@ Window {
                                 Label { text: "Nr"; Layout.preferredWidth: 36; font.bold: true; leftPadding: 10 }
                                 Label { text: "Name"; Layout.fillWidth: true; font.bold: true; leftPadding: 10 }
                                 Rectangle {
+                                    Layout.preferredWidth: 112
+                                    Layout.preferredHeight: 28
+                                    Layout.minimumHeight: 28
+                                    Layout.maximumHeight: 28
+                                    color: app.portfolioSortKey === "latestChangePercent" ? "#e0f2fe" : "transparent"
+                                    Label {
+                                        anchors.fill: parent
+                                        text: "Letzte Änderung " + app.portfolioSortIcon("latestChangePercent")
+                                        font.bold: true
+                                        horizontalAlignment: Text.AlignRight
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            portfolioWindow.showLocalPortfolioBusy("Sortiere ...")
+                                            app.sortPortfolioBy("latestChangePercent")
+                                        }
+                                    }
+                                }
+                                Rectangle {
                                     Layout.preferredWidth: 120
                                     Layout.preferredHeight: 28
                                     Layout.minimumHeight: 28
@@ -290,7 +434,7 @@ Window {
                                         onClicked: app.sortPortfolioBy("gainPercent")
                                     }
                                 }
-                                Label { text: "Einstiegswert"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Label { text: "Investiert"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
                                 Label {
                                     text: app.portfolioPositionDateColumnTitle()
                                     Layout.preferredWidth: 110
@@ -317,7 +461,25 @@ Window {
                                         onClicked: app.sortPortfolioBy("days20ValueInc")
                                     }
                                 }
-                                Label { text: "40 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
+                                Rectangle {
+                                    Layout.preferredWidth: 90
+                                    Layout.preferredHeight: 28
+                                    Layout.minimumHeight: 28
+                                    Layout.maximumHeight: 28
+                                    color: app.portfolioSortKey === "days40ValueInc" ? "#e0f2fe" : "transparent"
+                                    Label {
+                                        anchors.fill: parent
+                                        text: "40 Tage " + app.portfolioSortIcon("days40ValueInc")
+                                        font.bold: true
+                                        horizontalAlignment: Text.AlignRight
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: app.sortPortfolioBy("days40ValueInc")
+                                    }
+                                }
                                 Label { text: "60 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
                                 Label { text: "90 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
                                 Label { text: "Aktualisiert"; Layout.preferredWidth: 95; font.bold: true; horizontalAlignment: Text.AlignRight; rightPadding: 10 }
@@ -454,12 +616,19 @@ Window {
                                             elide: Text.ElideRight
                                         }
                                         Label {
+                                            text: app.formatPercentValue(portfolioPositionDelegate.rowData.latestChangePercent)
+                                            color: app.portfolioSignedPercentColor(portfolioPositionDelegate.rowData.latestChangePercent)
+                                            font.bold: true
+                                            Layout.preferredWidth: 112
+                                            horizontalAlignment: Text.AlignRight
+                                        }
+                                        Label {
                                             text: app.portfolioPositionTotalValue(portfolioPositionDelegate.rowData).toLocaleString(Qt.locale(), "f", 2)
                                             Layout.preferredWidth: 120
                                             horizontalAlignment: Text.AlignRight
                                         }
                                         Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.valueIncreasePercent); Layout.preferredWidth: 90; Layout.leftMargin: 12; horizontalAlignment: Text.AlignRight }
-                                        Label { text: Number(portfolioPositionDelegate.rowData.entryValue || 0).toLocaleString(Qt.locale(), "f", 2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
+                                        Label { text: app.portfolioPositionEntryTotal(portfolioPositionDelegate.rowData).toLocaleString(Qt.locale(), "f", 2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
                                         Label {
                                             text: portfolioPositionDelegate.positionSold
                                                 ? (portfolioPositionDelegate.rowData.sellDate || "-")
@@ -666,7 +835,7 @@ Window {
                     }
 
                     Rectangle {
-                        Layout.preferredWidth: Math.max(1, portfolioWindow.width * 0.25)
+                        Layout.preferredWidth: Math.max(1, portfolioWindow.width * 0.1875)
                         Layout.fillHeight: true
                         color: "#ffffff"
                         border.color: "#c9d0d5"

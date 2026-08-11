@@ -242,6 +242,7 @@ void DatabaseManager::startIbkrGetStocksBatch(bool depotOnly)
             WHERE COALESCE(s."Symbol", '') <> ''
               AND s."IBKRConId" IS NOT NULL
               AND COALESCE(s."from_IBKR", TRUE) = TRUE
+              AND b."DepotId" = 1
               AND b."SellDate" IS NULL
               AND COALESCE(b."Status", 0) <> 10
             ORDER BY s."Symbol"

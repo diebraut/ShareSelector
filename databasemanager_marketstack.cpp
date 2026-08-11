@@ -446,6 +446,7 @@ bool DatabaseManager::deleteMarketstackNoDataStock(const QString &symbol)
         SELECT 1
         FROM "BoughtStocks"
         WHERE "Symbol" = :symbol
+          AND "DepotId" = 1
         LIMIT 1
     )SQL");
     boughtQuery.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
@@ -516,6 +517,7 @@ void DatabaseManager::startMarketstackQuotesBatch()
               SELECT 1
               FROM "BoughtStocks" b
               WHERE b."Symbol" = s."Symbol"
+                AND b."DepotId" = 1
                 AND b."SellDate" IS NULL
                 AND COALESCE(b."Status", 0) <> 10
           )

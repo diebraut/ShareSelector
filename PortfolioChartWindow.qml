@@ -27,14 +27,29 @@ import QtQuick.Layouts 1.15
             .replace(/\u00e2\u0080\u009d/g, "\u201d")
     }
 
+    function chartStockText() {
+        const stock = portfolioChartStock || ({})
+        return cleanDisplayText(stock.name || stock.symbol || "")
+    }
+
+    function chartDataValue(key, fallback) {
+        const data = portfolioChartData || ({})
+        const value = data[key]
+        return value === undefined || value === null ? fallback : value
+    }
+
+    function chartDataNumber(key, fallback) {
+        return Number(chartDataValue(key, fallback === undefined ? 0 : fallback))
+    }
+
     function openForStock(row, data) {
         if (!row || !row.symbol)
             return
 
-        portfolioChartStock = row
+        portfolioChartStock = row || ({})
         portfolioChartData = data || ({})
         portfolioChartQuoteModel.clear()
-        let quotes = portfolioChartData.quotes || []
+        let quotes = chartDataValue("quotes", [])
         quotes.forEach(quote => portfolioChartQuoteModel.append(quote))
         title = row.symbol + " - Depot Verlauf"
         show()
@@ -72,7 +87,7 @@ import QtQuick.Layouts 1.15
                         spacing: 2
 
                         Label {
-                            text: cleanDisplayText(portfolioChartStock.name || portfolioChartStock.symbol || "")
+                            text: chartStockText()
                             font.pixelSize: 22
                             font.bold: true
                             elide: Text.ElideRight
@@ -80,8 +95,8 @@ import QtQuick.Layouts 1.15
                         }
 
                         Label {
-                            text: "Zeitraum: " + (portfolioChartData.start90 || "-") + " bis " + (portfolioChartData.latestDate || "-")
-                                + " | letzter Schlusskurs: " + Number(portfolioChartData.latestClose || 0).toFixed(2)
+                            text: "Zeitraum: " + chartDataValue("start90", "-") + " bis " + chartDataValue("latestDate", "-")
+                                + " | letzter Schlusskurs: " + chartDataNumber("latestClose", 0).toFixed(2)
                             color: "#4f5b62"
                             Layout.fillWidth: true
                             elide: Text.ElideRight
@@ -100,10 +115,10 @@ import QtQuick.Layouts 1.15
 
                     Repeater {
                         model: [
-                            { label: "20", start: portfolioChartData.start20, avg: portfolioChartData.avg20, inc: portfolioChartData.inc20, count: portfolioChartData.quoteCount20, color: "#2563eb" },
-                            { label: "40", start: portfolioChartData.start40, avg: portfolioChartData.avg40, inc: portfolioChartData.inc40, count: portfolioChartData.quoteCount40, color: "#059669" },
-                            { label: "60", start: portfolioChartData.start60, avg: portfolioChartData.avg60, inc: portfolioChartData.inc60, count: portfolioChartData.quoteCount60, color: "#d97706" },
-                            { label: "90", start: portfolioChartData.start90, avg: portfolioChartData.avg90, inc: portfolioChartData.inc90, count: portfolioChartData.quoteCount90, color: "#7c3aed" }
+                            { label: "20", start: chartDataValue("start20", ""), avg: chartDataValue("avg20", 0), inc: chartDataValue("inc20", 0), count: chartDataValue("quoteCount20", 0), color: "#2563eb" },
+                            { label: "40", start: chartDataValue("start40", ""), avg: chartDataValue("avg40", 0), inc: chartDataValue("inc40", 0), count: chartDataValue("quoteCount40", 0), color: "#059669" },
+                            { label: "60", start: chartDataValue("start60", ""), avg: chartDataValue("avg60", 0), inc: chartDataValue("inc60", 0), count: chartDataValue("quoteCount60", 0), color: "#d97706" },
+                            { label: "90", start: chartDataValue("start90", ""), avg: chartDataValue("avg90", 0), inc: chartDataValue("inc90", 0), count: chartDataValue("quoteCount90", 0), color: "#7c3aed" }
                         ]
 
                         Rectangle {
@@ -176,8 +191,8 @@ import QtQuick.Layouts 1.15
                                 return new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])).getTime()
                             }
 
-                            let firstMs = dateMs(portfolioChartData.start90 || portfolioChartQuoteModel.get(0).closeDate)
-                            let lastMs = dateMs(portfolioChartData.latestDate || portfolioChartQuoteModel.get(count - 1).closeDate)
+                            let firstMs = dateMs(chartDataValue("start90", portfolioChartQuoteModel.get(0).closeDate))
+                            let lastMs = dateMs(chartDataValue("latestDate", portfolioChartQuoteModel.get(count - 1).closeDate))
                             if (!isFinite(firstMs))
                                 firstMs = dateMs(portfolioChartQuoteModel.get(0).closeDate)
                             if (!isFinite(lastMs) || lastMs <= firstMs)
@@ -187,10 +202,10 @@ import QtQuick.Layouts 1.15
                             let minPrice = Number(portfolioChartQuoteModel.get(0).closePrice)
                             let maxPrice = minPrice
                             let periods = [
-                                { label: "90", start: portfolioChartData.start90, avg: Number(portfolioChartData.avg90 || 0), inc: Number(portfolioChartData.inc90 || 0), color: "#7c3aed" },
-                                { label: "60", start: portfolioChartData.start60, avg: Number(portfolioChartData.avg60 || 0), inc: Number(portfolioChartData.inc60 || 0), color: "#d97706" },
-                                { label: "40", start: portfolioChartData.start40, avg: Number(portfolioChartData.avg40 || 0), inc: Number(portfolioChartData.inc40 || 0), color: "#059669" },
-                                { label: "20", start: portfolioChartData.start20, avg: Number(portfolioChartData.avg20 || 0), inc: Number(portfolioChartData.inc20 || 0), color: "#2563eb" }
+                                { label: "90", start: chartDataValue("start90", ""), avg: chartDataNumber("avg90", 0), inc: chartDataNumber("inc90", 0), color: "#7c3aed" },
+                                { label: "60", start: chartDataValue("start60", ""), avg: chartDataNumber("avg60", 0), inc: chartDataNumber("inc60", 0), color: "#d97706" },
+                                { label: "40", start: chartDataValue("start40", ""), avg: chartDataNumber("avg40", 0), inc: chartDataNumber("inc40", 0), color: "#059669" },
+                                { label: "20", start: chartDataValue("start20", ""), avg: chartDataNumber("avg20", 0), inc: chartDataNumber("inc20", 0), color: "#2563eb" }
                             ]
                             function quoteIndexOnOrAfter(startDate) {
                                 let start = dateMs(startDate)
@@ -405,11 +420,11 @@ import QtQuick.Layouts 1.15
                             }
 
                             let labelDates = [
-                                { text: portfolioChartData.start90 || "", color: "#7c3aed" },
-                                { text: portfolioChartData.start60 || "", color: "#d97706" },
-                                { text: portfolioChartData.start40 || "", color: "#059669" },
-                                { text: portfolioChartData.start20 || "", color: "#2563eb" },
-                                { text: portfolioChartData.latestDate || "", color: "#4f5b62" }
+                                { text: chartDataValue("start90", ""), color: "#7c3aed" },
+                                { text: chartDataValue("start60", ""), color: "#d97706" },
+                                { text: chartDataValue("start40", ""), color: "#059669" },
+                                { text: chartDataValue("start20", ""), color: "#2563eb" },
+                                { text: chartDataValue("latestDate", ""), color: "#4f5b62" }
                             ]
                             for (let d = 0; d < labelDates.length; d++) {
                                 if (!labelDates[d].text)
@@ -462,8 +477,8 @@ import QtQuick.Layouts 1.15
                                         return NaN
                                     return new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])).getTime()
                                 }
-                                let firstMs = dateMs(portfolioChartData.start90 || portfolioChartQuoteModel.get(0).closeDate)
-                                let lastMs = dateMs(portfolioChartData.latestDate || portfolioChartQuoteModel.get(count - 1).closeDate)
+                                let firstMs = dateMs(chartDataValue("start90", portfolioChartQuoteModel.get(0).closeDate))
+                                let lastMs = dateMs(chartDataValue("latestDate", portfolioChartQuoteModel.get(count - 1).closeDate))
                                 let range = Math.max(1, lastMs - firstMs)
                                 for (let i = 0; i < count; i++) {
                                     let ms = dateMs(portfolioChartQuoteModel.get(i).closeDate)

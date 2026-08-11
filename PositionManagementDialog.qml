@@ -18,9 +18,9 @@ Window {
 
     title: "Positionen verwalten"
     width: hostWindow ? hostWindow.width : 1360
-    height: 360
+    height: 320
     minimumWidth: 980
-    minimumHeight: 260
+    minimumHeight: 220
     flags: Qt.Dialog
     modality: Qt.NonModal
     visible: false
