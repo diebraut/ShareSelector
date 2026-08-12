@@ -66,6 +66,7 @@ qt_add_qml_module(appShareSelector
         StockAnalysisChartPanel.qml
         StockAnalysisBuyDialog.qml
         PositionManagementDialog.qml
+        PositionEditDialog.qml
         PortfolioBatchWindow.qml
     SOURCES
         databasemanager.cpp

@@ -7,6 +7,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Remove="bin\**\*.cs" />
+    <Compile Remove="obj\**\*.cs" />
     <Reference Include="CSharpAPI">
       <HintPath>$(TwsApiRoot)\source\CSharpClient\client\bin\Release\net8.0\CSharpAPI.dll</HintPath>
       <Private>true</Private>

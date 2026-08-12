@@ -791,6 +791,7 @@ bool DatabaseManager::ensureSchema()
                 "EntryValue" NUMERIC(20, 8) NOT NULL DEFAULT 0,
                 "ValueIncreasePercent" NUMERIC(20, 8) NOT NULL DEFAULT 0,
                 "Status" INTEGER NOT NULL DEFAULT 0,
+                "Observed" BOOLEAN NOT NULL DEFAULT FALSE,
                 "AnalysisConfigName" TEXT,
                 "CreatedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 "UpdatedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -800,12 +801,21 @@ bool DatabaseManager::ensureSchema()
             ALTER TABLE "BoughtStocks"
                 ADD COLUMN IF NOT EXISTS "DepotId" INTEGER NOT NULL DEFAULT 1,
                 ADD COLUMN IF NOT EXISTS "Quantity" NUMERIC(24, 8) NOT NULL DEFAULT 1,
+                ADD COLUMN IF NOT EXISTS "Observed" BOOLEAN NOT NULL DEFAULT FALSE,
+                ADD COLUMN IF NOT EXISTS "CreatedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                ADD COLUMN IF NOT EXISTS "UpdatedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 ADD COLUMN IF NOT EXISTS "AnalysisConfigName" TEXT
         )SQL"),
         QStringLiteral(R"SQL(
             UPDATE "BoughtStocks"
             SET "DepotId" = 1
             WHERE "DepotId" IS NULL
+        )SQL"),
+        QStringLiteral(R"SQL(
+            UPDATE "BoughtStocks"
+            SET "Observed" = FALSE
+            WHERE COALESCE("Status", 0) = 10
+               OR "SellDate" IS NOT NULL
         )SQL"),
         QStringLiteral(R"SQL(
             UPDATE "Depots" d

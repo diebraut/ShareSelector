@@ -51,6 +51,10 @@ QVariantList DatabaseManager::getBoughtStocks()
             END AS "ValueIncreasePercent",
             b."Status",
             COALESCE(b."Quantity", 1) AS "Quantity",
+            CASE
+                WHEN b."SellDate" IS NULL AND COALESCE(b."Status", 0) <> 10 THEN COALESCE(b."Observed", FALSE)
+                ELSE FALSE
+            END AS "Observed",
             COALESCE(b."AnalysisConfigName", '') AS "AnalysisConfigName"
         FROM "BoughtStocks" b
         LEFT JOIN LATERAL (
@@ -370,6 +374,10 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
             END AS "ValueIncreasePercent",
             b."Status",
             COALESCE(b."Quantity", 1) AS "Quantity",
+            CASE
+                WHEN b."SellDate" IS NULL AND COALESCE(b."Status", 0) <> 10 THEN COALESCE(b."Observed", FALSE)
+                ELSE FALSE
+            END AS "Observed",
             COALESCE(b."AnalysisConfigName", '') AS "AnalysisConfigName",
             s."MIC",
             s."ISIN",
@@ -520,6 +528,7 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
         row["entryValue"] = query.value("EntryValue");
         row["valueIncreasePercent"] = query.value("ValueIncreasePercent");
         row["quantity"] = query.value("Quantity");
+        row["observed"] = query.value("Observed");
         row["analysisConfigName"] = query.value("AnalysisConfigName");
         row["days20ValueInc"] = query.value("Days20ValueInc");
         row["days40ValueInc"] = query.value("Days40ValueInc");
@@ -537,7 +546,8 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
         const QStringList databaseFields = {
             QStringLiteral("symbol"), QStringLiteral("name"), QStringLiteral("buyDate"),
             QStringLiteral("sellDate"), QStringLiteral("currentValue"), QStringLiteral("entryValue"),
-            QStringLiteral("valueIncreasePercent"), QStringLiteral("quantity"), QStringLiteral("analysisConfigName"),
+            QStringLiteral("valueIncreasePercent"), QStringLiteral("quantity"), QStringLiteral("observed"),
+            QStringLiteral("analysisConfigName"),
             QStringLiteral("days20ValueInc"), QStringLiteral("days40ValueInc"), QStringLiteral("days60ValueInc"),
             QStringLiteral("days90ValueInc"), QStringLiteral("latestChangePercent"),
             QStringLiteral("quoteLastDate"), QStringLiteral("status"),
@@ -583,6 +593,10 @@ QVariantMap DatabaseManager::getPortfolioDetails(const QString &symbol)
             END AS "ValueIncreasePercent",
             b."Status",
             COALESCE(b."Quantity", 1) AS "Quantity",
+            CASE
+                WHEN b."SellDate" IS NULL AND COALESCE(b."Status", 0) <> 10 THEN COALESCE(b."Observed", FALSE)
+                ELSE FALSE
+            END AS "Observed",
             COALESCE(b."AnalysisConfigName", '') AS "AnalysisConfigName",
             s."MIC",
             s."ISIN",
@@ -699,6 +713,7 @@ QVariantMap DatabaseManager::getPortfolioDetails(const QString &symbol)
     row["entryValue"] = query.value("EntryValue");
     row["valueIncreasePercent"] = query.value("ValueIncreasePercent");
     row["quantity"] = query.value("Quantity");
+    row["observed"] = query.value("Observed");
     row["analysisConfigName"] = query.value("AnalysisConfigName");
     row["status"] = query.value("Status");
     row["mic"] = mic;
@@ -710,7 +725,8 @@ QVariantMap DatabaseManager::getPortfolioDetails(const QString &symbol)
     const QStringList databaseFields = {
         QStringLiteral("symbol"), QStringLiteral("name"), QStringLiteral("buyDate"),
         QStringLiteral("sellDate"), QStringLiteral("currentValue"), QStringLiteral("entryValue"),
-        QStringLiteral("valueIncreasePercent"), QStringLiteral("quantity"), QStringLiteral("analysisConfigName"), QStringLiteral("status"),
+        QStringLiteral("valueIncreasePercent"), QStringLiteral("quantity"), QStringLiteral("observed"),
+        QStringLiteral("analysisConfigName"), QStringLiteral("status"),
         QStringLiteral("mic"), QStringLiteral("isin"), QStringLiteral("exchange"), QStringLiteral("countryCode"),
         QStringLiteral("city")
     };
@@ -1346,6 +1362,135 @@ bool DatabaseManager::deleteBoughtStock(const QString &symbol)
     return query.numRowsAffected() > 0;
 }
 
+bool DatabaseManager::setBoughtStockObserved(const QString &symbol, bool observed)
+{
+    qInfo() << "setBoughtStockObserved called:" << symbol << observed;
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return false;
+    }
+
+    const QString normalizedSymbol = symbol.trimmed();
+    if (normalizedSymbol.isEmpty()) {
+        qWarning() << "setBoughtStockObserved abgebrochen: leeres Symbol";
+        return false;
+    }
+
+    QString escapedSymbol = normalizedSymbol;
+    escapedSymbol.replace(QStringLiteral("'"), QStringLiteral("''"));
+    const QString observedLiteral = observed ? QStringLiteral("TRUE") : QStringLiteral("FALSE");
+
+    QSqlQuery query(db);
+    const QString sql = QStringLiteral(R"SQL(
+        UPDATE "BoughtStocks"
+        SET "Observed" = CASE
+                WHEN %1
+                 AND "SellDate" IS NULL
+                 AND COALESCE("Status", 0) <> 10 THEN TRUE
+                ELSE FALSE
+            END
+        WHERE "DepotId" = 1
+          AND "Symbol" = '%2'
+        RETURNING "Observed"
+    )SQL").arg(observedLiteral, escapedSymbol);
+
+    if (!query.exec(sql)) {
+        qCritical() << "Fehler beim Setzen des Beobachtungsstatus:" << query.lastError().text();
+        return false;
+    }
+
+    if (!query.next()) {
+        qWarning() << "Keine Depotposition zum Setzen des Beobachtungsstatus gefunden:" << normalizedSymbol;
+        return false;
+    }
+
+    qInfo() << "Beobachtungsstatus gesetzt:" << normalizedSymbol << query.value(0).toBool();
+    return true;
+}
+
+QVariantMap DatabaseManager::toggleBoughtStockObserved(const QString &symbol)
+{
+    qInfo() << "toggleBoughtStockObserved called:" << symbol;
+    QVariantMap result;
+    result.insert(QStringLiteral("ok"), false);
+    result.insert(QStringLiteral("observed"), false);
+
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return result;
+    }
+
+    const QString normalizedSymbol = symbol.trimmed();
+    if (normalizedSymbol.isEmpty()) {
+        qWarning() << "toggleBoughtStockObserved abgebrochen: leeres Symbol";
+        return result;
+    }
+
+    QString escapedSymbol = normalizedSymbol;
+    escapedSymbol.replace(QStringLiteral("'"), QStringLiteral("''"));
+
+    QSqlQuery query(db);
+    const QString sql = QStringLiteral(R"SQL(
+        WITH current_row AS MATERIALIZED (
+            SELECT
+                "DepotId",
+                "Symbol",
+                "SellDate",
+                COALESCE("Status", 0) AS "Status",
+                COALESCE("Observed", FALSE) AS "PreviousObserved"
+            FROM "BoughtStocks"
+            WHERE "DepotId" = 1
+              AND "Symbol" = '%1'
+            LIMIT 1
+        ),
+        updated_row AS (
+            UPDATE "BoughtStocks" b
+            SET "Observed" = CASE
+                    WHEN c."SellDate" IS NULL
+                     AND c."Status" <> 10 THEN NOT c."PreviousObserved"
+                    ELSE FALSE
+                END
+            FROM current_row c
+            WHERE b."DepotId" = c."DepotId"
+              AND b."Symbol" = c."Symbol"
+            RETURNING
+                b."Symbol",
+                c."SellDate",
+                c."Status",
+                c."PreviousObserved",
+                b."Observed"
+        )
+        SELECT
+            "Symbol",
+            "SellDate",
+            "Status",
+            "PreviousObserved",
+            "Observed"
+        FROM updated_row
+    )SQL").arg(escapedSymbol);
+
+    if (!query.exec(sql)) {
+        qCritical() << "Fehler beim Umschalten des Beobachtungsstatus:" << query.lastError().text();
+        return result;
+    }
+
+    if (!query.next()) {
+        qWarning() << "Keine Depotposition zum Umschalten des Beobachtungsstatus gefunden:" << normalizedSymbol;
+        return result;
+    }
+
+    qInfo() << "toggleBoughtStockObserved before:"
+            << "symbol=" << query.value(QStringLiteral("Symbol")).toString()
+            << "sellDate=" << query.value(QStringLiteral("SellDate")).toString()
+            << "status=" << query.value(QStringLiteral("Status")).toInt()
+            << "observed=" << query.value(QStringLiteral("PreviousObserved")).toBool();
+    const bool observed = query.value(QStringLiteral("Observed")).toBool();
+    result.insert(QStringLiteral("ok"), true);
+    result.insert(QStringLiteral("observed"), observed);
+    qInfo() << "Beobachtungsstatus umgeschaltet:" << normalizedSymbol << observed;
+    return result;
+}
+
 bool DatabaseManager::exchangeBoughtStock(
     const QString &sellSymbol,
     const QString &buySymbol,
@@ -1393,7 +1538,8 @@ bool DatabaseManager::exchangeBoughtStock(
             "SellDate" = :sellDate,
             "CurrentValue" = CAST(:saleValue AS numeric) / NULLIF(COALESCE("Quantity", 1), 0),
             "ValueIncreasePercent" = ROUND(((CAST(:saleValue AS numeric) / NULLIF(COALESCE("Quantity", 1), 0) - "EntryValue") / NULLIF("EntryValue", 0) * 100)::numeric, 2),
-            "Status" = 10
+            "Status" = 10,
+            "Observed" = FALSE
         WHERE "DepotId" = 1
           AND "Symbol" = :sellSymbol
     )SQL");
@@ -1445,6 +1591,7 @@ bool DatabaseManager::exchangeBoughtStock(
             "ValueIncreasePercent" = EXCLUDED."ValueIncreasePercent",
             "Status" = EXCLUDED."Status",
             "Quantity" = EXCLUDED."Quantity",
+            "Observed" = FALSE,
             "AnalysisConfigName" = EXCLUDED."AnalysisConfigName"
     )SQL");
     insertQuery.bindValue(QStringLiteral(":symbol"), normalizedBuySymbol);
@@ -1554,6 +1701,10 @@ bool DatabaseManager::saveBoughtStock(
             "ValueIncreasePercent" = EXCLUDED."ValueIncreasePercent",
             "Status" = EXCLUDED."Status",
             "Quantity" = EXCLUDED."Quantity",
+            "Observed" = CASE
+                WHEN EXCLUDED."SellDate" IS NULL AND COALESCE(EXCLUDED."Status", 0) <> 10 THEN COALESCE("BoughtStocks"."Observed", FALSE)
+                ELSE FALSE
+            END,
             "AnalysisConfigName" = EXCLUDED."AnalysisConfigName"
     )SQL");
     query.bindValue(":symbol", symbol.trimmed());

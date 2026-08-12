@@ -98,6 +98,7 @@ ApplicationWindow {
         dynamicRoles: true
     }
     property alias portfolioListModel: portfolioModel
+    property int portfolioModelVersion: 0
 
     ListModel {
         id: depotModel
@@ -148,6 +149,16 @@ ApplicationWindow {
     property double portfolioDays40Percent: 0
     property double portfolioDays60Percent: 0
     property double portfolioDays90Percent: 0
+    property int portfolioObservedCountValue: 0
+    property double portfolioObservedCurrentAmount: 0
+    property double portfolioObservedGainAmount: 0
+    property string portfolioObservedStartInvest: ""
+    property double portfolioObservedLatestChangePercent: 0
+    property double portfolioObservedLatestChangeAmount: 0
+    property double portfolioObservedDays20Percent: 0
+    property double portfolioObservedDays40Percent: 0
+    property double portfolioObservedDays60Percent: 0
+    property double portfolioObservedDays90Percent: 0
     property bool portfolioLoaded: false
     property var portfolioDetails: ({})
     property string portfolioDetailsSymbol: ""
@@ -471,6 +482,7 @@ ApplicationWindow {
         { key: "entryValue", label: "Einstiegswert", format: "money" },
         { key: "valueIncreasePercent", label: "Wertentwicklung", format: "percent" },
         { key: "status", label: "Status", format: "status" },
+        { key: "observed", label: "Observed", format: "bool" },
         { key: "mic", label: "MIC" },
         { key: "isin", label: "ISIN" },
         { key: "exchange", label: "Börse" },
@@ -609,7 +621,11 @@ ApplicationWindow {
     }
 
     function parseDecimal(text) {
-        let value = Number(String(text).replace(",", "."))
+        let normalized = String(text || "").trim()
+        normalized = normalized.replace(/\s/g, "").replace(/'/g, "")
+        if (normalized.indexOf(",") >= 0)
+            normalized = normalized.replace(/\./g, "").replace(",", ".")
+        let value = Number(normalized)
         return isNaN(value) ? 0 : value
     }
 
@@ -659,6 +675,15 @@ ApplicationWindow {
             return rows
 
         rows.sort((a, b) => {
+            if (portfolioSortKey === "name") {
+                const textA = String(a.name || a.symbol || "")
+                const textB = String(b.name || b.symbol || "")
+                const compare = textA.localeCompare(textB)
+                if (compare !== 0)
+                    return portfolioSortAscending ? compare : -compare
+                return String(a.symbol || "").localeCompare(String(b.symbol || ""))
+            }
+
             let valueA = 0
             let valueB = 0
             if (portfolioSortKey === "totalValue") {
@@ -689,9 +714,167 @@ ApplicationWindow {
         return Number(row.status || 0) === 10
     }
 
+    function portfolioBoolValue(value) {
+        if (value === true)
+            return true
+        if (value === false || value === null || value === undefined)
+            return false
+        const text = String(value).trim().toLowerCase()
+        return text === "true" || text === "1" || text === "yes" || text === "ja"
+    }
+
+    function setPortfolioObserved(row, observed) {
+        console.log("setPortfolioObserved called", "row=", JSON.stringify(row), "observed=", observed)
+        if (!row)
+            return false
+        const symbol = String(row.symbol || "").trim()
+        if (symbol.length === 0) {
+            console.log("setPortfolioObserved aborted: empty symbol")
+            return false
+        }
+        const observedValue = Boolean(observed)
+        const ok = dbManager.setBoughtStockObserved(symbol, observedValue)
+        console.log("setPortfolioObserved db result", "symbol=", symbol, "observedValue=", observedValue, "ok=", ok)
+        if (ok) {
+            for (let i = 0; i < portfolioRows.length; i++) {
+                if (String(portfolioRows[i].symbol || "").trim() === symbol) {
+                    portfolioRows[i].observed = observedValue
+                    console.log("setPortfolioObserved updated portfolioRows", "index=", i, "symbol=", symbol)
+                    break
+                }
+            }
+            for (let modelIndex = 0; modelIndex < portfolioModel.count; modelIndex++) {
+                const modelRow = portfolioModel.get(modelIndex)
+                if (String(modelRow.symbol || "").trim() === symbol) {
+                    portfolioModel.setProperty(modelIndex, "observed", observedValue)
+                    console.log("setPortfolioObserved updated portfolioModel", "index=", modelIndex, "symbol=", symbol)
+                }
+            }
+            rebuildPortfolioModel(symbol, true, portfolioStatusFilter === "observed" && !observedValue)
+            loadTestPortfolio(symbol, true)
+        }
+        return ok
+    }
+
+    function togglePortfolioObserved(row) {
+        console.log("togglePortfolioObserved called", "row=", JSON.stringify(row))
+        if (!row)
+            return false
+        const symbol = String(row.symbol || "").trim()
+        if (symbol.length === 0) {
+            console.log("togglePortfolioObserved aborted: empty symbol")
+            return false
+        }
+        console.log("togglePortfolioObserved db call", "symbol=", symbol)
+        const result = dbManager.toggleBoughtStockObserved(symbol)
+        console.log("togglePortfolioObserved db result",
+                    "symbol=", symbol,
+                    "result=", JSON.stringify(result),
+                    "okRaw=", result ? result.ok : null,
+                    "observedRaw=", result ? result.observed : null)
+        if (!result || !portfolioBoolValue(result.ok)) {
+            console.log("togglePortfolioObserved aborted: db returned not ok", "symbol=", symbol)
+            return false
+        }
+        const observedValue = portfolioBoolValue(result.observed)
+        let rowsUpdated = 0
+        for (let i = 0; i < portfolioRows.length; i++) {
+            if (String(portfolioRows[i].symbol || "").trim() === symbol) {
+                portfolioRows[i].observed = observedValue
+                rowsUpdated++
+            }
+        }
+        let modelRowsUpdated = 0
+        for (let modelIndex = 0; modelIndex < portfolioModel.count; modelIndex++) {
+            const modelRow = portfolioModel.get(modelIndex)
+            if (String(modelRow.symbol || "").trim() === symbol) {
+                portfolioModel.setProperty(modelIndex, "observed", observedValue)
+                modelRowsUpdated++
+            }
+        }
+        console.log("togglePortfolioObserved model updated",
+                    "symbol=", symbol,
+                    "observedValue=", observedValue,
+                    "portfolioRowsUpdated=", rowsUpdated,
+                    "portfolioModelRowsUpdated=", modelRowsUpdated)
+        if (portfolioStatusFilter === "observed" && !observedValue) {
+            rebuildPortfolioModel("", true, true)
+            console.log("togglePortfolioObserved rebuilt observed filter after removal", "symbol=", symbol)
+        } else {
+            console.log("togglePortfolioObserved local update only", "symbol=", symbol, "filter=", portfolioStatusFilter)
+        }
+        return true
+    }
+
+    function updatePortfolioPositionData(row, buyDate, investedAmount, entryValue) {
+        if (!row)
+            return false
+
+        const symbol = String(row.symbol || "").trim()
+        const name = String(row.name || "").trim()
+        const normalizedBuyDate = String(buyDate || "").trim()
+        const invested = Number(investedAmount)
+        const entry = Number(entryValue)
+        if (symbol.length === 0 || name.length === 0 || normalizedBuyDate.length === 0)
+            return false
+        if (invested <= 0 || entry <= 0)
+            return false
+
+        const now = new Date()
+        const month = now.getMonth() + 1
+        const day = now.getDate()
+        const todayText = now.getFullYear()
+            + "-" + (month < 10 ? "0" + month : String(month))
+            + "-" + (day < 10 ? "0" + day : String(day))
+        let currentValue = Number(dbManager.closePriceOnOrBefore(symbol, todayText) || 0)
+        if (currentValue <= 0)
+            currentValue = Number(row.currentValue || 0)
+        const quantity = invested / entry
+        const gainPercent = entry > 0 ? (currentValue - entry) / entry * 100 : 0
+        const ok = dbManager.saveBoughtStock(
+            symbol,
+            name,
+            normalizedBuyDate,
+            row.sellDate || "",
+            currentValue,
+            entry,
+            gainPercent,
+            Number(row.status || 0),
+            quantity,
+            row.analysisConfigName || ""
+        )
+        if (ok)
+            loadTestPortfolio(symbol, true)
+        return ok
+    }
+
+    function portfolioDateFromIso(value) {
+        const text = String(value || "").trim()
+        const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(text)
+        if (!match)
+            return null
+        return new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    }
+
+    function portfolioHoldingDays(row) {
+        const buyDate = portfolioDateFromIso(row ? row.buyDate : "")
+        if (!buyDate)
+            return null
+        const now = new Date()
+        const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+        return Math.floor((today.getTime() - buyDate.getTime()) / 86400000)
+    }
+
+    function portfolioHeldAtLeast(row, days) {
+        const holdingDays = portfolioHoldingDays(row)
+        return holdingDays === null || holdingDays >= days
+    }
+
     function portfolioRowMatchesStatusFilter(row) {
         if (portfolioStatusFilter === "sold")
             return portfolioRowSold(row)
+        if (portfolioStatusFilter === "observed")
+            return !portfolioRowSold(row) && portfolioBoolValue(row.observed)
         return !portfolioRowSold(row)
     }
 
@@ -711,6 +894,8 @@ ApplicationWindow {
     function portfolioStatusFilterIndex() {
         if (portfolioStatusFilter === "sold")
             return 1
+        if (portfolioStatusFilter === "observed")
+            return 2
         return 0
     }
 
@@ -726,6 +911,7 @@ ApplicationWindow {
             if (preferredSymbol && item.symbol === preferredSymbol)
                 preferredIndex = index
         })
+        portfolioModelVersion += 1
         selectedPortfolioIndex = preferredIndex >= 0
             ? preferredIndex
             : (scrollToTop && portfolioModel.count > 0
@@ -757,7 +943,7 @@ ApplicationWindow {
 
         const row = portfolioModel.get(selectedPortfolioIndex)
         const symbol = row.symbol || ""
-        if (symbol === "" || portfolioDetailsSymbol === symbol)
+        if (symbol === "")
             return
 
         const details = dbManager.getPortfolioDetails(symbol)
@@ -823,6 +1009,20 @@ ApplicationWindow {
         let days40Weight = 0
         let days60Weight = 0
         let days90Weight = 0
+        let observedCurrentTotal = 0
+        let observedEntryTotal = 0
+        let observedCount = 0
+        let observedStartInvest = ""
+        let observedLatestPreviousTotal = 0
+        let observedLatestChangeAmount = 0
+        let observedDays20Weighted = 0
+        let observedDays40Weighted = 0
+        let observedDays60Weighted = 0
+        let observedDays90Weighted = 0
+        let observedDays20Weight = 0
+        let observedDays40Weight = 0
+        let observedDays60Weight = 0
+        let observedDays90Weight = 0
         portfolioRows.forEach(row => {
             const quantity = portfolioPositionQuantity(row)
             const currentValue = quantity * Number(row.currentValue || 0)
@@ -837,36 +1037,63 @@ ApplicationWindow {
                 const buyDate = String(row.buyDate || "")
                 if (buyDate.length > 0 && (startInvest.length === 0 || buyDate < startInvest))
                     startInvest = buyDate
+                if (portfolioBoolValue(row.observed)) {
+                    observedCurrentTotal += currentValue
+                    observedEntryTotal += entryValue
+                    observedCount++
+                    if (buyDate.length > 0 && (observedStartInvest.length === 0 || buyDate < observedStartInvest))
+                        observedStartInvest = buyDate
+                }
 
                 const latestChangePercent = Number(row.latestChangePercent)
                 const latestFactor = 1 + latestChangePercent / 100
-                if (!isNaN(latestChangePercent) && latestFactor > 0 && currentValue > 0) {
+                if (portfolioHeldAtLeast(row, 1) && !isNaN(latestChangePercent) && latestFactor > 0 && currentValue > 0) {
                     const previousValue = currentValue / latestFactor
                     if (isFinite(previousValue) && previousValue > 0) {
                         latestPreviousTotal += previousValue
                         latestChangeAmount += currentValue - previousValue
+                        if (portfolioBoolValue(row.observed)) {
+                            observedLatestPreviousTotal += previousValue
+                            observedLatestChangeAmount += currentValue - previousValue
+                        }
                     }
                 }
 
                 const days20 = Number(row.days20ValueInc)
-                if (!isNaN(days20) && currentValue > 0) {
+                if (portfolioHeldAtLeast(row, 20) && !isNaN(days20) && currentValue > 0) {
                     days20Weighted += currentValue * days20
                     days20Weight += currentValue
+                    if (portfolioBoolValue(row.observed)) {
+                        observedDays20Weighted += currentValue * days20
+                        observedDays20Weight += currentValue
+                    }
                 }
                 const days40 = Number(row.days40ValueInc)
-                if (!isNaN(days40) && currentValue > 0) {
+                if (portfolioHeldAtLeast(row, 40) && !isNaN(days40) && currentValue > 0) {
                     days40Weighted += currentValue * days40
                     days40Weight += currentValue
+                    if (portfolioBoolValue(row.observed)) {
+                        observedDays40Weighted += currentValue * days40
+                        observedDays40Weight += currentValue
+                    }
                 }
                 const days60 = Number(row.days60ValueInc)
-                if (!isNaN(days60) && currentValue > 0) {
+                if (portfolioHeldAtLeast(row, 60) && !isNaN(days60) && currentValue > 0) {
                     days60Weighted += currentValue * days60
                     days60Weight += currentValue
+                    if (portfolioBoolValue(row.observed)) {
+                        observedDays60Weighted += currentValue * days60
+                        observedDays60Weight += currentValue
+                    }
                 }
                 const days90 = Number(row.days90ValueInc)
-                if (!isNaN(days90) && currentValue > 0) {
+                if (portfolioHeldAtLeast(row, 90) && !isNaN(days90) && currentValue > 0) {
                     days90Weighted += currentValue * days90
                     days90Weight += currentValue
+                    if (portfolioBoolValue(row.observed)) {
+                        observedDays90Weighted += currentValue * days90
+                        observedDays90Weight += currentValue
+                    }
                 }
             }
         })
@@ -886,6 +1113,16 @@ ApplicationWindow {
         portfolioDays40Percent = days40Weight > 0 ? days40Weighted / days40Weight : 0
         portfolioDays60Percent = days60Weight > 0 ? days60Weighted / days60Weight : 0
         portfolioDays90Percent = days90Weight > 0 ? days90Weighted / days90Weight : 0
+        portfolioObservedCountValue = observedCount
+        portfolioObservedCurrentAmount = observedCurrentTotal
+        portfolioObservedGainAmount = observedCurrentTotal - observedEntryTotal
+        portfolioObservedStartInvest = observedStartInvest
+        portfolioObservedLatestChangeAmount = observedLatestChangeAmount
+        portfolioObservedLatestChangePercent = observedLatestPreviousTotal > 0 ? observedLatestChangeAmount / observedLatestPreviousTotal * 100 : 0
+        portfolioObservedDays20Percent = observedDays20Weight > 0 ? observedDays20Weighted / observedDays20Weight : 0
+        portfolioObservedDays40Percent = observedDays40Weight > 0 ? observedDays40Weighted / observedDays40Weight : 0
+        portfolioObservedDays60Percent = observedDays60Weight > 0 ? observedDays60Weighted / observedDays60Weight : 0
+        portfolioObservedDays90Percent = observedDays90Weight > 0 ? observedDays90Weighted / observedDays90Weight : 0
     }
     function selectedPortfolioValue(key) {
         if (selectedPortfolioIndex < 0 || selectedPortfolioIndex >= portfolioModel.count)
@@ -991,6 +1228,8 @@ ApplicationWindow {
         else {
             if (format === "status")
                 displayValue = Number(value) === 10 ? "Verkauft" : "Aktiv"
+            else if (format === "bool")
+                displayValue = portfolioBoolValue(value) ? "Ja" : "Nein"
             else if (format === "money")
                 displayValue = Number(value).toLocaleString(Qt.locale(), "f", 2)
             else if (format === "large")

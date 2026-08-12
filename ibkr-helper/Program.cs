@@ -30,6 +30,7 @@ var directExchange = args.Any(value => string.Equals(value, "--direct-exchange",
 var matchSymbols = args.Any(value => string.Equals(value, "--match-symbols", StringComparison.OrdinalIgnoreCase));
 var isinOnly = args.Any(value => string.Equals(value, "--isin-only", StringComparison.OrdinalIgnoreCase));
 var historicalQuotes = args.Any(value => string.Equals(value, "--historical-quotes", StringComparison.OrdinalIgnoreCase));
+var marketSnapshot = args.Any(value => string.Equals(value, "--market-snapshot", StringComparison.OrdinalIgnoreCase));
 var probeQuoteExchanges = args.Any(value => string.Equals(value, "--probe-quote-exchanges", StringComparison.OrdinalIgnoreCase));
 var exchanges = (Argument(args, "--exchanges") ?? string.Empty)
     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
@@ -47,7 +48,7 @@ if ((string.IsNullOrWhiteSpace(symbol) && conId <= 0)
 }
 
 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(
-    probeQuoteExchanges ? Math.Max(75, exchanges.Length * 25) : (historicalQuotes ? 75 : 20)));
+    probeQuoteExchanges ? Math.Max(75, exchanges.Length * 25) : ((historicalQuotes || marketSnapshot) ? 75 : 20)));
 var wrapper = new ContractDetailsWrapper(RequestId,
                                          symbol ?? string.Empty,
                                          currency,
@@ -59,6 +60,7 @@ var wrapper = new ContractDetailsWrapper(RequestId,
                                          matchSymbols,
                                          isinOnly,
                                          historicalQuotes,
+                                         marketSnapshot,
                                          probeQuoteExchanges,
                                          exchanges,
                                          Math.Max(1, days));
@@ -106,6 +108,15 @@ try {
                                  false,
                                  []);
         Console.Error.WriteLine($"Historical quotes requested for {symbol}/{conId}, days={days}.");
+    } else if (marketSnapshot) {
+        client.reqMarketDataType(1);
+        client.reqMktData(RequestId,
+                          wrapper.CreateCurrentContract(),
+                          string.Empty,
+                          true,
+                          false,
+                          []);
+        Console.Error.WriteLine($"Market snapshot requested for {symbol}/{conId}.");
     } else if (matchSymbols) {
         client.reqMatchingSymbols(RequestId, symbol);
         Console.Error.WriteLine($"Matching symbols requested for {symbol}.");
@@ -147,6 +158,7 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
     private readonly bool matchSymbols;
     private readonly bool isinOnly;
     private readonly bool historicalQuotes;
+    private readonly bool marketSnapshot;
     private readonly bool probeQuoteExchanges;
     private readonly string[] quoteExchangeCandidates;
     private readonly int historicalDays;
@@ -154,6 +166,8 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
     private readonly List<HistoricalBar> historicalBars = [];
     private readonly List<HistoricalBar> currentProbeBars = [];
     private readonly List<QuoteExchangeProbeResult> quoteExchangeProbeResults = [];
+    private readonly Dictionary<string, double> snapshotPrices = [];
+    private readonly Dictionary<string, long> snapshotSizes = [];
     private bool usingIsinRequest;
     private bool retriedSymbolRequest;
     private int currentProbeIndex;
@@ -170,6 +184,7 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
                                   bool matchSymbols,
                                   bool isinOnly,
                                   bool historicalQuotes,
+                                  bool marketSnapshot,
                                   bool probeQuoteExchanges,
                                   string[] quoteExchangeCandidates,
                                   int historicalDays)
@@ -185,6 +200,7 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
         this.matchSymbols = matchSymbols;
         this.isinOnly = isinOnly;
         this.historicalQuotes = historicalQuotes;
+        this.marketSnapshot = marketSnapshot;
         this.probeQuoteExchanges = probeQuoteExchanges;
         this.quoteExchangeCandidates = quoteExchangeCandidates;
         this.historicalDays = historicalDays;
@@ -278,6 +294,52 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
             data = historicalBars
                 .OrderBy(bar => bar.date, StringComparer.Ordinal)
                 .ToArray()
+        });
+    }
+
+    public override void tickPrice(int tickerId, int field, double price, TickAttrib attribs)
+    {
+        if (tickerId != requestId || !marketSnapshot || price <= 0)
+            return;
+
+        snapshotPrices[TickFieldName(field)] = price;
+    }
+
+    public override void tickSize(int tickerId, int field, decimal size)
+    {
+        if (tickerId != requestId || !marketSnapshot)
+            return;
+
+        snapshotSizes[TickFieldName(field)] = decimal.ToInt64(size);
+    }
+
+    public override void tickSnapshotEnd(int reqId)
+    {
+        if (reqId != requestId || !marketSnapshot)
+            return;
+
+        var last = SnapshotValue("LAST") ?? SnapshotValue("DELAYED_LAST");
+        var bid = SnapshotValue("BID") ?? SnapshotValue("DELAYED_BID");
+        var ask = SnapshotValue("ASK") ?? SnapshotValue("DELAYED_ASK");
+        var close = SnapshotValue("CLOSE") ?? SnapshotValue("DELAYED_CLOSE");
+        double? mid = bid.HasValue && ask.HasValue ? (bid.Value + ask.Value) / 2.0 : null;
+        var selected = last ?? mid ?? close ?? bid ?? ask;
+
+        Result.TrySetResult(new {
+            success = selected.HasValue,
+            message = selected.HasValue
+                ? $"IBKR-Snapshot fuer {requestedSymbol} wurde empfangen."
+                : $"IBKR lieferte keinen verwertbaren Snapshot fuer {requestedSymbol}.",
+            data = new {
+                selected,
+                last,
+                bid,
+                ask,
+                mid,
+                close,
+                prices = snapshotPrices,
+                sizes = snapshotSizes
+            }
         });
     }
 
@@ -425,6 +487,18 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
                 return;
             }
 
+            if (marketSnapshot && errorCode is 10090 or 10167 or 10186 or 354) {
+                Result.TrySetResult(new {
+                    success = false,
+                    message = $"IBKR-Fehler {errorCode}: {errorMsg}",
+                    data = new {
+                        prices = snapshotPrices,
+                        sizes = snapshotSizes
+                    }
+                });
+                return;
+            }
+
             if (errorCode == 200 && TryRetryWithSymbol(errorMsg))
                 return;
 
@@ -497,6 +571,33 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
         if (DateTime.TryParse(trimmed, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out var parsedDate))
             return parsedDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
         return trimmed;
+    }
+
+    private double? SnapshotValue(string key)
+    {
+        return snapshotPrices.TryGetValue(key, out var value) && value > 0 ? value : null;
+    }
+
+    private static string TickFieldName(int field)
+    {
+        return field switch {
+            1 => "BID",
+            2 => "ASK",
+            4 => "LAST",
+            6 => "HIGH",
+            7 => "LOW",
+            8 => "VOLUME",
+            9 => "CLOSE",
+            14 => "OPEN",
+            66 => "DELAYED_BID",
+            67 => "DELAYED_ASK",
+            68 => "DELAYED_LAST",
+            72 => "DELAYED_HIGH",
+            73 => "DELAYED_LOW",
+            74 => "DELAYED_CLOSE",
+            75 => "DELAYED_OPEN",
+            _ => $"FIELD_{field}"
+        };
     }
 
     public Contract CreateCurrentContract()

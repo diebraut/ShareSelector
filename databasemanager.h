@@ -19,6 +19,7 @@
 #include <QNetworkReply>
 #include <QUrl>
 #include <QElapsedTimer>
+#include <QDate>
 
 #include "marketstackclient.h"
 #include "alphavantageclient.h"
@@ -142,6 +143,8 @@ public:
     bool ibkrNameCheckBatchActive() const;
     Q_INVOKABLE bool isBoughtStock(const QString &symbol);
     Q_INVOKABLE bool deleteBoughtStock(const QString &symbol);
+    Q_INVOKABLE bool setBoughtStockObserved(const QString &symbol, bool observed);
+    Q_INVOKABLE QVariantMap toggleBoughtStockObserved(const QString &symbol);
     Q_INVOKABLE bool exchangeBoughtStock(
         const QString &sellSymbol,
         const QString &buySymbol,
@@ -188,12 +191,21 @@ private:
     void startIbkrGetStocksBatch(bool depotOnly);
     void scheduleNextIbkrGetStocksSymbol(int delayMs);
     void finishIbkrGetStocksBatch(const QString &message);
+    bool startIbkrHistoricalQuotesOnlyForSymbol(const QString &symbol);
     bool startIbkrQuoteExchangeProbeForSymbol(const QString &symbol);
     void startIbkrQuotesRequestForIsin(const QString &isin, int days);
     void startIbkrQuoteHelperRequest(bool probeExchange);
+    void startIbkrQuoteSnapshotFallback(const QString &reason);
     void finishIbkrQuotesRequest(const QJsonObject &result);
+    void finishIbkrQuoteSnapshotRequest(const QJsonObject &result);
     void finishIbkrQuoteExchangeProbe(const QJsonObject &result);
-    bool saveIbkrHistoricalQuotes(const QString &symbol, const QJsonArray &bars, int *changedQuoteCount = nullptr);
+    bool saveIbkrHistoricalQuotes(const QString &symbol,
+                                  const QJsonArray &bars,
+                                  int *changedQuoteCount = nullptr,
+                                  QDate *latestQuoteDate = nullptr);
+    bool saveIbkrQuoteSnapshot(const QString &symbol,
+                               const QJsonObject &snapshotData,
+                               double *savedPrice = nullptr);
     int ibkrMissingQuoteDays(const QString &symbol, int fallbackDays = 90);
     bool saveIbkrQuoteExchange(const QString &symbol,
                                const QString &quoteExchange,
@@ -318,6 +330,7 @@ private:
     bool m_pendingIbkrProcessIsNameCheck = false;
     bool m_pendingIbkrProcessIsHistoricalQuotes = false;
     bool m_pendingIbkrProcessIsQuoteExchangeProbe = false;
+    bool m_pendingIbkrProcessIsMarketSnapshot = false;
     bool m_pendingIbkrDataForNameCheckRecovery = false;
     bool m_pendingIbkrReviewRequired = false;
     QString m_pendingIbkrReviewReason;
@@ -353,6 +366,7 @@ private:
     int m_ibkrBatchSuccessCount = 0;
     int m_ibkrBatchFailureCount = 0;
     bool m_ibkrGetStocksBatchActive = false;
+    bool m_ibkrGetStocksHistoricalOnlyBatch = false;
     QString m_ibkrGetStocksBatchName = QStringLiteral("Get New Quotes for Depot");
     QStringList m_ibkrGetStocksSymbols;
     int m_ibkrGetStocksIndex = 0;
