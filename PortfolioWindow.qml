@@ -195,7 +195,11 @@ Window {
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label { text: "Depotwert"; color: "#475569"; font.bold: true; Layout.preferredWidth: 115; horizontalAlignment: Text.AlignRight }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
-                        Label { text: "Gewinn"; color: "#475569"; font.bold: true; Layout.preferredWidth: 115; horizontalAlignment: Text.AlignRight }
+                        Label { text: "Gewinn (\u20ac)"; color: "#475569"; font.bold: true; Layout.preferredWidth: 115; horizontalAlignment: Text.AlignRight }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label { text: "Gewinn (%)"; color: "#475569"; font.bold: true; Layout.preferredWidth: 105; horizontalAlignment: Text.AlignRight }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label { text: "10 Tage"; color: "#475569"; font.bold: true; Layout.preferredWidth: 82; horizontalAlignment: Text.AlignRight }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label { text: "20 Tage"; color: "#475569"; font.bold: true; Layout.preferredWidth: 82; horizontalAlignment: Text.AlignRight }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
@@ -249,17 +253,33 @@ Window {
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: app.portfolioTotalGainValue() > 0 ? app.portfolioTotalGainValue().toLocaleString(Qt.locale(), "f", 2) : "-"
+                            text: app.portfolioTotalGainValue().toLocaleString(Qt.locale(), "f", 2)
                             font.bold: true
-                            color: app.portfolioTotalGainValue() > 0 ? "#15803d" : "#475569"
+                            color: app.portfolioTotalGainValue() > 0 ? "#15803d" : (app.portfolioTotalGainValue() < 0 ? "#b91c1c" : "#475569")
                             Layout.preferredWidth: 115
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label {
+                            text: app.formatPercentValue(app.portfolioPerformancePercent())
+                            font.bold: true
+                            color: app.portfolioSignedPercentColor(app.portfolioPerformancePercent())
+                            Layout.preferredWidth: 105
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label {
+                            text: app.formatPercentValue(app.portfolioDays10Percent)
+                            font.bold: true
+                            color: app.portfolioDayTrendColor(app.portfolioDays10Percent, 10)
+                            Layout.preferredWidth: 82
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
                             text: app.formatPercentValue(app.portfolioDays20Percent)
                             font.bold: true
-                            color: app.portfolioSignedPercentColor(app.portfolioDays20Percent)
+                            color: app.portfolioDayTrendColor(app.portfolioDays20Percent, 20)
                             Layout.preferredWidth: 82
                             horizontalAlignment: Text.AlignRight
                         }
@@ -267,7 +287,7 @@ Window {
                         Label {
                             text: app.formatPercentValue(app.portfolioDays40Percent)
                             font.bold: true
-                            color: app.portfolioSignedPercentColor(app.portfolioDays40Percent)
+                            color: app.portfolioDayTrendColor(app.portfolioDays40Percent, 40)
                             Layout.preferredWidth: 82
                             horizontalAlignment: Text.AlignRight
                         }
@@ -275,7 +295,7 @@ Window {
                         Label {
                             text: app.formatPercentValue(app.portfolioDays60Percent)
                             font.bold: true
-                            color: app.portfolioSignedPercentColor(app.portfolioDays60Percent)
+                            color: app.portfolioDayTrendColor(app.portfolioDays60Percent, 60)
                             Layout.preferredWidth: 82
                             horizontalAlignment: Text.AlignRight
                         }
@@ -283,7 +303,7 @@ Window {
                         Label {
                             text: app.formatPercentValue(app.portfolioDays90Percent)
                             font.bold: true
-                            color: app.portfolioSignedPercentColor(app.portfolioDays90Percent)
+                            color: app.portfolioDayTrendColor(app.portfolioDays90Percent, 90)
                             Layout.preferredWidth: 82
                             horizontalAlignment: Text.AlignRight
                         }
@@ -333,17 +353,33 @@ Window {
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: app.portfolioObservedGainAmount > 0 ? app.portfolioObservedGainAmount.toLocaleString(Qt.locale(), "f", 2) : "-"
+                            text: app.portfolioObservedGainAmount.toLocaleString(Qt.locale(), "f", 2)
                             font.bold: true
-                            color: app.portfolioObservedGainAmount > 0 ? "#15803d" : "#475569"
+                            color: app.portfolioObservedGainAmount > 0 ? "#15803d" : (app.portfolioObservedGainAmount < 0 ? "#b91c1c" : "#475569")
                             Layout.preferredWidth: 115
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label {
+                            text: app.formatPercentValue(app.portfolioObservedPerformancePercent())
+                            font.bold: true
+                            color: app.portfolioSignedPercentColor(app.portfolioObservedPerformancePercent())
+                            Layout.preferredWidth: 105
+                            horizontalAlignment: Text.AlignRight
+                        }
+                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
+                        Label {
+                            text: app.formatPercentValue(app.portfolioObservedDays10Percent)
+                            font.bold: true
+                            color: app.portfolioDayTrendColor(app.portfolioObservedDays10Percent, 10)
+                            Layout.preferredWidth: 82
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
                             text: app.formatPercentValue(app.portfolioObservedDays20Percent)
                             font.bold: true
-                            color: app.portfolioSignedPercentColor(app.portfolioObservedDays20Percent)
+                            color: app.portfolioDayTrendColor(app.portfolioObservedDays20Percent, 20)
                             Layout.preferredWidth: 82
                             horizontalAlignment: Text.AlignRight
                         }
@@ -351,7 +387,7 @@ Window {
                         Label {
                             text: app.formatPercentValue(app.portfolioObservedDays40Percent)
                             font.bold: true
-                            color: app.portfolioSignedPercentColor(app.portfolioObservedDays40Percent)
+                            color: app.portfolioDayTrendColor(app.portfolioObservedDays40Percent, 40)
                             Layout.preferredWidth: 82
                             horizontalAlignment: Text.AlignRight
                         }
@@ -359,7 +395,7 @@ Window {
                         Label {
                             text: app.formatPercentValue(app.portfolioObservedDays60Percent)
                             font.bold: true
-                            color: app.portfolioSignedPercentColor(app.portfolioObservedDays60Percent)
+                            color: app.portfolioDayTrendColor(app.portfolioObservedDays60Percent, 60)
                             Layout.preferredWidth: 82
                             horizontalAlignment: Text.AlignRight
                         }
@@ -367,7 +403,7 @@ Window {
                         Label {
                             text: app.formatPercentValue(app.portfolioObservedDays90Percent)
                             font.bold: true
-                            color: app.portfolioSignedPercentColor(app.portfolioObservedDays90Percent)
+                            color: app.portfolioDayTrendColor(app.portfolioObservedDays90Percent, 90)
                             Layout.preferredWidth: 82
                             horizontalAlignment: Text.AlignRight
                         }
@@ -378,14 +414,6 @@ Window {
                             Layout.preferredWidth: 115
                             horizontalAlignment: Text.AlignRight
                         }
-                        Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
-                        Label {
-                            text: "-"
-                            font.bold: true
-                            Layout.preferredWidth: 145
-                            horizontalAlignment: Text.AlignRight
-                        }
-
                         }
 
                         Item { Layout.fillHeight: true }
@@ -582,6 +610,25 @@ Window {
                                     Layout.preferredHeight: 28
                                     Layout.minimumHeight: 28
                                     Layout.maximumHeight: 28
+                                    color: app.portfolioSortKey === "days10ValueInc" ? "#e0f2fe" : "transparent"
+                                    Label {
+                                        anchors.fill: parent
+                                        text: "10 Tage " + app.portfolioSortIcon("days10ValueInc")
+                                        font.bold: true
+                                        horizontalAlignment: Text.AlignRight
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: app.sortPortfolioBy("days10ValueInc")
+                                    }
+                                }
+                                Rectangle {
+                                    Layout.preferredWidth: 90
+                                    Layout.preferredHeight: 28
+                                    Layout.minimumHeight: 28
+                                    Layout.maximumHeight: 28
                                     color: app.portfolioSortKey === "days20ValueInc" ? "#e0f2fe" : "transparent"
                                     Label {
                                         anchors.fill: parent
@@ -669,13 +716,15 @@ Window {
                                             && app.portfolioPositionInSell(rowData)
                                         property bool positionSold: app.portfolioRowSold(rowData)
                                         property bool positionObserved: !positionSold && app.portfolioBoolValue(rowData.observed)
+                                        property bool positionSelected: app.portfolioSelectionContains(portfolioPositionDelegate.index)
+                                        property bool multiplePositionsSelected: app.portfolioSelectionCount() > 1
                                         property bool dragActive: false
                                         property real pressX: 0
                                         property real pressY: 0
 
                                         width: ListView.view ? ListView.view.width : 0
                                         height: 36
-                                        color: portfolioWindow.app.selectedPortfolioIndex === portfolioPositionDelegate.index
+                                        color: portfolioPositionDelegate.positionSelected
                                             ? (portfolioPositionDelegate.positionSold ? "#fecaca" : "#dbeafe")
                                             : (portfolioPositionDelegate.positionSold
                                                 ? "#fff1f2"
@@ -797,15 +846,40 @@ Window {
                                             horizontalAlignment: Text.AlignRight
                                         }
                                         Label {
-                                            text: app.formatPercentValue(portfolioPositionDelegate.rowData.days20ValueInc)
-                                            color: app.portfolioTwentyDayTrendColor(portfolioPositionDelegate.rowData.days20ValueInc)
+                                            text: app.formatPercentValue(portfolioPositionDelegate.rowData.days10ValueInc)
+                                            color: app.portfolioDayTrendColor(portfolioPositionDelegate.rowData.days10ValueInc, 10)
                                             font.bold: true
                                             Layout.preferredWidth: 90
                                             horizontalAlignment: Text.AlignRight
                                         }
-                                        Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days40ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
-                                        Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days60ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
-                                        Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.days90ValueInc); Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
+                                        Label {
+                                            text: app.formatPercentValue(portfolioPositionDelegate.rowData.days20ValueInc)
+                                            color: app.portfolioDayTrendColor(portfolioPositionDelegate.rowData.days20ValueInc, 20)
+                                            font.bold: true
+                                            Layout.preferredWidth: 90
+                                            horizontalAlignment: Text.AlignRight
+                                        }
+                                        Label {
+                                            text: app.formatPercentValue(portfolioPositionDelegate.rowData.days40ValueInc)
+                                            color: app.portfolioDayTrendColor(portfolioPositionDelegate.rowData.days40ValueInc, 40)
+                                            font.bold: true
+                                            Layout.preferredWidth: 90
+                                            horizontalAlignment: Text.AlignRight
+                                        }
+                                        Label {
+                                            text: app.formatPercentValue(portfolioPositionDelegate.rowData.days60ValueInc)
+                                            color: app.portfolioDayTrendColor(portfolioPositionDelegate.rowData.days60ValueInc, 60)
+                                            font.bold: true
+                                            Layout.preferredWidth: 90
+                                            horizontalAlignment: Text.AlignRight
+                                        }
+                                        Label {
+                                            text: app.formatPercentValue(portfolioPositionDelegate.rowData.days90ValueInc)
+                                            color: app.portfolioDayTrendColor(portfolioPositionDelegate.rowData.days90ValueInc, 90)
+                                            font.bold: true
+                                            Layout.preferredWidth: 90
+                                            horizontalAlignment: Text.AlignRight
+                                        }
                                         Label {
                                             text: portfolioPositionDelegate.positionSold ? "" : (portfolioPositionDelegate.rowData.quoteLastDate || "-")
                                             Layout.preferredWidth: 95
@@ -909,8 +983,15 @@ Window {
                                             }
                                         }
                                         onClicked: function(mouse) {
-                                            app.selectedPortfolioIndex = portfolioPositionDelegate.index
-                                            app.schedulePortfolioDetailsLoad()
+                                            const rightClick = mouse.button === Qt.RightButton
+                                            if (rightClick
+                                                    && app.portfolioSelectionCount() > 1
+                                                    && app.portfolioSelectionContains(portfolioPositionDelegate.index)) {
+                                                app.selectedPortfolioIndex = portfolioPositionDelegate.index
+                                                app.schedulePortfolioDetailsLoad()
+                                            } else {
+                                                app.selectPortfolioIndex(portfolioPositionDelegate.index, mouse.modifiers)
+                                            }
                                             if (mouse.button === Qt.RightButton) {
                                                 console.log("Portfolio context menu open",
                                                             "index=", portfolioPositionDelegate.index,
@@ -923,8 +1004,7 @@ Window {
                                         }
                                         onDoubleClicked: function(mouse) {
                                             mouse.accepted = true
-                                            app.selectedPortfolioIndex = portfolioPositionDelegate.index
-                                            app.schedulePortfolioDetailsLoad()
+                                            app.setSinglePortfolioSelection(portfolioPositionDelegate.index)
                                             app.openPortfolioChartWindow(portfolioPositionDelegate.rowData)
                                         }
                                         onReleased: {
@@ -954,6 +1034,7 @@ Window {
                                             checkable: true
                                             checked: portfolioPositionDelegate.positionObserved
                                             enabled: !portfolioPositionDelegate.positionSold
+                                                && !portfolioPositionDelegate.multiplePositionsSelected
                                             onTriggered: {
                                                 console.log("Portfolio observed menu triggered",
                                                             "symbol=", portfolioPositionDelegate.rowData.symbol,
@@ -969,6 +1050,7 @@ Window {
                                         MenuItem {
                                             text: "Ändere Daten"
                                             enabled: !portfolioPositionDelegate.positionSold
+                                                && !portfolioPositionDelegate.multiplePositionsSelected
                                             onTriggered: portfolioWindow.openPositionEditDialog(
                                                 portfolioPositionDelegate.rowData)
                                         }
@@ -987,10 +1069,9 @@ Window {
                                             enabled: dbManager.ibkrConnected
                                                 && !dbManager.ibkrDataLoading
                                                 && !dbManager.ibkrGetStocksActive
-                                                && !portfolioPositionDelegate.positionSold
-                                            onTriggered: dbManager.startIbkrGetStocksForSymbols([
-                                                portfolioPositionDelegate.rowData.symbol
-                                            ])
+                                                && app.selectedPortfolioSymbols(portfolioPositionDelegate.rowData).length > 0
+                                            onTriggered: dbManager.startIbkrGetStocksForSymbols(
+                                                app.selectedPortfolioSymbols(portfolioPositionDelegate.rowData))
                                         }
 
                                         MenuItem {
@@ -1235,6 +1316,12 @@ Window {
                             to: Math.max(1, dbManager.ibkrGetStocksTotal)
                             value: dbManager.ibkrGetStocksDone
                             Layout.preferredWidth: 160
+                        }
+
+                        Button {
+                            text: "Stoppen"
+                            enabled: dbManager.ibkrGetStocksActive
+                            onClicked: dbManager.stopIbkrGetStocks()
                         }
 
                         Item {

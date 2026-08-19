@@ -590,7 +590,9 @@ Window {
                     color: positionManagementDialog.exchangeStatusText.indexOf("Fehler") >= 0
                         || positionManagementDialog.exchangeStatusText.indexOf("fehlgeschlagen") >= 0
                         ? "#b91c1c"
-                        : "#475569"
+                        : (positionManagementDialog.exchangeStatusText.indexOf("Warnung") >= 0
+                           ? "#b45309"
+                           : "#475569")
                     elide: Text.ElideRight
                     Layout.preferredWidth: 360
                 }

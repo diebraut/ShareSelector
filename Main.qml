@@ -38,7 +38,7 @@ ApplicationWindow {
     }
 
     function startupWindowWidth() {
-        return Math.round(startupScreenWidth() * 0.50)
+        return Math.round(startupScreenWidth() * 0.45)
     }
 
     function startupWindowHeight() {
@@ -55,7 +55,7 @@ ApplicationWindow {
 
     function applyPortfolioWindowGeometry() {
         const margin = startupMargin()
-        const horizontalSpacing = 8
+        const horizontalSpacing = 0
         const verticalSpacing = 40
         const left = x + width + horizontalSpacing
         const right = startupScreenX() + startupScreenWidth() - margin
@@ -126,6 +126,8 @@ ApplicationWindow {
     // Speichert das aktuell selektierte Symbol & Exchange
 
     property int selectedPortfolioIndex: -1
+    property var selectedPortfolioIndexes: []
+    property int portfolioSelectionAnchorIndex: -1
     property string portfolioSortKey: "gainPercent"
     property bool portfolioSortAscending: true
     property bool portfolioSortingActive: false
@@ -145,16 +147,19 @@ ApplicationWindow {
     property string portfolioStartInvest: ""
     property double portfolioLatestChangePercent: 0
     property double portfolioLatestChangeAmount: 0
+    property double portfolioDays10Percent: 0
     property double portfolioDays20Percent: 0
     property double portfolioDays40Percent: 0
     property double portfolioDays60Percent: 0
     property double portfolioDays90Percent: 0
     property int portfolioObservedCountValue: 0
     property double portfolioObservedCurrentAmount: 0
+    property double portfolioObservedEntryAmount: 0
     property double portfolioObservedGainAmount: 0
     property string portfolioObservedStartInvest: ""
     property double portfolioObservedLatestChangePercent: 0
     property double portfolioObservedLatestChangeAmount: 0
+    property double portfolioObservedDays10Percent: 0
     property double portfolioObservedDays20Percent: 0
     property double portfolioObservedDays40Percent: 0
     property double portfolioObservedDays60Percent: 0
@@ -447,7 +452,7 @@ ApplicationWindow {
 
     function quoteDetailsForStockAnalysisSymbol(symbol) {
         if (stockAnalysisConfigPanel.directSearchActive)
-            return dbManager.getQuoteDetailsForTradingDays(symbol, stockAnalysisDirectSearchTradingDays)
+            return dbManager.getQuoteDetailsForTradingDays(symbol, stockAnalysisQuoteCount)
         return dbManager.getQuoteDetails(symbol, 1, stockAnalysisQuoteCount)
     }
 
@@ -692,6 +697,9 @@ ApplicationWindow {
             } else if (portfolioSortKey === "gainPercent") {
                 valueA = Number(a.valueIncreasePercent || 0)
                 valueB = Number(b.valueIncreasePercent || 0)
+            } else if (portfolioSortKey === "days10ValueInc") {
+                valueA = Number(a.days10ValueInc || 0)
+                valueB = Number(b.days10ValueInc || 0)
             } else if (portfolioSortKey === "days20ValueInc") {
                 valueA = Number(a.days20ValueInc || 0)
                 valueB = Number(b.days20ValueInc || 0)
@@ -912,11 +920,14 @@ ApplicationWindow {
                 preferredIndex = index
         })
         portfolioModelVersion += 1
-        selectedPortfolioIndex = preferredIndex >= 0
+        const newSelectedIndex = preferredIndex >= 0
             ? preferredIndex
             : (scrollToTop && portfolioModel.count > 0
                 ? 0
                 : (portfolioModel.count > 0 ? 0 : -1))
+        selectedPortfolioIndex = newSelectedIndex
+        selectedPortfolioIndexes = newSelectedIndex >= 0 ? [newSelectedIndex] : []
+        portfolioSelectionAnchorIndex = newSelectedIndex
         if (preferredIndex >= 0) {
             Qt.callLater(function() {
                 portfolioWindow.positionListAtIndex(preferredIndex)
@@ -928,6 +939,87 @@ ApplicationWindow {
         }
         if (refreshDetails !== false)
             portfolioDetailsLoadTimer.restart()
+    }
+
+    function portfolioSelectionContains(index) {
+        return selectedPortfolioIndexes.indexOf(index) >= 0
+    }
+
+    function portfolioSelectionCount() {
+        return selectedPortfolioIndexes.length
+    }
+
+    function selectedPortfolioSymbols(fallbackRow) {
+        let symbols = []
+        if (selectedPortfolioIndexes.length > 1) {
+            selectedPortfolioIndexes.forEach(index => {
+                if (index >= 0 && index < portfolioModel.count) {
+                    const row = portfolioModel.get(index)
+                    if (!portfolioRowSold(row)) {
+                        const symbol = String(row.symbol || "").trim()
+                        if (symbol.length > 0 && symbols.indexOf(symbol) < 0)
+                            symbols.push(symbol)
+                    }
+                }
+            })
+        }
+
+        if (symbols.length === 0 && fallbackRow && !portfolioRowSold(fallbackRow)) {
+            const fallbackSymbol = String(fallbackRow.symbol || "").trim()
+            if (fallbackSymbol.length > 0)
+                symbols.push(fallbackSymbol)
+        }
+        return symbols
+    }
+
+    function setSinglePortfolioSelection(index, refreshDetails) {
+        selectedPortfolioIndex = index
+        selectedPortfolioIndexes = index >= 0 ? [index] : []
+        portfolioSelectionAnchorIndex = index
+        if (refreshDetails !== false)
+            schedulePortfolioDetailsLoad()
+    }
+
+    function setPortfolioRangeSelection(index) {
+        if (portfolioSelectionAnchorIndex < 0 || portfolioSelectionAnchorIndex >= portfolioModel.count) {
+            setSinglePortfolioSelection(index)
+            return
+        }
+
+        const start = Math.min(portfolioSelectionAnchorIndex, index)
+        const end = Math.max(portfolioSelectionAnchorIndex, index)
+        let indexes = []
+        for (let i = start; i <= end; i++)
+            indexes.push(i)
+        selectedPortfolioIndex = index
+        selectedPortfolioIndexes = indexes
+        schedulePortfolioDetailsLoad()
+    }
+
+    function togglePortfolioSelection(index) {
+        let indexes = selectedPortfolioIndexes.slice()
+        const existingIndex = indexes.indexOf(index)
+        if (existingIndex >= 0)
+            indexes.splice(existingIndex, 1)
+        else
+            indexes.push(index)
+        indexes.sort((a, b) => a - b)
+
+        selectedPortfolioIndex = index
+        selectedPortfolioIndexes = indexes
+        portfolioSelectionAnchorIndex = index
+        if (indexes.length === 0)
+            selectedPortfolioIndex = -1
+        schedulePortfolioDetailsLoad()
+    }
+
+    function selectPortfolioIndex(index, modifiers) {
+        if (modifiers & Qt.ShiftModifier)
+            setPortfolioRangeSelection(index)
+        else if (modifiers & Qt.ControlModifier)
+            togglePortfolioSelection(index)
+        else
+            setSinglePortfolioSelection(index)
     }
 
     function schedulePortfolioDetailsLoad() {
@@ -1001,10 +1093,12 @@ ApplicationWindow {
         let startInvest = ""
         let latestPreviousTotal = 0
         let latestChangeAmount = 0
+        let days10Weighted = 0
         let days20Weighted = 0
         let days40Weighted = 0
         let days60Weighted = 0
         let days90Weighted = 0
+        let days10Weight = 0
         let days20Weight = 0
         let days40Weight = 0
         let days60Weight = 0
@@ -1015,10 +1109,12 @@ ApplicationWindow {
         let observedStartInvest = ""
         let observedLatestPreviousTotal = 0
         let observedLatestChangeAmount = 0
+        let observedDays10Weighted = 0
         let observedDays20Weighted = 0
         let observedDays40Weighted = 0
         let observedDays60Weighted = 0
         let observedDays90Weighted = 0
+        let observedDays10Weight = 0
         let observedDays20Weight = 0
         let observedDays40Weight = 0
         let observedDays60Weight = 0
@@ -1059,8 +1155,17 @@ ApplicationWindow {
                     }
                 }
 
+                const days10 = Number(row.days10ValueInc)
+                if (!isNaN(days10) && currentValue > 0) {
+                    days10Weighted += currentValue * days10
+                    days10Weight += currentValue
+                    if (portfolioBoolValue(row.observed)) {
+                        observedDays10Weighted += currentValue * days10
+                        observedDays10Weight += currentValue
+                    }
+                }
                 const days20 = Number(row.days20ValueInc)
-                if (portfolioHeldAtLeast(row, 20) && !isNaN(days20) && currentValue > 0) {
+                if (!isNaN(days20) && currentValue > 0) {
                     days20Weighted += currentValue * days20
                     days20Weight += currentValue
                     if (portfolioBoolValue(row.observed)) {
@@ -1069,7 +1174,7 @@ ApplicationWindow {
                     }
                 }
                 const days40 = Number(row.days40ValueInc)
-                if (portfolioHeldAtLeast(row, 40) && !isNaN(days40) && currentValue > 0) {
+                if (!isNaN(days40) && currentValue > 0) {
                     days40Weighted += currentValue * days40
                     days40Weight += currentValue
                     if (portfolioBoolValue(row.observed)) {
@@ -1078,7 +1183,7 @@ ApplicationWindow {
                     }
                 }
                 const days60 = Number(row.days60ValueInc)
-                if (portfolioHeldAtLeast(row, 60) && !isNaN(days60) && currentValue > 0) {
+                if (!isNaN(days60) && currentValue > 0) {
                     days60Weighted += currentValue * days60
                     days60Weight += currentValue
                     if (portfolioBoolValue(row.observed)) {
@@ -1087,7 +1192,7 @@ ApplicationWindow {
                     }
                 }
                 const days90 = Number(row.days90ValueInc)
-                if (portfolioHeldAtLeast(row, 90) && !isNaN(days90) && currentValue > 0) {
+                if (!isNaN(days90) && currentValue > 0) {
                     days90Weighted += currentValue * days90
                     days90Weight += currentValue
                     if (portfolioBoolValue(row.observed)) {
@@ -1109,16 +1214,19 @@ ApplicationWindow {
         portfolioStartInvest = startInvest
         portfolioLatestChangeAmount = latestChangeAmount
         portfolioLatestChangePercent = latestPreviousTotal > 0 ? latestChangeAmount / latestPreviousTotal * 100 : 0
+        portfolioDays10Percent = days10Weight > 0 ? days10Weighted / days10Weight : 0
         portfolioDays20Percent = days20Weight > 0 ? days20Weighted / days20Weight : 0
         portfolioDays40Percent = days40Weight > 0 ? days40Weighted / days40Weight : 0
         portfolioDays60Percent = days60Weight > 0 ? days60Weighted / days60Weight : 0
         portfolioDays90Percent = days90Weight > 0 ? days90Weighted / days90Weight : 0
         portfolioObservedCountValue = observedCount
         portfolioObservedCurrentAmount = observedCurrentTotal
+        portfolioObservedEntryAmount = observedEntryTotal
         portfolioObservedGainAmount = observedCurrentTotal - observedEntryTotal
         portfolioObservedStartInvest = observedStartInvest
         portfolioObservedLatestChangeAmount = observedLatestChangeAmount
         portfolioObservedLatestChangePercent = observedLatestPreviousTotal > 0 ? observedLatestChangeAmount / observedLatestPreviousTotal * 100 : 0
+        portfolioObservedDays10Percent = observedDays10Weight > 0 ? observedDays10Weighted / observedDays10Weight : 0
         portfolioObservedDays20Percent = observedDays20Weight > 0 ? observedDays20Weighted / observedDays20Weight : 0
         portfolioObservedDays40Percent = observedDays40Weight > 0 ? observedDays40Weighted / observedDays40Weight : 0
         portfolioObservedDays60Percent = observedDays60Weight > 0 ? observedDays60Weighted / observedDays60Weight : 0
@@ -1154,6 +1262,10 @@ ApplicationWindow {
         return portfolioTotalEntryAmount > 0 ? portfolioTotalGainAmount / portfolioTotalEntryAmount * 100 : 0
     }
 
+    function portfolioObservedPerformancePercent() {
+        return portfolioObservedEntryAmount > 0 ? portfolioObservedGainAmount / portfolioObservedEntryAmount * 100 : 0
+    }
+
     function portfolioPositionQuantity(row) {
         let candidates = ["quantity", "Quantity", "amount", "Amount", "shares", "Shares", "count", "Count", "anzahl", "Anzahl"]
         for (let i = 0; i < candidates.length; i++) {
@@ -1181,8 +1293,11 @@ ApplicationWindow {
         return isNaN(numberValue) ? "-" : numberValue.toLocaleString(Qt.locale(), "f", 2) + " %"
     }
 
-    function portfolioTwentyDayTrendColor(value) {
-        const target = 3.27
+    function portfolioDayTrendColor(value, days) {
+        const tradingDaysPerYear = 252
+        const annualTargetPercent = 75
+        const target = (Math.pow(1 + annualTargetPercent / 100,
+                                 Number(days || 20) / tradingDaysPerYear) - 1) * 100
         const numberValue = Number(value)
         if (isNaN(numberValue))
             return "#475569"
@@ -1211,6 +1326,10 @@ ApplicationWindow {
             blend(28, 29) / 255,
             1
         )
+    }
+
+    function portfolioTwentyDayTrendColor(value) {
+        return portfolioDayTrendColor(value, 20)
     }
 
     function portfolioSignedPercentColor(value) {
@@ -2245,6 +2364,7 @@ ApplicationWindow {
         const analysisConfigName = currentStockAnalysisConfigName()
         let exchanged = 0
         let failed = 0
+        let warnings = []
         let removedAnalysis = 0
         let successfulIndexes = []
         let boughtSymbols = []
@@ -2252,12 +2372,22 @@ ApplicationWindow {
         pairs.forEach(pair => {
             const buy = pair.buy || ({})
             const sell = pair.sell || ({})
+            const buySymbol = String(buy.symbol || "").trim()
+            const sellSymbol = String(sell.symbol || "").trim()
+
+            if (buySymbol.length > 0 && dbManager.isBoughtStock(buySymbol)) {
+                warnings.push("Warnung: " + buySymbol + " ist bereits aktiv im Depot. Austausch "
+                              + (sellSymbol || "?") + " -> " + buySymbol + " wurde uebersprungen.")
+                failed++
+                return
+            }
+
             const sellQuantity = portfolioPositionQuantity(sell)
             const sellCurrentValue = Number(sell.currentValue || sell.lastcloseprice || 0)
             const amount = Number(sell.totalValue || 0) > 0
                 ? Number(sell.totalValue || 0)
                 : sellCurrentValue * sellQuantity
-            let entryPrice = Number(dbManager.closePriceOnOrBefore(buy.symbol || "", buyDate) || 0)
+            let entryPrice = Number(dbManager.closePriceOnOrBefore(buySymbol, buyDate) || 0)
             if (entryPrice <= 0)
                 entryPrice = Number(buy.value || 0)
             const currentValue = Number(buy.value || entryPrice)
@@ -2275,8 +2405,8 @@ ApplicationWindow {
             }
 
             const ok = dbManager.exchangeBoughtStock(
-                sell.symbol || "",
-                buy.symbol || "",
+                sellSymbol,
+                buySymbol,
                 buy.name || buy.symbol || "",
                 buyDate,
                 currentValue,
@@ -2304,10 +2434,13 @@ ApplicationWindow {
         stockAnalysisMessage = exchanged + " Aktien ausgetauscht"
             + (failed > 0 ? ", " + failed + " fehlgeschlagen" : "")
             + (removedAnalysis > 0 ? ", " + removedAnalysis + " aus Analyse entfernt" : "")
+        const exchangeSummary = exchanged + " Aktien ausgetauscht"
+            + (failed > 0 ? ", " + failed + " fehlgeschlagen" : "")
         positionManagementDialog.setExchangeStatus(
             false,
-            exchanged + " Aktien ausgetauscht"
-                + (failed > 0 ? ", " + failed + " fehlgeschlagen" : "")
+            warnings.length > 0
+                ? exchangeSummary + ". " + warnings.join(" ")
+                : exchangeSummary
         )
     }
 

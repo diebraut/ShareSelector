@@ -12,7 +12,7 @@ GroupBox {
     property alias directSearchIsinText: directSearchIsinInput.text
     property alias directSearchNameText: directSearchNameInput.text
     property bool directSearchActive: directSearchActivateCheckBox.checked
-    property var directSearchTradingDayValues: [20, 40, 60, 90]
+    property var directSearchTradingDayValues: [10, 20, 30, 40, 50, 60, 70, 80, 90]
     function directSearchTradingDayIndex(days) {
         let normalizedDays = Number(days || 90)
         for (let i = 0; i < directSearchTradingDayValues.length; i++) {
@@ -328,7 +328,7 @@ GroupBox {
 
                                     Slider {
                                         id: stockAnalysisQuoteCountSlider
-                                        enabled: !directSearchActive
+                                        enabled: true
                                         from: 10
                                         to: 90
                                         stepSize: 10
@@ -531,19 +531,19 @@ GroupBox {
                                                 Slider {
                                                     id: directSearchTradingDaySlider
                                                     from: 0
-                                                    to: 3
+                                                    to: stockAnalysisSearchParametersGroupBox.directSearchTradingDayValues.length - 1
                                                     stepSize: 1
                                                     snapMode: Slider.SnapAlways
                                                     live: true
-                                                    value: stockAnalysisSearchParametersGroupBox.directSearchTradingDayIndex(app.stockAnalysisDirectSearchTradingDays)
+                                                    value: stockAnalysisSearchParametersGroupBox.directSearchTradingDayIndex(app.stockAnalysisQuoteCount)
                                                     Layout.fillWidth: true
-                                                    onMoved: app.setDirectSearchTradingDays(
+                                                    onMoved: app.setStockAnalysisQuoteCount(
                                                         stockAnalysisSearchParametersGroupBox.directSearchTradingDayValues[Math.round(value)],
                                                         false
                                                     )
                                                     onPressedChanged: {
                                                         if (!pressed)
-                                                            app.setDirectSearchTradingDays(
+                                                            app.setStockAnalysisQuoteCount(
                                                                 stockAnalysisSearchParametersGroupBox.directSearchTradingDayValues[Math.round(value)],
                                                                 true
                                                             )
@@ -551,7 +551,7 @@ GroupBox {
                                                 }
 
                                                 Label {
-                                                    text: Number(app.stockAnalysisDirectSearchTradingDays || 90).toFixed(0)
+                                                    text: Number(app.stockAnalysisQuoteCount || 90).toFixed(0)
                                                     Layout.preferredWidth: 34
                                                     horizontalAlignment: Text.AlignRight
                                                     verticalAlignment: Text.AlignVCenter
