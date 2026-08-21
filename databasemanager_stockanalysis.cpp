@@ -25,7 +25,6 @@ QVariantList DatabaseManager::getQuoteDetails(const QString &symbol, int fromDay
             SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY "ClosePrice"::double precision) AS median_close
             FROM "Quotes"
             WHERE "Symbol" = :symbol
-              AND COALESCE("Volume", 0) > 0
               AND COALESCE("ClosePrice", 0) > 0
         ),
         ordered_quotes AS (
@@ -41,7 +40,6 @@ QVariantList DatabaseManager::getQuoteDetails(const QString &symbol, int fromDay
                 LAG("ClosePrice") OVER (PARTITION BY "Symbol" ORDER BY "CloseDate" ASC) AS previousClosePrice
             FROM "Quotes", symbol_median
             WHERE "Symbol" = :symbol
-              AND COALESCE("Volume", 0) > 0
               AND COALESCE("ClosePrice", 0) > 0
               AND (
                   symbol_median.median_close IS NULL
@@ -104,14 +102,12 @@ QVariantList DatabaseManager::getQuoteDetailsForTradingDays(const QString &symbo
             SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY "ClosePrice"::double precision) AS median_close
             FROM "Quotes"
             WHERE "Symbol" = :symbol
-              AND COALESCE("Volume", 0) > 0
               AND COALESCE("ClosePrice", 0) > 0
         ),
         valid_quotes AS (
             SELECT q.*
             FROM "Quotes" q, symbol_median
             WHERE q."Symbol" = :symbol
-              AND COALESCE(q."Volume", 0) > 0
               AND COALESCE(q."ClosePrice", 0) > 0
               AND (
                   symbol_median.median_close IS NULL
@@ -205,8 +201,7 @@ QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent,
                 "Symbol",
                 percentile_cont(0.5) WITHIN GROUP (ORDER BY "ClosePrice"::double precision) AS median_close
             FROM "Quotes"
-            WHERE COALESCE("Volume", 0) > 0
-              AND COALESCE("ClosePrice", 0) > 0
+            WHERE COALESCE("ClosePrice", 0) > 0
             GROUP BY "Symbol"
         ),
         recent_quotes AS (
@@ -215,8 +210,7 @@ QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent,
                 ROW_NUMBER() OVER (PARTITION BY q."Symbol" ORDER BY q."CloseDate" DESC) AS rn_desc
             FROM "Quotes" q
             INNER JOIN quote_medians qm ON qm."Symbol" = q."Symbol"
-            WHERE COALESCE(q."Volume", 0) > 0
-              AND COALESCE(q."ClosePrice", 0) > 0
+            WHERE COALESCE(q."ClosePrice", 0) > 0
               AND q."ClosePrice"::double precision BETWEEN qm.median_close / 20.0
                                                        AND qm.median_close * 20.0
         ),
@@ -335,7 +329,6 @@ QVariantList DatabaseManager::getStockAnalysisIbkrSymbols()
               SELECT 1
               FROM "Quotes" q
               WHERE q."Symbol" = s."Symbol"
-                AND COALESCE(q."Volume", 0) > 0
                 AND COALESCE(q."ClosePrice", 0) > 0
           )
         ORDER BY s."Symbol"
@@ -444,7 +437,6 @@ QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, do
                 percentile_cont(0.5) WITHIN GROUP (ORDER BY "ClosePrice"::double precision) AS median_close
             FROM "Quotes"
             WHERE "Symbol" = :symbol
-              AND COALESCE("Volume", 0) > 0
               AND COALESCE("ClosePrice", 0) > 0
         ),
         recent_quotes AS (
@@ -453,7 +445,6 @@ QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, do
                 ROW_NUMBER() OVER (PARTITION BY q."Symbol" ORDER BY q."CloseDate" DESC) AS rn_desc
             FROM "Quotes" q, quote_median
             WHERE q."Symbol" = :symbol
-              AND COALESCE(q."Volume", 0) > 0
               AND COALESCE(q."ClosePrice", 0) > 0
               AND q."ClosePrice"::double precision BETWEEN quote_median.median_close / 20.0
                                                        AND quote_median.median_close * 20.0

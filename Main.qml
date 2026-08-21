@@ -607,21 +607,24 @@ ApplicationWindow {
         running: false
         repeat: false
         onTriggered: {
-            rebuildPortfolioModel(portfolioPendingFilterSymbol, true, true)
-            portfolioUpdateDoneTimer.restart()
+            loadTestPortfolio(portfolioPendingFilterSymbol, true)
         }
     }
 
     Connections {
         target: dbManager
         function onIbkrStockDataUpdated(symbol) {
-            refreshStockAnalysisResultQuotes(symbol)
-            if (dbManager.ibkrGetStocksActive)
+            const normalizedSymbol = String(symbol || "").trim()
+            if (normalizedSymbol.length === 0)
                 return
-            loadTestPortfolio(symbol)
+
+            refreshStockAnalysisResultQuotes(normalizedSymbol)
+            refreshPortfolioRow(normalizedSymbol)
         }
         function onFundamentalDataUpdated(symbol) {
-            loadTestPortfolio(symbol)
+            const normalizedSymbol = String(symbol || "").trim()
+            if (normalizedSymbol.length > 0)
+                refreshPortfolioRow(normalizedSymbol)
         }
     }
 
@@ -663,6 +666,49 @@ ApplicationWindow {
         if (preserveView && previousContentY >= 0)
             portfolioWindow.restorePortfolioListContentY(previousContentY)
         portfolioUpdateDoneTimer.restart()
+    }
+
+    function refreshPortfolioRow(symbol) {
+        const normalizedSymbol = String(symbol || "").trim()
+        if (normalizedSymbol.length === 0)
+            return false
+
+        const updatedRow = dbManager.getTestPortfolioSummaryForSymbol(normalizedSymbol)
+        if (!updatedRow || String(updatedRow.symbol || "").trim().length === 0)
+            return false
+
+        let rowsUpdated = 0
+        for (let i = 0; i < portfolioRows.length; i++) {
+            if (String(portfolioRows[i].symbol || "").trim() === normalizedSymbol) {
+                portfolioRows[i] = Object.assign({}, portfolioRows[i], updatedRow)
+                rowsUpdated++
+            }
+        }
+
+        let modelRowsUpdated = 0
+        for (let modelIndex = 0; modelIndex < portfolioModel.count; modelIndex++) {
+            const modelRow = portfolioModel.get(modelIndex)
+            if (String(modelRow.symbol || "").trim() === normalizedSymbol) {
+                Object.keys(updatedRow).forEach(key => {
+                    portfolioModel.setProperty(modelIndex, key, updatedRow[key])
+                })
+                portfolioModel.setProperty(modelIndex, "rowUpdateVersion", Number(modelRow.rowUpdateVersion || 0) + 1)
+                modelRowsUpdated++
+            }
+        }
+
+        if (rowsUpdated > 0 || modelRowsUpdated > 0) {
+            updatePortfolioTotals()
+            if (selectedPortfolioIndex >= 0 && selectedPortfolioIndex < portfolioModel.count) {
+                const selectedRow = portfolioModel.get(selectedPortfolioIndex)
+                if (String(selectedRow.symbol || "").trim() === normalizedSymbol)
+                    schedulePortfolioDetailsLoad()
+            }
+            portfolioUpdateDoneTimer.restart()
+            return true
+        }
+
+        return false
     }
 
     function sortedPortfolioRows() {
@@ -915,6 +961,7 @@ ApplicationWindow {
         portfolioModel.clear()
         let preferredIndex = -1
         sortedPortfolioRows().forEach((item, index) => {
+            item.rowUpdateVersion = Number(item.rowUpdateVersion || 0) + 1
             portfolioModel.append(item)
             if (preferredSymbol && item.symbol === preferredSymbol)
                 preferredIndex = index
@@ -935,6 +982,10 @@ ApplicationWindow {
         } else if (scrollToTop) {
             Qt.callLater(function() {
                 portfolioWindow.positionListAtBeginning()
+            })
+        } else {
+            Qt.callLater(function() {
+                portfolioWindow.refreshPortfolioListLayout()
             })
         }
         if (refreshDetails !== false)
@@ -970,6 +1021,17 @@ ApplicationWindow {
                 symbols.push(fallbackSymbol)
         }
         return symbols
+    }
+
+    function getPortfolioQuotesForRows(row) {
+        const symbols = selectedPortfolioSymbols(row)
+        if (symbols.length === 0)
+            return
+
+        if (symbols.length === 1)
+            dbManager.getIbkrQuotesForSingleStock(symbols[0])
+        else
+            dbManager.startIbkrGetStocksForSymbols(symbols)
     }
 
     function setSinglePortfolioSelection(index, refreshDetails) {
@@ -2807,7 +2869,5 @@ ApplicationWindow {
         app: mainWindow
         dbManager: mainWindow.dbManager
     }
-
-
 
 }

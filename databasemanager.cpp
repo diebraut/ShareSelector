@@ -61,9 +61,13 @@ DatabaseManager::DatabaseManager(QObject *parent) : QObject(parent)
             setIbkrConnectionState(
                 QStringLiteral("Die Verbindung zu IBKR TWS/IB Gateway wurde getrennt."),
                 false,
-                false);
+            false);
         }
     });
+    m_ibkrConnectionProbeTimer.setInterval(10000);
+    connect(&m_ibkrConnectionProbeTimer, &QTimer::timeout, this, &DatabaseManager::pollIbkrConnectionState);
+    m_ibkrConnectionProbeTimer.start();
+    QTimer::singleShot(1000, this, &DatabaseManager::pollIbkrConnectionState);
 
     m_ibkrDataTimeout.setSingleShot(true);
     m_ibkrDataTimeout.setInterval(25000);
@@ -79,9 +83,17 @@ DatabaseManager::DatabaseManager(QObject *parent) : QObject(parent)
             QStringLiteral("Fehler: Zeitüberschreitung beim Abruf der IBKR-Daten."),
             m_ibkrConnected,
             false);
-        if (m_pendingIbkrProcessIsHistoricalQuotes || m_pendingIbkrProcessIsQuoteExchangeProbe) {
+        if (m_pendingIbkrProcessIsHistoricalQuotes
+            || m_pendingIbkrProcessIsQuoteExchangeProbe
+            || m_pendingIbkrProcessIsMarketSnapshot) {
+            if (m_pendingIbkrProcessIsMarketSnapshot
+                && retryIbkrQuoteSnapshotSmartFallback(QStringLiteral("Timeout"))) {
+                emit ibkrConnectionChanged();
+                return;
+            }
             m_pendingIbkrProcessIsHistoricalQuotes = false;
             m_pendingIbkrProcessIsQuoteExchangeProbe = false;
+            m_pendingIbkrProcessIsMarketSnapshot = false;
             updateIbkrQuoteExchangeFailure(timedOutSymbol, QStringLiteral("Timeout"));
             if (m_ibkrGetStocksBatchActive) {
                 ++m_ibkrGetStocksFailureCount;
@@ -106,6 +118,7 @@ DatabaseManager::DatabaseManager(QObject *parent) : QObject(parent)
             m_pendingIbkrQuotesFallbackIndex = 0;
             m_pendingIbkrQuotesSupportsSmart = false;
             m_pendingIbkrQuotesForceDirectProbeResult = false;
+            m_pendingIbkrQuotesSmartHistoricalRetry = false;
             m_ibkrPendingSymbol.clear();
             m_ibkrDataTimeout.setInterval(25000);
             if (m_ibkrGetStocksBatchActive)
@@ -157,9 +170,17 @@ DatabaseManager::DatabaseManager(QObject *parent) : QObject(parent)
             QStringLiteral("Fehler: Der IBKR-Helfer konnte nicht gestartet werden."),
             m_ibkrConnected,
             false);
-        if (m_pendingIbkrProcessIsHistoricalQuotes || m_pendingIbkrProcessIsQuoteExchangeProbe) {
+        if (m_pendingIbkrProcessIsHistoricalQuotes
+            || m_pendingIbkrProcessIsQuoteExchangeProbe
+            || m_pendingIbkrProcessIsMarketSnapshot) {
+            if (m_pendingIbkrProcessIsMarketSnapshot
+                && retryIbkrQuoteSnapshotSmartFallback(QStringLiteral("IBKR-Helfer konnte nicht gestartet werden"))) {
+                emit ibkrConnectionChanged();
+                return;
+            }
             m_pendingIbkrProcessIsHistoricalQuotes = false;
             m_pendingIbkrProcessIsQuoteExchangeProbe = false;
+            m_pendingIbkrProcessIsMarketSnapshot = false;
             updateIbkrQuoteExchangeFailure(m_ibkrPendingSymbol, QStringLiteral("IBKR-Helfer konnte nicht gestartet werden"));
             if (m_ibkrGetStocksBatchActive) {
                 ++m_ibkrGetStocksFailureCount;
@@ -184,6 +205,7 @@ DatabaseManager::DatabaseManager(QObject *parent) : QObject(parent)
             m_pendingIbkrQuotesFallbackIndex = 0;
             m_pendingIbkrQuotesSupportsSmart = false;
             m_pendingIbkrQuotesForceDirectProbeResult = false;
+            m_pendingIbkrQuotesSmartHistoricalRetry = false;
             m_ibkrPendingSymbol.clear();
             m_ibkrDataTimeout.setInterval(25000);
             if (m_ibkrGetStocksBatchActive)

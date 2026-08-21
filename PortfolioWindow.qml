@@ -35,13 +35,21 @@ Window {
     }
 
     function positionListAtBeginning() {
-        portfolioListView.positionViewAtBeginning()
+        Qt.callLater(function() {
+            portfolioListView.forceLayout()
+            portfolioListView.positionViewAtBeginning()
+            portfolioWindow.clampPortfolioListContentY()
+        })
     }
 
     function positionListAtIndex(index) {
         if (index < 0)
             return
-        portfolioListView.positionViewAtIndex(index, ListView.Beginning)
+        Qt.callLater(function() {
+            portfolioListView.forceLayout()
+            portfolioListView.positionViewAtIndex(index, ListView.Beginning)
+            portfolioWindow.clampPortfolioListContentY()
+        })
     }
 
     function portfolioListContentY() {
@@ -50,9 +58,22 @@ Window {
 
     function restorePortfolioListContentY(contentY) {
         Qt.callLater(function() {
+            portfolioListView.forceLayout()
             const maxY = Math.max(0, portfolioListView.contentHeight - portfolioListView.height)
             portfolioListView.contentY = Math.max(0, Math.min(contentY, maxY))
         })
+    }
+
+    function refreshPortfolioListLayout() {
+        Qt.callLater(function() {
+            portfolioListView.forceLayout()
+            portfolioWindow.clampPortfolioListContentY()
+        })
+    }
+
+    function clampPortfolioListContentY() {
+        const maxY = Math.max(0, portfolioListView.contentHeight - portfolioListView.height)
+        portfolioListView.contentY = Math.max(0, Math.min(portfolioListView.contentY, maxY))
     }
 
     function openPositionEditDialog(row) {
@@ -698,15 +719,15 @@ Window {
                                     anchors.fill: parent
                                     clip: true
                                     model: app.portfolioListModel
-                                    currentIndex: app.selectedPortfolioIndex
                                     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
                                     delegate: Rectangle {
                                         id: portfolioPositionDelegate
                                         required property int index
-                                        property int modelVersion: app.portfolioModelVersion
+                                        required property var rowUpdateVersion
+                                        property int rowVersion: Number(rowUpdateVersion || 0)
                                         property var rowData: {
-                                            modelVersion
+                                            rowVersion
                                             return app.portfolioListModel && portfolioPositionDelegate.index >= 0
                                                 ? app.portfolioListModel.get(portfolioPositionDelegate.index)
                                                 : ({})
@@ -1070,8 +1091,8 @@ Window {
                                                 && !dbManager.ibkrDataLoading
                                                 && !dbManager.ibkrGetStocksActive
                                                 && app.selectedPortfolioSymbols(portfolioPositionDelegate.rowData).length > 0
-                                            onTriggered: dbManager.startIbkrGetStocksForSymbols(
-                                                app.selectedPortfolioSymbols(portfolioPositionDelegate.rowData))
+                                            onTriggered: app.getPortfolioQuotesForRows(
+                                                portfolioPositionDelegate.rowData)
                                         }
 
                                         MenuItem {

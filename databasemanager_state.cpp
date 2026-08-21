@@ -85,7 +85,8 @@ bool DatabaseManager::ibkrGetStocksActive() const
 {
     return m_ibkrGetStocksBatchActive
         || m_pendingIbkrProcessIsHistoricalQuotes
-        || m_pendingIbkrProcessIsQuoteExchangeProbe;
+        || m_pendingIbkrProcessIsQuoteExchangeProbe
+        || m_pendingIbkrProcessIsMarketSnapshot;
 }
 
 QString DatabaseManager::ibkrGetStocksBatchName() const

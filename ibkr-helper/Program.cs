@@ -39,6 +39,10 @@ var exchanges = (Argument(args, "--exchanges") ?? string.Empty)
     .ToArray();
 var daysText = Argument(args, "--days")?.Trim() ?? string.Empty;
 var days = int.TryParse(daysText, out var parsedDays) ? parsedDays : 90;
+var timeoutSecondsText = Argument(args, "--timeout-seconds")?.Trim() ?? string.Empty;
+var timeoutSeconds = int.TryParse(timeoutSecondsText, out var parsedTimeoutSeconds)
+    ? Math.Max(1, parsedTimeoutSeconds)
+    : 0;
 
 if ((string.IsNullOrWhiteSpace(symbol) && conId <= 0)
     || !int.TryParse(Argument(args, "--port"), out var port)
@@ -47,8 +51,11 @@ if ((string.IsNullOrWhiteSpace(symbol) && conId <= 0)
     return 2;
 }
 
+var defaultTimeoutSeconds = probeQuoteExchanges
+    ? Math.Max(75, exchanges.Length * 25)
+    : ((historicalQuotes || marketSnapshot) ? 75 : 20);
 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(
-    probeQuoteExchanges ? Math.Max(75, exchanges.Length * 25) : ((historicalQuotes || marketSnapshot) ? 75 : 20)));
+    timeoutSeconds > 0 ? timeoutSeconds : defaultTimeoutSeconds));
 var wrapper = new ContractDetailsWrapper(RequestId,
                                          symbol ?? string.Empty,
                                          currency,
@@ -97,19 +104,23 @@ try {
         wrapper.StartQuoteExchangeProbe();
         Console.Error.WriteLine($"Quote exchange probe requested for {symbol}/{conId}: {string.Join(",", exchanges)}.");
     } else if (historicalQuotes) {
+        var requestedDays = Math.Max(1, days);
+        var duration = requestedDays > 365
+            ? $"{Math.Max(1, (int)Math.Ceiling(requestedDays / 365.0))} Y"
+            : $"{requestedDays} D";
         client.reqHistoricalData(RequestId,
                                  wrapper.CreateCurrentContract(),
                                  string.Empty,
-                                 $"{Math.Max(1, days)} D",
+                                 duration,
                                  "1 day",
                                  "TRADES",
                                  1,
                                  1,
                                  false,
                                  []);
-        Console.Error.WriteLine($"Historical quotes requested for {symbol}/{conId}, days={days}.");
+        Console.Error.WriteLine($"Historical quotes requested for {symbol}/{conId}, days={days}, duration={duration}.");
     } else if (marketSnapshot) {
-        client.reqMarketDataType(1);
+        client.reqMarketDataType(3);
         client.reqMktData(RequestId,
                           wrapper.CreateCurrentContract(),
                           string.Empty,
@@ -166,8 +177,11 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
     private readonly List<HistoricalBar> historicalBars = [];
     private readonly List<HistoricalBar> currentProbeBars = [];
     private readonly List<QuoteExchangeProbeResult> quoteExchangeProbeResults = [];
+    private readonly List<int> snapshotMarketDataTypes = [];
     private readonly Dictionary<string, double> snapshotPrices = [];
     private readonly Dictionary<string, long> snapshotSizes = [];
+    private readonly object snapshotLock = new();
+    private bool snapshotCompletionQueued;
     private bool usingIsinRequest;
     private bool retriedSymbolRequest;
     private int currentProbeIndex;
@@ -302,7 +316,21 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
         if (tickerId != requestId || !marketSnapshot || price <= 0)
             return;
 
-        snapshotPrices[TickFieldName(field)] = price;
+        lock (snapshotLock) {
+            snapshotPrices[TickFieldName(field)] = price;
+        }
+        QueueSnapshotCompletionIfUsable();
+    }
+
+    public override void marketDataType(int reqId, int marketDataType)
+    {
+        if (reqId != requestId || !marketSnapshot)
+            return;
+
+        lock (snapshotLock) {
+            snapshotMarketDataTypes.Add(marketDataType);
+        }
+        Console.Error.WriteLine($"Market data type for {requestedSymbol}/{requestedConId}: {marketDataType}.");
     }
 
     public override void tickSize(int tickerId, int field, decimal size)
@@ -310,7 +338,9 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
         if (tickerId != requestId || !marketSnapshot)
             return;
 
-        snapshotSizes[TickFieldName(field)] = decimal.ToInt64(size);
+        lock (snapshotLock) {
+            snapshotSizes[TickFieldName(field)] = decimal.ToInt64(size);
+        }
     }
 
     public override void tickSnapshotEnd(int reqId)
@@ -318,29 +348,7 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
         if (reqId != requestId || !marketSnapshot)
             return;
 
-        var last = SnapshotValue("LAST") ?? SnapshotValue("DELAYED_LAST");
-        var bid = SnapshotValue("BID") ?? SnapshotValue("DELAYED_BID");
-        var ask = SnapshotValue("ASK") ?? SnapshotValue("DELAYED_ASK");
-        var close = SnapshotValue("CLOSE") ?? SnapshotValue("DELAYED_CLOSE");
-        double? mid = bid.HasValue && ask.HasValue ? (bid.Value + ask.Value) / 2.0 : null;
-        var selected = last ?? mid ?? close ?? bid ?? ask;
-
-        Result.TrySetResult(new {
-            success = selected.HasValue,
-            message = selected.HasValue
-                ? $"IBKR-Snapshot fuer {requestedSymbol} wurde empfangen."
-                : $"IBKR lieferte keinen verwertbaren Snapshot fuer {requestedSymbol}.",
-            data = new {
-                selected,
-                last,
-                bid,
-                ask,
-                mid,
-                close,
-                prices = snapshotPrices,
-                sizes = snapshotSizes
-            }
-        });
+        CompleteSnapshot();
     }
 
     public void StartQuoteExchangeProbe()
@@ -488,14 +496,8 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
             }
 
             if (marketSnapshot && errorCode is 10090 or 10167 or 10186 or 354) {
-                Result.TrySetResult(new {
-                    success = false,
-                    message = $"IBKR-Fehler {errorCode}: {errorMsg}",
-                    data = new {
-                        prices = snapshotPrices,
-                        sizes = snapshotSizes
-                    }
-                });
+                // IBKR may still deliver delayed snapshot ticks after these permission warnings.
+                // Keep the request alive so tickSnapshotEnd can select live or DELAYED_* values.
                 return;
             }
 
@@ -576,6 +578,77 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
     private double? SnapshotValue(string key)
     {
         return snapshotPrices.TryGetValue(key, out var value) && value > 0 ? value : null;
+    }
+
+    private void QueueSnapshotCompletionIfUsable()
+    {
+        lock (snapshotLock) {
+            if (snapshotCompletionQueued || !HasUsableSnapshotLocked())
+                return;
+            snapshotCompletionQueued = true;
+        }
+
+        _ = Task.Run(async () => {
+            await Task.Delay(250);
+            CompleteSnapshot();
+        });
+    }
+
+    private bool HasUsableSnapshotLocked()
+    {
+        return SnapshotValue("LAST").HasValue
+            || SnapshotValue("DELAYED_LAST").HasValue
+            || SnapshotValue("CLOSE").HasValue
+            || SnapshotValue("DELAYED_CLOSE").HasValue
+            || SnapshotValue("BID").HasValue
+            || SnapshotValue("DELAYED_BID").HasValue
+            || SnapshotValue("ASK").HasValue
+            || SnapshotValue("DELAYED_ASK").HasValue;
+    }
+
+    private void CompleteSnapshot()
+    {
+        double? last;
+        double? bid;
+        double? ask;
+        double? close;
+        int[] marketDataTypes;
+        Dictionary<string, double> prices;
+        Dictionary<string, long> sizes;
+
+        lock (snapshotLock) {
+            last = SnapshotValue("LAST") ?? SnapshotValue("DELAYED_LAST");
+            bid = SnapshotValue("BID") ?? SnapshotValue("DELAYED_BID");
+            ask = SnapshotValue("ASK") ?? SnapshotValue("DELAYED_ASK");
+            close = SnapshotValue("CLOSE") ?? SnapshotValue("DELAYED_CLOSE");
+            marketDataTypes = snapshotMarketDataTypes.Distinct().ToArray();
+            prices = new Dictionary<string, double>(snapshotPrices);
+            sizes = new Dictionary<string, long>(snapshotSizes);
+        }
+
+        double? mid = bid.HasValue && ask.HasValue ? (bid.Value + ask.Value) / 2.0 : null;
+        var selected = last ?? mid ?? close ?? bid ?? ask;
+
+        if (selected.HasValue)
+            Client?.cancelMktData(requestId);
+
+        Result.TrySetResult(new {
+            success = selected.HasValue,
+            message = selected.HasValue
+                ? $"IBKR-Snapshot fuer {requestedSymbol} wurde empfangen."
+                : $"IBKR lieferte keinen verwertbaren Snapshot fuer {requestedSymbol}.",
+            data = new {
+                selected,
+                last,
+                bid,
+                ask,
+                mid,
+                close,
+                marketDataTypes,
+                prices,
+                sizes
+            }
+        });
     }
 
     private static string TickFieldName(int field)

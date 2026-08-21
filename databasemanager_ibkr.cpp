@@ -27,6 +27,32 @@ QString csvField(QString value)
     return QStringLiteral("\"%1\"").arg(value);
 }
 
+bool updateActiveBoughtStockCurrentValue(QSqlDatabase &db, const QString &symbol, double currentValue)
+{
+    const QString normalizedSymbol = symbol.trimmed();
+    if (normalizedSymbol.isEmpty() || currentValue <= 0.0)
+        return true;
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        UPDATE "BoughtStocks"
+        SET
+            "CurrentValue" = :currentValue,
+            "ValueIncreasePercent" = CASE
+                WHEN NULLIF("EntryValue", 0) IS NULL THEN "ValueIncreasePercent"
+                ELSE ROUND(((CAST(:currentValue AS numeric) - "EntryValue") / NULLIF("EntryValue", 0) * 100)::numeric, 2)
+            END,
+            "UpdatedAt" = CURRENT_TIMESTAMP
+        WHERE "DepotId" = 1
+          AND "Symbol" = :symbol
+          AND "SellDate" IS NULL
+          AND COALESCE("Status", 0) <> 10
+    )SQL");
+    query.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
+    query.bindValue(QStringLiteral(":currentValue"), currentValue);
+    return query.exec();
+}
+
 void appendIbkrQuoteTimingLog(const QString &symbol,
                               const QString &phase,
                               qint64 elapsedMs,
@@ -36,7 +62,7 @@ void appendIbkrQuoteTimingLog(const QString &symbol,
                               const QString &message)
 {
     const QString logPath = QDir(QCoreApplication::applicationDirPath())
-        .filePath(QStringLiteral("ibkr_quote_timings.csv"));
+    .filePath(QStringLiteral("ibkr_quote_timings.csv"));
     const bool writeHeader = !QFileInfo::exists(logPath) || QFileInfo(logPath).size() == 0;
     QFile file(logPath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
@@ -65,19 +91,15 @@ QDate mostRecentWeekday(const QDate &date)
         result = result.addDays(-1);
     return result;
 }
+
 }
 void DatabaseManager::startIbkrBatch()
 {
     if (m_ibkrBatchActive || m_ibkrDataLoading || m_ibkrNameCheckBatchActive)
         return;
 
-    if (!m_ibkrConnected || m_ibkrConnectedPort == 0) {
-        setIbkrConnectionState(
-            QStringLiteral("Fehler: Zuerst eine Verbindung zu IBKR herstellen."),
-            false,
-            false);
+    if (!refreshIbkrConnectionState(QStringLiteral("IBKR-Stammdaten-Batch")))
         return;
-    }
 
     if (!db.isOpen()) {
         setIbkrConnectionState(QStringLiteral("Fehler: Datenbank ist nicht verbunden."), m_ibkrConnected, false);
@@ -180,15 +202,42 @@ void DatabaseManager::startIbkrGetAllStocks()
     startIbkrGetStocksBatch(false);
 }
 
+void DatabaseManager::getIbkrQuotesForSingleStock(const QString &symbol)
+{
+    const QString normalizedSymbol = symbol.trimmed();
+
+    if (normalizedSymbol.isEmpty()) {
+        setIbkrConnectionState(QStringLiteral("Get Quotes: Keine Aktie ausgewaehlt."), m_ibkrConnected, false);
+        return;
+    }
+
+    if (m_ibkrGetStocksBatchActive || m_ibkrDataLoading || m_ibkrNameCheckBatchActive)
+        return;
+
+    if (!refreshIbkrConnectionState(QStringLiteral("IBKR-Quote-Abruf")))
+        return;
+    if (!db.isOpen()) {
+        setIbkrConnectionState(QStringLiteral("Fehler: Datenbank ist nicht verbunden."), m_ibkrConnected, false);
+        return;
+    }
+
+    m_ibkrGetStocksBatchName = QStringLiteral("Get Quotes");
+    setIbkrConnectionState(
+        QStringLiteral("Get Quotes: %1 wird aktualisiert.").arg(normalizedSymbol),
+        m_ibkrConnected,
+        false);
+
+    if (!startIbkrQuoteExchangeProbeForSymbol(normalizedSymbol))
+        emit ibkrConnectionChanged();
+}
+
 void DatabaseManager::startIbkrGetStocksForSymbols(const QVariantList &symbols)
 {
     if (m_ibkrGetStocksBatchActive || m_ibkrDataLoading || m_ibkrNameCheckBatchActive)
         return;
 
-    if (!m_ibkrConnected || m_ibkrConnectedPort == 0) {
-        setIbkrConnectionState(QStringLiteral("Fehler: Zuerst eine Verbindung zu IBKR herstellen."), false, false);
+    if (!refreshIbkrConnectionState(QStringLiteral("IBKR-Quote-Abruf")))
         return;
-    }
     if (!db.isOpen()) {
         setIbkrConnectionState(QStringLiteral("Fehler: Datenbank ist nicht verbunden."), m_ibkrConnected, false);
         return;
@@ -229,18 +278,16 @@ void DatabaseManager::startIbkrGetStocksBatch(bool depotOnly)
     if (m_ibkrGetStocksBatchActive || m_ibkrDataLoading || m_ibkrNameCheckBatchActive)
         return;
 
-    if (!m_ibkrConnected || m_ibkrConnectedPort == 0) {
-        setIbkrConnectionState(QStringLiteral("Fehler: Zuerst eine Verbindung zu IBKR herstellen."), false, false);
+    if (!refreshIbkrConnectionState(QStringLiteral("IBKR-Quote-Batch")))
         return;
-    }
     if (!db.isOpen()) {
         setIbkrConnectionState(QStringLiteral("Fehler: Datenbank ist nicht verbunden."), m_ibkrConnected, false);
         return;
     }
 
     m_ibkrGetStocksBatchName = depotOnly
-        ? QStringLiteral("Get New Quotes for Depot")
-        : QStringLiteral("Get new Quotes for IBKR Data");
+                                   ? QStringLiteral("Get New Quotes for Depot")
+                                   : QStringLiteral("Get new Quotes for IBKR Data");
 
     QSqlQuery query(db);
     if (depotOnly) {
@@ -306,6 +353,7 @@ void DatabaseManager::startIbkrGetStocksBatch(bool depotOnly)
 void DatabaseManager::stopIbkrGetStocks()
 {
     if (!m_ibkrGetStocksBatchActive
+        && !m_pendingIbkrQuoteAfterMetadata
         && !m_pendingIbkrProcessIsHistoricalQuotes
         && !m_pendingIbkrProcessIsQuoteExchangeProbe
         && !m_pendingIbkrProcessIsMarketSnapshot) {
@@ -322,6 +370,8 @@ void DatabaseManager::stopIbkrGetStocks()
     m_pendingIbkrProcessIsHistoricalQuotes = false;
     m_pendingIbkrProcessIsQuoteExchangeProbe = false;
     m_pendingIbkrProcessIsMarketSnapshot = false;
+    m_pendingIbkrProcessIsNameSearch = false;
+    m_pendingIbkrQuoteAfterMetadata = false;
     const QString symbol = m_pendingIbkrQuotesSymbol;
     m_pendingIbkrQuotesSymbol.clear();
     m_pendingIbkrQuotesIsin.clear();
@@ -335,6 +385,7 @@ void DatabaseManager::stopIbkrGetStocks()
     m_pendingIbkrQuotesFallbackIndex = 0;
     m_pendingIbkrQuotesSupportsSmart = false;
     m_pendingIbkrQuotesForceDirectProbeResult = false;
+    m_pendingIbkrQuotesSmartHistoricalRetry = false;
     m_ibkrPendingSymbol.clear();
     m_ibkrDataTimeout.setInterval(25000);
     setIbkrConnectionState(
@@ -376,7 +427,7 @@ void DatabaseManager::loadNextIbkrGetStocksSymbol()
     setIbkrConnectionState(
         (m_ibkrGetStocksHistoricalOnlyBatch
              ? QStringLiteral("%1: %2/%3 %4 - neue Quotes per Historical Data laden. Neue Quotes: %5, Fehler: %6")
-             : QStringLiteral("%1: %2/%3 %4 - Boerse pruefen und neue Quotes laden. Neue Quotes: %5, Fehler: %6"))
+             : QStringLiteral("%1: %2/%3 %4 - Stammdaten aktualisieren und neue Quotes laden. Neue Quotes: %5, Fehler: %6"))
             .arg(m_ibkrGetStocksBatchName)
             .arg(m_ibkrGetStocksIndex)
             .arg(m_ibkrGetStocksSymbols.size())
@@ -385,10 +436,16 @@ void DatabaseManager::loadNextIbkrGetStocksSymbol()
             .arg(m_ibkrGetStocksFailureCount),
         m_ibkrConnected,
         false);
-    const bool started = m_ibkrGetStocksHistoricalOnlyBatch
-        ? startIbkrHistoricalQuotesOnlyForSymbol(symbol)
-        : startIbkrQuoteExchangeProbeForSymbol(symbol);
+    bool started = false;
+    if (m_ibkrGetStocksHistoricalOnlyBatch) {
+        started = startIbkrHistoricalQuotesOnlyForSymbol(symbol);
+    } else {
+        m_pendingIbkrQuoteAfterMetadata = true;
+        getIbkrData(symbol);
+        started = true;
+    }
     if (!started) {
+        m_pendingIbkrQuoteAfterMetadata = false;
         ++m_ibkrGetStocksFailureCount;
         scheduleNextIbkrGetStocksSymbol(500);
     }
@@ -423,6 +480,8 @@ void DatabaseManager::finishIbkrGetStocksBatch(const QString &message)
     m_pendingIbkrQuotesFallbackIndex = 0;
     m_pendingIbkrQuotesSupportsSmart = false;
     m_pendingIbkrQuotesForceDirectProbeResult = false;
+    m_pendingIbkrQuotesSmartHistoricalRetry = false;
+    m_pendingIbkrQuoteAfterMetadata = false;
     m_ibkrDataTimeout.setInterval(25000);
     setIbkrConnectionState(message, m_ibkrConnected, false);
     emit ibkrConnectionChanged();
@@ -459,6 +518,26 @@ int DatabaseManager::ibkrMissingQuoteDays(const QString &symbol, int fallbackDay
     if (validQuoteCount < fallbackDays)
         return qMax(missingCalendarDays, calendarDaysForTradingWindow);
     return missingCalendarDays;
+}
+
+bool DatabaseManager::ibkrHasQuoteForExpectedDate(const QString &symbol) const
+{
+    const QString normalizedSymbol = symbol.trimmed();
+    if (normalizedSymbol.isEmpty() || !db.isOpen())
+        return false;
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT 1
+        FROM "Quotes"
+        WHERE "Symbol" = :symbol
+          AND "CloseDate" = :closeDate
+          AND COALESCE("ClosePrice", 0) > 0
+        LIMIT 1
+    )SQL");
+    query.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
+    query.bindValue(QStringLiteral(":closeDate"), mostRecentWeekday(QDate::currentDate()));
+    return query.exec() && query.next();
 }
 
 bool DatabaseManager::startIbkrHistoricalQuotesOnlyForSymbol(const QString &symbol)
@@ -538,6 +617,7 @@ bool DatabaseManager::startIbkrHistoricalQuotesOnlyForSymbol(const QString &symb
     m_pendingIbkrQuotesFallbackIndex = 0;
     m_pendingIbkrQuotesSupportsSmart = false;
     m_pendingIbkrQuotesForceDirectProbeResult = false;
+    m_pendingIbkrQuotesSmartHistoricalRetry = false;
     m_pendingIbkrProcessIsHistoricalQuotes = true;
     m_pendingIbkrProcessIsQuoteExchangeProbe = false;
     m_pendingIbkrProcessIsMarketSnapshot = false;
@@ -626,12 +706,21 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
         m_pendingIbkrQuotesFallbackIndex = 0;
         m_pendingIbkrQuotesSupportsSmart = supportsSmart;
         m_pendingIbkrQuotesForceDirectProbeResult = false;
-        m_pendingIbkrProcessIsHistoricalQuotes = true;
+        m_pendingIbkrQuotesSmartHistoricalRetry = false;
+        const bool startWithSnapshot = !m_ibkrGetStocksBatchActive
+                                       && ibkrHasQuoteForExpectedDate(m_pendingIbkrQuotesSymbol)
+                                       && m_pendingIbkrQuotesExchange.compare(QStringLiteral("SMART"), Qt::CaseInsensitive) != 0;
+        m_pendingIbkrProcessIsHistoricalQuotes = !startWithSnapshot;
         m_pendingIbkrProcessIsQuoteExchangeProbe = false;
-        m_pendingIbkrProcessIsMarketSnapshot = false;
+        m_pendingIbkrProcessIsMarketSnapshot = startWithSnapshot;
         m_pendingIbkrProcessIsNameSearch = false;
         m_pendingIbkrProcessIsNameCheck = false;
         m_ibkrDataLoading = true;
+        if (startWithSnapshot) {
+            startIbkrQuoteSnapshotFallback(
+                QStringLiteral("Quote fuer aktuellen Handelstag vorhanden, aktualisiere Live-Snapshot"));
+            return true;
+        }
         startIbkrQuoteHelperRequest(false);
         return true;
     }
@@ -662,6 +751,7 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
     m_pendingIbkrQuotesFallbackIndex = 0;
     m_pendingIbkrQuotesSupportsSmart = supportsSmart;
     m_pendingIbkrQuotesForceDirectProbeResult = false;
+    m_pendingIbkrQuotesSmartHistoricalRetry = false;
 
     if (probeExchanges.size() == 1) {
         const QString onlyExchange = probeExchanges.first().trimmed().toUpper();
@@ -680,18 +770,26 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
         m_pendingIbkrQuotesExchange = quoteExchange;
         m_pendingIbkrQuotesPrimaryExchange.clear();
         if (m_ibkrGetStocksBatchActive) {
+            const bool startWithSnapshot = false;
             setIbkrConnectionState(
-                QStringLiteral("%1: %2 -> %3, beste Direktboerse %4. Neue Quotes werden geladen ... OK: %5, Fehler: %6.")
+                QStringLiteral("%1: %2 -> %3, beste Direktboerse %4. %5 ... OK: %6, Fehler: %7.")
                     .arg(m_ibkrGetStocksBatchName)
                     .arg(symbol, quoteExchange, onlyExchange)
+                    .arg(startWithSnapshot
+                             ? QStringLiteral("Live-Snapshot wird aktualisiert")
+                             : QStringLiteral("Neue Quotes werden geladen"))
                     .arg(m_ibkrGetStocksSuccessCount)
                     .arg(m_ibkrGetStocksFailureCount),
                 m_ibkrConnected,
                 false);
-            m_pendingIbkrProcessIsHistoricalQuotes = true;
+            m_pendingIbkrProcessIsHistoricalQuotes = !startWithSnapshot;
             m_pendingIbkrProcessIsQuoteExchangeProbe = false;
-            m_pendingIbkrProcessIsMarketSnapshot = false;
-            startIbkrQuoteHelperRequest(false);
+            m_pendingIbkrProcessIsMarketSnapshot = startWithSnapshot;
+            if (startWithSnapshot)
+                startIbkrQuoteSnapshotFallback(
+                    QStringLiteral("Quote fuer aktuellen Handelstag vorhanden, aktualisiere Live-Snapshot"));
+            else
+                startIbkrQuoteHelperRequest(false);
         }
         return true;
     }
@@ -711,10 +809,8 @@ void DatabaseManager::startIbkrQuotesRequestForIsin(const QString &isin, int day
     if (m_ibkrDataLoading || m_ibkrBatchActive || m_ibkrNameCheckBatchActive)
         return;
 
-    if (!m_ibkrConnected || m_ibkrConnectedPort == 0) {
-        setIbkrConnectionState(QStringLiteral("Fehler: Zuerst eine Verbindung zu IBKR herstellen."), false, false);
+    if (!refreshIbkrConnectionState(QStringLiteral("IBKR-Quote-Abruf")))
         return;
-    }
     if (!db.isOpen()) {
         setIbkrConnectionState(QStringLiteral("Fehler: Datenbank ist nicht verbunden."), m_ibkrConnected, false);
         return;
@@ -763,7 +859,7 @@ void DatabaseManager::startIbkrQuotesRequestForIsin(const QString &isin, int day
         stockQuery.value(QStringLiteral("MIC")).toString());
 
     const QString helperPath = QDir(QCoreApplication::applicationDirPath())
-        .filePath(QStringLiteral("ibkr-helper/IbkrHelper.exe"));
+                                   .filePath(QStringLiteral("ibkr-helper/IbkrHelper.exe"));
     if (!QFileInfo::exists(helperPath)) {
         setIbkrConnectionState(QStringLiteral("Fehler: Der IBKR-Helfer fehlt im Build-Verzeichnis."), m_ibkrConnected, false);
         return;
@@ -791,14 +887,21 @@ void DatabaseManager::startIbkrQuotesRequestForIsin(const QString &isin, int day
     m_pendingIbkrQuotesFallbackIndex = 0;
     m_pendingIbkrQuotesSupportsSmart = supportsSmart;
     m_pendingIbkrQuotesForceDirectProbeResult = false;
-    m_pendingIbkrProcessIsHistoricalQuotes = true;
+    m_pendingIbkrQuotesSmartHistoricalRetry = false;
+    const bool startWithSnapshot = !m_ibkrGetStocksBatchActive
+                                   && ibkrHasQuoteForExpectedDate(m_pendingIbkrQuotesSymbol)
+                                   && m_pendingIbkrQuotesExchange.compare(QStringLiteral("SMART"), Qt::CaseInsensitive) != 0;
+    m_pendingIbkrProcessIsHistoricalQuotes = !startWithSnapshot;
     m_pendingIbkrProcessIsQuoteExchangeProbe = false;
-    m_pendingIbkrProcessIsMarketSnapshot = false;
+    m_pendingIbkrProcessIsMarketSnapshot = startWithSnapshot;
     m_pendingIbkrProcessIsNameSearch = false;
     m_pendingIbkrProcessIsNameCheck = false;
     m_ibkrDataLoading = true;
 
-    if (cachedQuoteExchange.isEmpty() && !probeExchanges.isEmpty()) {
+    if (startWithSnapshot) {
+        startIbkrQuoteSnapshotFallback(
+            QStringLiteral("Quote fuer aktuellen Handelstag vorhanden, aktualisiere Live-Snapshot"));
+    } else if (cachedQuoteExchange.isEmpty() && !probeExchanges.isEmpty()) {
         m_pendingIbkrProcessIsHistoricalQuotes = false;
         m_pendingIbkrProcessIsQuoteExchangeProbe = true;
         m_pendingIbkrProcessIsMarketSnapshot = false;
@@ -811,13 +914,55 @@ void DatabaseManager::startIbkrQuotesRequestForIsin(const QString &isin, int day
 void DatabaseManager::startIbkrQuoteHelperRequest(bool probeExchange)
 {
     const QString helperPath = QDir(QCoreApplication::applicationDirPath())
-        .filePath(QStringLiteral("ibkr-helper/IbkrHelper.exe"));
+    .filePath(QStringLiteral("ibkr-helper/IbkrHelper.exe"));
     if (!QFileInfo::exists(helperPath)) {
         setIbkrConnectionState(QStringLiteral("Fehler: Der IBKR-Helfer fehlt im Build-Verzeichnis."), m_ibkrConnected, false);
         return;
     }
 
     const bool snapshotRequest = !probeExchange && m_pendingIbkrProcessIsMarketSnapshot;
+    const QString requestSymbol = m_pendingIbkrQuotesSymbol.isEmpty()
+                                      ? m_ibkrPendingSymbol
+                                      : m_pendingIbkrQuotesSymbol;
+    if (!refreshIbkrConnectionState(
+            snapshotRequest
+                ? QStringLiteral("IBKR-Snapshot")
+                : (probeExchange ? QStringLiteral("IBKR-Boersenprobe") : QStringLiteral("IBKR-Quote-Abruf")))) {
+        m_ibkrDataLoading = false;
+        updateIbkrQuoteExchangeFailure(requestSymbol, QStringLiteral("Keine IBKR-API erreichbar"));
+        if (m_ibkrGetStocksBatchActive) {
+            ++m_ibkrGetStocksFailureCount;
+            setIbkrConnectionState(
+                QStringLiteral("%1: %2 keine IBKR-API erreichbar. OK: %3, Fehler: %4.")
+                    .arg(m_ibkrGetStocksBatchName)
+                    .arg(requestSymbol)
+                    .arg(m_ibkrGetStocksSuccessCount)
+                    .arg(m_ibkrGetStocksFailureCount),
+                false,
+                false);
+            scheduleNextIbkrGetStocksSymbol(1000);
+        }
+        m_pendingIbkrProcessIsHistoricalQuotes = false;
+        m_pendingIbkrProcessIsQuoteExchangeProbe = false;
+        m_pendingIbkrProcessIsMarketSnapshot = false;
+        m_pendingIbkrQuotesSymbol.clear();
+        m_pendingIbkrQuotesIsin.clear();
+        m_pendingIbkrQuotesIbkrSymbol.clear();
+        m_pendingIbkrQuotesCurrency.clear();
+        m_pendingIbkrQuotesExchange.clear();
+        m_pendingIbkrQuotesPrimaryExchange.clear();
+        m_pendingIbkrQuotesProbeExchanges.clear();
+        m_pendingIbkrQuotesConId = 0;
+        m_pendingIbkrQuotesDays = 0;
+        m_pendingIbkrQuotesFallbackIndex = 0;
+        m_pendingIbkrQuotesSupportsSmart = false;
+        m_pendingIbkrQuotesForceDirectProbeResult = false;
+        m_pendingIbkrQuotesSmartHistoricalRetry = false;
+        m_ibkrPendingSymbol.clear();
+        emit ibkrConnectionChanged();
+        return;
+    }
+
     QStringList arguments = {
         QStringLiteral("--host"), QStringLiteral("127.0.0.1"),
         QStringLiteral("--port"), QString::number(m_ibkrConnectedPort),
@@ -828,13 +973,15 @@ void DatabaseManager::startIbkrQuoteHelperRequest(bool probeExchange)
             : (snapshotRequest ? QStringLiteral("--market-snapshot") : QStringLiteral("--historical-quotes")),
         QStringLiteral("--days"), QString::number(probeExchange ? 20 : m_pendingIbkrQuotesDays)
     };
+    arguments << QStringLiteral("--timeout-seconds")
+              << QString::number(snapshotRequest ? 5 : 45);
     if (m_pendingIbkrQuotesConId > 0)
         arguments << QStringLiteral("--con-id") << QString::number(m_pendingIbkrQuotesConId);
     if (!m_pendingIbkrQuotesCurrency.isEmpty())
         arguments << QStringLiteral("--currency") << m_pendingIbkrQuotesCurrency;
     if (probeExchange) {
         arguments << QStringLiteral("--exchanges")
-                  << m_pendingIbkrQuotesProbeExchanges.join(QLatin1Char(','));
+        << m_pendingIbkrQuotesProbeExchanges.join(QLatin1Char(','));
     } else if (!m_pendingIbkrQuotesExchange.isEmpty()
                && m_pendingIbkrQuotesExchange.compare(QStringLiteral("SMART"), Qt::CaseInsensitive) != 0) {
         arguments << QStringLiteral("--exchange") << m_pendingIbkrQuotesExchange
@@ -856,19 +1003,56 @@ void DatabaseManager::startIbkrQuoteHelperRequest(bool probeExchange)
             ? QStringLiteral("%1: staerkste Umsatzboerse fuer %2 wird ermittelt ...")
                   .arg(m_ibkrGetStocksBatchName, m_pendingIbkrQuotesSymbol)
             : snapshotRequest
-            ? QStringLiteral("%1: Snapshot fuer %2 (%3) wird von %4 abgerufen ...")
-                  .arg(m_ibkrGetStocksBatchName, m_pendingIbkrQuotesSymbol, m_pendingIbkrQuotesIsin,
-                       m_pendingIbkrQuotesExchange)
-            : QStringLiteral("%1: Quotes fuer %2 (%3) werden fuer %4 Tage von %5 abgerufen ...")
-                  .arg(m_ibkrGetStocksBatchName, m_pendingIbkrQuotesSymbol, m_pendingIbkrQuotesIsin)
-                  .arg(m_pendingIbkrQuotesDays)
-                  .arg(m_pendingIbkrQuotesExchange),
+                  ? QStringLiteral("%1: Snapshot fuer %2 (%3) wird von %4 abgerufen ...")
+                        .arg(m_ibkrGetStocksBatchName, m_pendingIbkrQuotesSymbol, m_pendingIbkrQuotesIsin,
+                             m_pendingIbkrQuotesExchange)
+                  : QStringLiteral("%1: Quotes fuer %2 (%3) werden fuer %4 Tage von %5 abgerufen ...")
+                        .arg(m_ibkrGetStocksBatchName, m_pendingIbkrQuotesSymbol, m_pendingIbkrQuotesIsin)
+                        .arg(m_pendingIbkrQuotesDays)
+                        .arg(m_pendingIbkrQuotesExchange),
         true,
         false);
     m_ibkrProcess.start();
-    m_ibkrDataTimeout.setInterval(probeExchange ? 120000 : (snapshotRequest ? 30000 : 90000));
+    m_ibkrDataTimeout.setInterval(snapshotRequest ? 12000 : 55000);
     m_ibkrDataTimeout.start();
     emit ibkrConnectionChanged();
+}
+
+void DatabaseManager::startIbkrSmartHistoricalRetry(const QString &symbol,
+                                                    const QString &isin,
+                                                    const QString &ibkrSymbol,
+                                                    const QString &currency,
+                                                    qint64 conId,
+                                                    int days,
+                                                    const QStringList &fallbackExchanges,
+                                                    const QString &reason)
+{
+    m_ibkrPendingSymbol = symbol;
+    m_pendingIbkrQuotesSymbol = symbol;
+    m_pendingIbkrQuotesIsin = isin;
+    m_pendingIbkrQuotesIbkrSymbol = ibkrSymbol;
+    m_pendingIbkrQuotesCurrency = currency;
+    m_pendingIbkrQuotesExchange = QStringLiteral("SMART");
+    m_pendingIbkrQuotesPrimaryExchange.clear();
+    m_pendingIbkrQuotesProbeExchanges = fallbackExchanges;
+    m_pendingIbkrQuotesConId = conId;
+    m_pendingIbkrQuotesDays = days <= 0 ? ibkrMissingQuoteDays(symbol, 90) : days;
+    m_pendingIbkrQuotesFallbackIndex = 0;
+    m_pendingIbkrQuotesSupportsSmart = true;
+    m_pendingIbkrQuotesForceDirectProbeResult = false;
+    m_pendingIbkrQuotesSmartHistoricalRetry = true;
+    m_pendingIbkrProcessIsHistoricalQuotes = true;
+    m_pendingIbkrProcessIsQuoteExchangeProbe = false;
+    m_pendingIbkrProcessIsMarketSnapshot = false;
+    m_pendingIbkrProcessIsNameSearch = false;
+    m_pendingIbkrProcessIsNameCheck = false;
+    m_ibkrDataLoading = true;
+    setIbkrConnectionState(
+        QStringLiteral("%1: %2, retry per SMART Historical Data fuer %3 ...")
+            .arg(m_ibkrGetStocksBatchName, reason, symbol),
+        m_ibkrConnected,
+        false);
+    startIbkrQuoteHelperRequest(false);
 }
 
 void DatabaseManager::startIbkrQuoteSnapshotFallback(const QString &reason)
@@ -878,6 +1062,8 @@ void DatabaseManager::startIbkrQuoteSnapshotFallback(const QString &reason)
     m_pendingIbkrProcessIsMarketSnapshot = true;
     m_pendingIbkrProcessIsNameSearch = false;
     m_pendingIbkrProcessIsNameCheck = false;
+    if (m_pendingIbkrQuotesFallbackIndex <= 0)
+        m_pendingIbkrQuotesFallbackIndex = 1;
     m_ibkrDataLoading = true;
     setIbkrConnectionState(
         QStringLiteral("%1: %2, Snapshot fuer %3 wird abgerufen ...")
@@ -885,6 +1071,28 @@ void DatabaseManager::startIbkrQuoteSnapshotFallback(const QString &reason)
         m_ibkrConnected,
         false);
     startIbkrQuoteHelperRequest(false);
+}
+
+bool DatabaseManager::retryIbkrQuoteSnapshotSmartFallback(const QString &reason)
+{
+    if (!m_pendingIbkrProcessIsMarketSnapshot
+        || m_pendingIbkrQuotesFallbackIndex != 1
+        || m_pendingIbkrQuotesExchange.isEmpty()
+        || m_pendingIbkrQuotesExchange.compare(QStringLiteral("SMART"), Qt::CaseInsensitive) == 0) {
+        return false;
+    }
+
+    m_pendingIbkrQuotesExchange = QStringLiteral("SMART");
+    m_pendingIbkrQuotesPrimaryExchange.clear();
+    m_pendingIbkrQuotesFallbackIndex = 2;
+    m_ibkrDataLoading = true;
+    setIbkrConnectionState(
+        QStringLiteral("%1: Snapshot per Direktboerse fehlgeschlagen (%2), versuche SMART fuer %3 ...")
+            .arg(m_ibkrGetStocksBatchName, reason, m_pendingIbkrQuotesSymbol),
+        m_ibkrConnected,
+        false);
+    startIbkrQuoteHelperRequest(false);
+    return true;
 }
 
 void DatabaseManager::startIbkrNameCheckBatch()
@@ -895,8 +1103,7 @@ void DatabaseManager::startIbkrNameCheckBatch()
     if (m_yahooFundamentalsBatchActive)
         stopYahooFundamentalsBatch();
 
-    if (!m_ibkrConnected || m_ibkrConnectedPort == 0) {
-        setIbkrConnectionState(QStringLiteral("Fehler: Zuerst eine Verbindung zu IBKR herstellen."), false, false);
+    if (!refreshIbkrConnectionState(QStringLiteral("IBKR-Namenspruefung"))) {
         return;
     }
     if (!db.isOpen()) {
@@ -1014,6 +1221,64 @@ bool DatabaseManager::startIbkrTradingApp(const QString &programPath)
     return true;
 }
 
+bool DatabaseManager::startIbkrQuoteWorkerAll()
+{
+    if (!refreshIbkrConnectionState(QStringLiteral("IBKR Gesamtbatch")))
+        return false;
+
+    const QString projectDir = QStringLiteral("K:/QT-Projekte/ShareSelector");
+    QString scriptPath = QDir(projectDir).filePath(QStringLiteral("scripts/run_ibkr_quote_job.py"));
+    if (!QFileInfo::exists(scriptPath)) {
+        const QString appDirScript = QDir(QCoreApplication::applicationDirPath())
+        .filePath(QStringLiteral("scripts/run_ibkr_quote_job.py"));
+        if (QFileInfo::exists(appDirScript))
+            scriptPath = appDirScript;
+    }
+
+    const QFileInfo scriptInfo(scriptPath);
+    if (!scriptInfo.exists() || !scriptInfo.isFile()) {
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: IBKR Quote Worker Script wurde nicht gefunden: %1").arg(scriptPath),
+            m_ibkrConnected,
+            false);
+        return false;
+    }
+
+    QStringList arguments;
+    arguments << QStringLiteral("/c")
+              << QStringLiteral("start")
+              << QStringLiteral("IBKR Gesamtbatch")
+              << QStringLiteral("cmd.exe")
+              << QStringLiteral("/k")
+              << QStringLiteral("python")
+              << scriptInfo.absoluteFilePath()
+              << QStringLiteral("--all-ibkr")
+              << QStringLiteral("--snapshot-timeout-seconds")
+              << QStringLiteral("5")
+              << QStringLiteral("--job-name")
+              << QStringLiteral("IBKR Gesamtbatch");
+
+    qint64 processId = 0;
+    const bool started = QProcess::startDetached(
+        QStringLiteral("cmd.exe"),
+        arguments,
+        scriptInfo.absolutePath(),
+        &processId);
+    if (!started) {
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: Externer IBKR Quote Worker konnte nicht gestartet werden."),
+            m_ibkrConnected,
+            false);
+        return false;
+    }
+
+    setIbkrConnectionState(
+        QStringLiteral("Externer IBKR Quote Worker fuer alle IBKR-Stocks wurde gestartet. ShareSelector bleibt bedienbar."),
+        m_ibkrConnected,
+        false);
+    return true;
+}
+
 void DatabaseManager::connectToIbkr()
 {
     if (m_ibkrSocket.state() == QAbstractSocket::ConnectedState) {
@@ -1050,19 +1315,93 @@ void DatabaseManager::tryNextIbkrPort()
     m_ibkrConnectTimeout.start();
 }
 
+bool DatabaseManager::probeIbkrConnection(int timeoutMs, quint16 *connectedPort)
+{
+    QList<quint16> portsToCheck;
+    if (m_ibkrConnectedPort != 0)
+        portsToCheck << m_ibkrConnectedPort;
+    for (const quint16 port : m_ibkrPorts) {
+        if (!portsToCheck.contains(port))
+            portsToCheck << port;
+    }
+
+    for (const quint16 port : portsToCheck) {
+        QTcpSocket probe;
+        probe.connectToHost(QHostAddress::LocalHost, port);
+        if (probe.waitForConnected(timeoutMs)) {
+            probe.disconnectFromHost();
+            if (probe.state() != QAbstractSocket::UnconnectedState)
+                probe.waitForDisconnected(100);
+            if (connectedPort)
+                *connectedPort = port;
+            return true;
+        }
+    }
+    return false;
+}
+
+void DatabaseManager::pollIbkrConnectionState()
+{
+    if (m_ibkrConnecting || m_ibkrDataLoading)
+        return;
+
+    quint16 reachablePort = 0;
+    if (probeIbkrConnection(150, &reachablePort)) {
+        m_ibkrConnectedPort = reachablePort;
+        if (!m_ibkrConnected) {
+            setIbkrConnectionState(
+                QStringLiteral("IBKR TWS/IB Gateway ist auf 127.0.0.1:%1 erreichbar.")
+                    .arg(reachablePort),
+                true,
+                false);
+        }
+        return;
+    }
+
+    if (m_ibkrConnected) {
+        m_ibkrConnectedPort = 0;
+        setIbkrConnectionState(
+            QStringLiteral("Die Verbindung zu IBKR TWS/IB Gateway ist nicht mehr erreichbar."),
+            false,
+            false);
+    }
+}
+
+bool DatabaseManager::refreshIbkrConnectionState(const QString &action)
+{
+    quint16 reachablePort = 0;
+    if (probeIbkrConnection(300, &reachablePort)) {
+        m_ibkrConnectedPort = reachablePort;
+        if (!m_ibkrConnected) {
+            setIbkrConnectionState(
+                QStringLiteral("IBKR TWS/IB Gateway ist auf 127.0.0.1:%1 erreichbar.")
+                    .arg(reachablePort),
+                true,
+                false);
+        }
+        return true;
+    }
+
+    const QString prefix = action.trimmed().isEmpty()
+                               ? QStringLiteral("IBKR-Aktion")
+                               : action.trimmed();
+    setIbkrConnectionState(
+        QStringLiteral("Fehler: %1 nicht gestartet. Keine IBKR-API erreichbar. TWS oder IB Gateway starten und Socket Clients aktivieren.")
+            .arg(prefix),
+        false,
+        false);
+    m_ibkrConnectedPort = 0;
+    return false;
+}
+
 void DatabaseManager::getIbkrData(const QString &symbol)
 {
     const QString normalizedSymbol = symbol.trimmed();
     if (normalizedSymbol.isEmpty() || m_ibkrDataLoading)
         return;
 
-    if (!m_ibkrConnected || m_ibkrConnectedPort == 0) {
-        setIbkrConnectionState(
-            QStringLiteral("Fehler: Zuerst eine Verbindung zu IBKR herstellen."),
-            false,
-            false);
+    if (!refreshIbkrConnectionState(QStringLiteral("IBKR-Datenabruf")))
         return;
-    }
 
     QSqlQuery stockQuery(db);
     stockQuery.prepare(R"SQL(
@@ -1087,15 +1426,15 @@ void DatabaseManager::getIbkrData(const QString &symbol)
     m_ibkrPendingSymbol = normalizedSymbol;
     m_pendingIbkrCurrency = currency;
     m_pendingIbkrExchange = stockQuery.value(QStringLiteral("PrimaryExchange")).toString().trimmed().isEmpty()
-        ? stockQuery.value(QStringLiteral("MIC")).toString().trimmed()
-        : stockQuery.value(QStringLiteral("PrimaryExchange")).toString().trimmed();
+                                ? stockQuery.value(QStringLiteral("MIC")).toString().trimmed()
+                                : stockQuery.value(QStringLiteral("PrimaryExchange")).toString().trimmed();
     m_pendingIbkrIsin = stockQuery.value(QStringLiteral("ISIN")).toString().trimmed();
     m_pendingIbkrNameSearchTerms = ibkrSymbolSearchKeywordVariants(
         stockQuery.value(QStringLiteral("Name")).toString());
     m_pendingIbkrNameSearchIndex = 0;
     m_pendingIbkrSearchKeywords = m_pendingIbkrNameSearchTerms.isEmpty()
-        ? QString()
-        : m_pendingIbkrNameSearchTerms.first();
+                                      ? QString()
+                                      : m_pendingIbkrNameSearchTerms.first();
     m_pendingIbkrLastError.clear();
     m_pendingIbkrCandidateSymbols.clear();
     m_pendingIbkrCandidateCurrencies.clear();
@@ -1108,6 +1447,8 @@ void DatabaseManager::getIbkrData(const QString &symbol)
     m_pendingIbkrNameSearchStarted = false;
     m_pendingIbkrProcessIsNameSearch = false;
     m_pendingIbkrProcessIsHistoricalQuotes = false;
+    if (!m_ibkrGetStocksBatchActive)
+        m_pendingIbkrQuoteAfterMetadata = false;
     m_pendingIbkrReviewRequired = false;
     m_pendingIbkrReviewReason.clear();
     m_pendingIbkrTryWithoutIsin = false;
@@ -1146,9 +1487,14 @@ void DatabaseManager::getIbkrData(const QString &symbol)
 void DatabaseManager::startIbkrHelperRequest(const QString &candidateSymbol)
 {
     const QString helperPath = QDir(QCoreApplication::applicationDirPath())
-        .filePath(QStringLiteral("ibkr-helper/IbkrHelper.exe"));
+    .filePath(QStringLiteral("ibkr-helper/IbkrHelper.exe"));
     if (!QFileInfo::exists(helperPath)) {
         finalizeIbkrDataFailure(QStringLiteral("Der IBKR-Helfer fehlt im Build-Verzeichnis."));
+        return;
+    }
+
+    if (!refreshIbkrConnectionState(QStringLiteral("IBKR-Stammdatenabruf"))) {
+        finalizeIbkrDataFailure(QStringLiteral("Keine IBKR-API erreichbar"));
         return;
     }
 
@@ -1159,7 +1505,8 @@ void DatabaseManager::startIbkrHelperRequest(const QString &candidateSymbol)
         QStringLiteral("--host"), QStringLiteral("127.0.0.1"),
         QStringLiteral("--port"), QString::number(m_ibkrConnectedPort),
         QStringLiteral("--client-id"), QStringLiteral("23"),
-        QStringLiteral("--symbol"), candidateSymbol
+        QStringLiteral("--symbol"), candidateSymbol,
+        QStringLiteral("--timeout-seconds"), QStringLiteral("30")
     };
     const QString candidateKey = ibkrCandidateKey(candidateSymbol);
     const QString hintedCurrency =
@@ -1167,15 +1514,15 @@ void DatabaseManager::startIbkrHelperRequest(const QString &candidateSymbol)
     const QString hintedExchange =
         m_pendingIbkrCandidateExchanges.value(candidateKey).trimmed();
     const QString currency = hintedCurrency.isEmpty()
-        ? m_pendingIbkrCurrency
-        : hintedCurrency;
+                                 ? m_pendingIbkrCurrency
+                                 : hintedCurrency;
     if (!currency.isEmpty())
         arguments << QStringLiteral("--currency") << currency;
     const bool useHintedDirectExchange =
         !hintedExchange.isEmpty() && m_pendingIbkrDataForNameCheckRecovery;
     const QString exchange = m_pendingIbkrDirectExchange
-        ? m_pendingIbkrCurrentDirectExchange
-        : (hintedExchange.isEmpty() ? m_pendingIbkrExchange : hintedExchange);
+                                 ? m_pendingIbkrCurrentDirectExchange
+                                 : (hintedExchange.isEmpty() ? m_pendingIbkrExchange : hintedExchange);
     if (!exchange.isEmpty())
         arguments << QStringLiteral("--exchange") << exchange;
     if ((m_pendingIbkrDirectExchange || useHintedDirectExchange) && !exchange.isEmpty())
@@ -1187,6 +1534,7 @@ void DatabaseManager::startIbkrHelperRequest(const QString &candidateSymbol)
     m_ibkrProcess.setArguments(arguments);
     m_ibkrProcess.setProcessChannelMode(QProcess::SeparateChannels);
     m_ibkrProcess.start();
+    m_ibkrDataTimeout.setInterval(40000);
     m_ibkrDataTimeout.start();
     emit ibkrConnectionChanged();
 }
@@ -1217,9 +1565,14 @@ bool DatabaseManager::tryNextIbkrAmbiguousIsin()
 void DatabaseManager::startIbkrNameSearchRequest()
 {
     const QString helperPath = QDir(QCoreApplication::applicationDirPath())
-        .filePath(QStringLiteral("ibkr-helper/IbkrHelper.exe"));
+    .filePath(QStringLiteral("ibkr-helper/IbkrHelper.exe"));
     if (!QFileInfo::exists(helperPath)) {
         finalizeIbkrDataFailure(QStringLiteral("Der IBKR-Helfer fehlt im Build-Verzeichnis."));
+        return;
+    }
+
+    if (!refreshIbkrConnectionState(QStringLiteral("IBKR-Namenssuche"))) {
+        finalizeIbkrDataFailure(QStringLiteral("Keine IBKR-API erreichbar"));
         return;
     }
 
@@ -1230,13 +1583,15 @@ void DatabaseManager::startIbkrNameSearchRequest()
         QStringLiteral("--port"), QString::number(m_ibkrConnectedPort),
         QStringLiteral("--client-id"), QStringLiteral("23"),
         QStringLiteral("--symbol"), m_pendingIbkrSearchKeywords,
-        QStringLiteral("--match-symbols")
+        QStringLiteral("--match-symbols"),
+        QStringLiteral("--timeout-seconds"), QStringLiteral("20")
     };
 
     m_ibkrProcess.setProgram(helperPath);
     m_ibkrProcess.setArguments(arguments);
     m_ibkrProcess.setProcessChannelMode(QProcess::SeparateChannels);
     m_ibkrProcess.start();
+    m_ibkrDataTimeout.setInterval(30000);
     m_ibkrDataTimeout.start();
     emit ibkrConnectionChanged();
 }
@@ -1322,10 +1677,11 @@ void DatabaseManager::finalizeIbkrDataFailure(const QString &message)
 {
     const QString requestedSymbol = m_ibkrPendingSymbol;
     const QString finalMessage = message.trimmed().isEmpty()
-        ? (m_pendingIbkrLastError.isEmpty()
-               ? QStringLiteral("kein passender IBKR-Kontrakt gefunden")
-               : m_pendingIbkrLastError)
-        : message.trimmed();
+                                     ? (m_pendingIbkrLastError.isEmpty()
+                                            ? QStringLiteral("kein passender IBKR-Kontrakt gefunden")
+                                            : m_pendingIbkrLastError)
+                                     : message.trimmed();
+    const bool quoteAfterMetadata = m_pendingIbkrQuoteAfterMetadata;
 
     m_ibkrDataLoading = false;
     m_ibkrPendingSymbol.clear();
@@ -1346,6 +1702,7 @@ void DatabaseManager::finalizeIbkrDataFailure(const QString &message)
     m_pendingIbkrSearchStarted = false;
     m_pendingIbkrNameSearchStarted = false;
     m_pendingIbkrProcessIsNameSearch = false;
+    m_pendingIbkrQuoteAfterMetadata = false;
     m_pendingIbkrReviewRequired = false;
     m_pendingIbkrReviewReason.clear();
     m_pendingIbkrTryWithoutIsin = false;
@@ -1373,6 +1730,22 @@ void DatabaseManager::finalizeIbkrDataFailure(const QString &message)
         }
     }
 
+    if (quoteAfterMetadata && m_ibkrGetStocksBatchActive) {
+        ++m_ibkrGetStocksFailureCount;
+        updateIbkrBatchFailure(requestedSymbol, finalMessage);
+        setIbkrConnectionState(
+            QStringLiteral("%1: %2 Stammdaten fehlgeschlagen (%3). OK: %4, Fehler: %5.")
+                .arg(m_ibkrGetStocksBatchName)
+                .arg(requestedSymbol)
+                .arg(finalMessage)
+                .arg(m_ibkrGetStocksSuccessCount)
+                .arg(m_ibkrGetStocksFailureCount),
+            m_ibkrConnected,
+            false);
+        scheduleNextIbkrGetStocksSymbol(1000);
+        return;
+    }
+
     if (m_ibkrBatchActive) {
         ++m_ibkrBatchFailureCount;
         updateIbkrBatchFailure(requestedSymbol, finalMessage);
@@ -1397,8 +1770,8 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
     const QString isin = m_pendingIbkrQuotesIsin;
     const QString message = result.value(QStringLiteral("message")).toString();
     const QString apiDurationText = m_lastIbkrHelperElapsedMs >= 0
-        ? QStringLiteral("%1 s").arg(m_lastIbkrHelperElapsedMs / 1000.0, 0, 'f', 2)
-        : QStringLiteral("-");
+                                        ? QStringLiteral("%1 s").arg(m_lastIbkrHelperElapsedMs / 1000.0, 0, 'f', 2)
+                                        : QStringLiteral("-");
     const bool getStocksBatchActive = m_ibkrGetStocksBatchActive;
     const QString ibkrSymbol = m_pendingIbkrQuotesIbkrSymbol;
     const QString currency = m_pendingIbkrQuotesCurrency;
@@ -1408,6 +1781,7 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
     const int days = m_pendingIbkrQuotesDays;
     const bool supportsSmart = m_pendingIbkrQuotesSupportsSmart;
     const bool forceDirectProbeResult = m_pendingIbkrQuotesForceDirectProbeResult;
+    const bool smartHistoricalRetry = m_pendingIbkrQuotesSmartHistoricalRetry;
     const bool historicalOnlyBatch = m_ibkrGetStocksHistoricalOnlyBatch;
 
     m_pendingIbkrProcessIsHistoricalQuotes = false;
@@ -1426,16 +1800,56 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
     m_pendingIbkrQuotesFallbackIndex = 0;
     m_pendingIbkrQuotesSupportsSmart = false;
     m_pendingIbkrQuotesForceDirectProbeResult = false;
+    m_pendingIbkrQuotesSmartHistoricalRetry = false;
     m_ibkrDataTimeout.setInterval(25000);
 
     if (!result.value(QStringLiteral("success")).toBool()) {
+        const QString finalError = message.trimmed().isEmpty()
+        ? QStringLiteral("IBKR lieferte keine Quotes")
+        : message;
+        if (!historicalOnlyBatch
+            && !quoteExchange.isEmpty()
+            && quoteExchange.compare(QStringLiteral("SMART"), Qt::CaseInsensitive) != 0) {
+            m_ibkrPendingSymbol = symbol;
+            m_pendingIbkrQuotesSymbol = symbol;
+            m_pendingIbkrQuotesIsin = isin;
+            m_pendingIbkrQuotesIbkrSymbol = ibkrSymbol;
+            m_pendingIbkrQuotesCurrency = currency;
+            m_pendingIbkrQuotesExchange = quoteExchange;
+            m_pendingIbkrQuotesPrimaryExchange.clear();
+            m_pendingIbkrQuotesProbeExchanges = fallbackExchanges;
+            m_pendingIbkrQuotesConId = conId;
+            m_pendingIbkrQuotesDays = days <= 0 ? ibkrMissingQuoteDays(symbol, 90) : days;
+            m_pendingIbkrQuotesFallbackIndex = 0;
+            m_pendingIbkrQuotesSupportsSmart = supportsSmart;
+            m_pendingIbkrQuotesForceDirectProbeResult = forceDirectProbeResult;
+            m_pendingIbkrQuotesSmartHistoricalRetry = smartHistoricalRetry;
+            startIbkrQuoteSnapshotFallback(
+                QStringLiteral("Historical Data fehlgeschlagen (%1), versuche Live-Snapshot").arg(finalError));
+            return;
+        }
+        if (!historicalOnlyBatch
+            && !smartHistoricalRetry
+            && supportsSmart
+            && quoteExchange.compare(QStringLiteral("SMART"), Qt::CaseInsensitive) != 0) {
+            startIbkrSmartHistoricalRetry(
+                symbol,
+                isin,
+                ibkrSymbol,
+                currency,
+                conId,
+                days,
+                fallbackExchanges,
+                QStringLiteral("%1 fehlgeschlagen (%2)").arg(quoteExchange, finalError));
+            return;
+        }
         if (!historicalOnlyBatch && !forceDirectProbeResult && !fallbackExchanges.isEmpty()) {
             m_ibkrPendingSymbol = symbol;
             m_pendingIbkrQuotesSymbol = symbol;
             m_pendingIbkrQuotesIsin = isin;
             m_pendingIbkrQuotesIbkrSymbol = ibkrSymbol;
             m_pendingIbkrQuotesCurrency = currency;
-            m_pendingIbkrQuotesExchange.clear();
+            m_pendingIbkrQuotesExchange = quoteExchange;
             m_pendingIbkrQuotesPrimaryExchange.clear();
             m_pendingIbkrQuotesProbeExchanges = fallbackExchanges;
             m_pendingIbkrQuotesConId = conId;
@@ -1443,6 +1857,7 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
             m_pendingIbkrQuotesFallbackIndex = 0;
             m_pendingIbkrQuotesSupportsSmart = supportsSmart;
             m_pendingIbkrQuotesForceDirectProbeResult = true;
+            m_pendingIbkrQuotesSmartHistoricalRetry = smartHistoricalRetry;
             m_pendingIbkrProcessIsHistoricalQuotes = false;
             m_pendingIbkrProcessIsQuoteExchangeProbe = true;
             m_pendingIbkrProcessIsMarketSnapshot = false;
@@ -1455,26 +1870,34 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
             startIbkrQuoteHelperRequest(true);
             return;
         }
+        if (!historicalOnlyBatch) {
+            m_ibkrPendingSymbol = symbol;
+            m_pendingIbkrQuotesSymbol = symbol;
+            m_pendingIbkrQuotesIsin = isin;
+            m_pendingIbkrQuotesIbkrSymbol = ibkrSymbol;
+            m_pendingIbkrQuotesCurrency = currency;
+            m_pendingIbkrQuotesExchange = smartHistoricalRetry ? QStringLiteral("SMART") : quoteExchange;
+            m_pendingIbkrQuotesPrimaryExchange.clear();
+            m_pendingIbkrQuotesProbeExchanges = fallbackExchanges;
+            m_pendingIbkrQuotesConId = conId;
+            m_pendingIbkrQuotesDays = days <= 0 ? ibkrMissingQuoteDays(symbol, 90) : days;
+            m_pendingIbkrQuotesFallbackIndex = 0;
+            m_pendingIbkrQuotesSupportsSmart = supportsSmart;
+            m_pendingIbkrQuotesForceDirectProbeResult = forceDirectProbeResult;
+            m_pendingIbkrQuotesSmartHistoricalRetry = smartHistoricalRetry;
+            startIbkrQuoteSnapshotFallback(
+                QStringLiteral("Historical Data fehlgeschlagen (%1)").arg(finalError));
+            return;
+        }
         if (getStocksBatchActive) {
-            const QString finalError = message.trimmed().isEmpty()
-                ? QStringLiteral("IBKR lieferte keine Quotes")
-                : message;
-            const bool switchToMarketstack = shouldUseMarketstackForIbkrQuoteError(finalError);
-            if (switchToMarketstack) {
-                ++m_ibkrGetStocksSuccessCount;
-                markStockFromIbkr(symbol, false);
-            } else {
-                ++m_ibkrGetStocksFailureCount;
-                updateIbkrQuoteExchangeFailure(
-                    symbol,
-                    finalError);
-            }
+            ++m_ibkrGetStocksFailureCount;
+            updateIbkrQuoteExchangeFailure(
+                symbol,
+                finalError);
             setIbkrConnectionState(
-                QStringLiteral("%1: %2 Quote-Abruf %3 (%4). API: %5. OK: %6, Fehler: %7.")
+                QStringLiteral("%1: %2 Quote-Abruf fehlgeschlagen (%3). API: %4. OK: %5, Fehler: %6.")
                     .arg(m_ibkrGetStocksBatchName,
                          symbol,
-                         switchToMarketstack ? QStringLiteral("an Marketstack uebergeben")
-                                        : QStringLiteral("fehlgeschlagen"),
                          finalError)
                     .arg(apiDurationText)
                     .arg(m_ibkrGetStocksSuccessCount)
@@ -1487,8 +1910,8 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
         }
         setIbkrConnectionState(
             QStringLiteral("Fehler: %1").arg(message.trimmed().isEmpty()
-                                                ? QStringLiteral("IBKR lieferte keine Quotes.")
-                                                : message),
+                                                 ? QStringLiteral("IBKR lieferte keine Quotes.")
+                                                 : message),
             m_ibkrConnected,
             false);
         emit ibkrConnectionChanged();
@@ -1542,10 +1965,40 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
         m_pendingIbkrQuotesFallbackIndex = 0;
         m_pendingIbkrQuotesSupportsSmart = supportsSmart;
         m_pendingIbkrQuotesForceDirectProbeResult = forceDirectProbeResult;
+        m_pendingIbkrQuotesSmartHistoricalRetry = smartHistoricalRetry;
         startIbkrQuoteSnapshotFallback(staleMessage);
         return;
     }
 
+    if (!historicalOnlyBatch
+        && !getStocksBatchActive
+        && latestQuoteDate.isValid()
+        && latestQuoteDate >= expectedQuoteDate
+        && expectedQuoteDate == QDate::currentDate()
+        && !quoteExchange.isEmpty()
+        && quoteExchange.compare(QStringLiteral("SMART"), Qt::CaseInsensitive) != 0) {
+        m_ibkrPendingSymbol = symbol;
+        m_pendingIbkrQuotesSymbol = symbol;
+        m_pendingIbkrQuotesIsin = isin;
+        m_pendingIbkrQuotesIbkrSymbol = ibkrSymbol;
+        m_pendingIbkrQuotesCurrency = currency;
+        m_pendingIbkrQuotesExchange = quoteExchange;
+        m_pendingIbkrQuotesPrimaryExchange.clear();
+        m_pendingIbkrQuotesProbeExchanges = fallbackExchanges;
+        m_pendingIbkrQuotesConId = conId;
+        m_pendingIbkrQuotesDays = days;
+        m_pendingIbkrQuotesFallbackIndex = 0;
+        m_pendingIbkrQuotesSupportsSmart = supportsSmart;
+        m_pendingIbkrQuotesForceDirectProbeResult = forceDirectProbeResult;
+        m_pendingIbkrQuotesSmartHistoricalRetry = smartHistoricalRetry;
+        startIbkrQuoteSnapshotFallback(
+            QStringLiteral("Historical Data bis %1 gespeichert, aktualisiere heutigen Live-Snapshot")
+                .arg(latestQuoteDate.toString(QStringLiteral("yyyy-MM-dd"))));
+        return;
+    }
+
+    if (smartHistoricalRetry)
+        saveIbkrQuoteExchange(symbol, QStringLiteral("SMART"), 0.0);
     updateIbkrQuoteExchangeSuccess(symbol);
 
     setIbkrConnectionState(
@@ -1580,39 +2033,49 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
 
 void DatabaseManager::finishIbkrQuoteSnapshotRequest(const QJsonObject &result)
 {
-    const QString symbol = m_pendingIbkrQuotesSymbol;
+    const QString symbol = m_pendingIbkrQuotesSymbol.isEmpty()
+    ? m_ibkrPendingSymbol
+    : m_pendingIbkrQuotesSymbol;
     const QString isin = m_pendingIbkrQuotesIsin;
     const QString message = result.value(QStringLiteral("message")).toString();
+    const QString quoteExchange = m_pendingIbkrQuotesExchange;
+    const bool smartHistoricalRetry = m_pendingIbkrQuotesSmartHistoricalRetry;
     const bool getStocksBatchActive = m_ibkrGetStocksBatchActive;
     const QString apiDurationText = m_lastIbkrHelperElapsedMs >= 0
-        ? QStringLiteral("%1 s").arg(m_lastIbkrHelperElapsedMs / 1000.0, 0, 'f', 2)
-        : QStringLiteral("-");
+                                        ? QStringLiteral("%1 s").arg(m_lastIbkrHelperElapsedMs / 1000.0, 0, 'f', 2)
+                                        : QStringLiteral("-");
 
-    m_pendingIbkrProcessIsHistoricalQuotes = false;
-    m_pendingIbkrProcessIsQuoteExchangeProbe = false;
-    m_pendingIbkrProcessIsMarketSnapshot = false;
-    m_ibkrPendingSymbol.clear();
-    m_pendingIbkrQuotesSymbol.clear();
-    m_pendingIbkrQuotesIsin.clear();
-    m_pendingIbkrQuotesIbkrSymbol.clear();
-    m_pendingIbkrQuotesCurrency.clear();
-    m_pendingIbkrQuotesExchange.clear();
-    m_pendingIbkrQuotesPrimaryExchange.clear();
-    m_pendingIbkrQuotesProbeExchanges.clear();
-    m_pendingIbkrQuotesConId = 0;
-    m_pendingIbkrQuotesDays = 0;
-    m_pendingIbkrQuotesFallbackIndex = 0;
-    m_pendingIbkrQuotesSupportsSmart = false;
-    m_pendingIbkrQuotesForceDirectProbeResult = false;
-    m_ibkrDataTimeout.setInterval(25000);
+    const auto resetPendingIbkrQuoteRequest = [this]() {
+        m_pendingIbkrProcessIsHistoricalQuotes = false;
+        m_pendingIbkrProcessIsQuoteExchangeProbe = false;
+        m_pendingIbkrProcessIsMarketSnapshot = false;
+        m_ibkrPendingSymbol.clear();
+        m_pendingIbkrQuotesSymbol.clear();
+        m_pendingIbkrQuotesIsin.clear();
+        m_pendingIbkrQuotesIbkrSymbol.clear();
+        m_pendingIbkrQuotesCurrency.clear();
+        m_pendingIbkrQuotesExchange.clear();
+        m_pendingIbkrQuotesPrimaryExchange.clear();
+        m_pendingIbkrQuotesProbeExchanges.clear();
+        m_pendingIbkrQuotesConId = 0;
+        m_pendingIbkrQuotesDays = 0;
+        m_pendingIbkrQuotesFallbackIndex = 0;
+        m_pendingIbkrQuotesSupportsSmart = false;
+        m_pendingIbkrQuotesForceDirectProbeResult = false;
+        m_pendingIbkrQuotesSmartHistoricalRetry = false;
+        m_ibkrDataTimeout.setInterval(25000);
+    };
 
     const QJsonObject data = result.value(QStringLiteral("data")).toObject();
     double snapshotPrice = 0.0;
     if (!result.value(QStringLiteral("success")).toBool()
         || !saveIbkrQuoteSnapshot(symbol, data, &snapshotPrice)) {
         const QString finalError = message.trimmed().isEmpty()
-            ? QStringLiteral("IBKR-Snapshot lieferte keinen verwertbaren Kurs")
-            : message;
+        ? QStringLiteral("IBKR-Snapshot lieferte keinen verwertbaren Kurs")
+        : message;
+        if (retryIbkrQuoteSnapshotSmartFallback(finalError))
+            return;
+        resetPendingIbkrQuoteRequest();
         updateIbkrQuoteExchangeFailure(symbol, finalError);
         if (getStocksBatchActive) {
             ++m_ibkrGetStocksFailureCount;
@@ -1634,6 +2097,11 @@ void DatabaseManager::finishIbkrQuoteSnapshotRequest(const QJsonObject &result)
         return;
     }
 
+    resetPendingIbkrQuoteRequest();
+    if (smartHistoricalRetry
+        && quoteExchange.compare(QStringLiteral("SMART"), Qt::CaseInsensitive) == 0) {
+        saveIbkrQuoteExchange(symbol, QStringLiteral("SMART"), 0.0);
+    }
     updateIbkrQuoteExchangeSuccess(symbol);
     setIbkrConnectionState(
         QStringLiteral("%1: Snapshot fuer %2 (%3) mit %4 als heutiger Quote gespeichert.")
@@ -1669,8 +2137,8 @@ void DatabaseManager::finishIbkrQuoteExchangeProbe(const QJsonObject &result)
         m_pendingIbkrProcessIsQuoteExchangeProbe = false;
         m_ibkrDataTimeout.setInterval(25000);
         const QString fallbackExchange = m_pendingIbkrQuotesProbeExchanges.isEmpty()
-            ? QString()
-            : m_pendingIbkrQuotesProbeExchanges.first().trimmed().toUpper();
+                                             ? QString()
+                                             : m_pendingIbkrQuotesProbeExchanges.first().trimmed().toUpper();
         const QString quoteExchange = fallbackExchange;
         if (!forceDirectProbeResult
             && !fallbackExchange.isEmpty()
@@ -1705,50 +2173,21 @@ void DatabaseManager::finishIbkrQuoteExchangeProbe(const QJsonObject &result)
             return;
         }
         const QString finalError = message.trimmed().isEmpty()
-            ? QStringLiteral("Keine Umsatzboerse ermittelt")
-            : message;
-        const bool switchToMarketstack = shouldUseMarketstackForIbkrQuoteError(finalError);
-        if (switchToMarketstack)
-            markStockFromIbkr(m_pendingIbkrQuotesSymbol, false);
-        else
-            updateIbkrQuoteExchangeFailure(m_pendingIbkrQuotesSymbol, finalError);
+                                       ? QStringLiteral("Keine Umsatzboerse ermittelt")
+                                       : message;
         if (m_ibkrGetStocksBatchActive) {
-            if (switchToMarketstack)
-                ++m_ibkrGetStocksSuccessCount;
-            else
-                ++m_ibkrGetStocksFailureCount;
-            setIbkrConnectionState(
-                QStringLiteral("%1: %2 %3 (%4). OK: %5, Fehler: %6.")
-                    .arg(m_ibkrGetStocksBatchName,
-                         m_pendingIbkrQuotesSymbol,
-                         switchToMarketstack ? QStringLiteral("an Marketstack uebergeben")
-                                        : QStringLiteral("fehlgeschlagen"),
-                         finalError)
-                    .arg(m_ibkrGetStocksSuccessCount)
-                    .arg(m_ibkrGetStocksFailureCount),
-                m_ibkrConnected,
-                false);
-            m_ibkrPendingSymbol.clear();
-            m_pendingIbkrQuotesSymbol.clear();
-            m_pendingIbkrQuotesIsin.clear();
-            m_pendingIbkrQuotesIbkrSymbol.clear();
-            m_pendingIbkrQuotesCurrency.clear();
-            m_pendingIbkrQuotesExchange.clear();
+            if (m_pendingIbkrQuotesExchange.isEmpty() && !fallbackExchange.isEmpty())
+                m_pendingIbkrQuotesExchange = fallbackExchange;
             m_pendingIbkrQuotesPrimaryExchange.clear();
-            m_pendingIbkrQuotesProbeExchanges.clear();
-            m_pendingIbkrQuotesConId = 0;
-            m_pendingIbkrQuotesDays = 0;
-            m_pendingIbkrQuotesFallbackIndex = 0;
-            m_pendingIbkrQuotesSupportsSmart = false;
-            m_pendingIbkrQuotesForceDirectProbeResult = false;
-            scheduleNextIbkrGetStocksSymbol(200);
-            emit ibkrConnectionChanged();
+            startIbkrQuoteSnapshotFallback(
+                QStringLiteral("Boersen-Probe fehlgeschlagen (%1)").arg(finalError));
             return;
         }
+        updateIbkrQuoteExchangeFailure(m_pendingIbkrQuotesSymbol, finalError);
         setIbkrConnectionState(
             QStringLiteral("Fehler: %1").arg(message.trimmed().isEmpty()
-                                                ? QStringLiteral("IBKR konnte keine Umsatzboerse ermitteln.")
-                                                : message),
+                                                 ? QStringLiteral("IBKR konnte keine Umsatzboerse ermitteln.")
+                                                 : message),
             m_ibkrConnected,
             false);
         emit ibkrConnectionChanged();
@@ -1873,6 +2312,7 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
     int inserted = 0;
     int changed = 0;
     QDate newestQuoteDate;
+    double newestClosePrice = 0.0;
     for (const QJsonValue &value : bars) {
         const QJsonObject bar = value.toObject();
         const QDate closeDate = QDate::fromString(
@@ -1880,10 +2320,12 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
             QStringLiteral("yyyy-MM-dd"));
         if (!closeDate.isValid())
             continue;
-        if (!newestQuoteDate.isValid() || closeDate > newestQuoteDate)
-            newestQuoteDate = closeDate;
-
         const double closePrice = bar.value(QStringLiteral("close")).toDouble();
+        if (!newestQuoteDate.isValid() || closeDate > newestQuoteDate) {
+            newestQuoteDate = closeDate;
+            newestClosePrice = closePrice;
+        }
+
         const double openPrice = bar.value(QStringLiteral("open")).toDouble();
         const double highestPrice = bar.value(QStringLiteral("high")).toDouble();
         const double lowestPrice = bar.value(QStringLiteral("low")).toDouble();
@@ -1937,6 +2379,13 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
     if (!updateQuery.exec()) {
         qCritical() << "Stock-Update nach IBKR-Quotes fehlgeschlagen:"
                     << updateQuery.lastError().text() << normalizedSymbol;
+        db.rollback();
+        return false;
+    }
+
+    if (!updateActiveBoughtStockCurrentValue(db, normalizedSymbol, newestClosePrice)) {
+        qCritical() << "Depotwert konnte nach IBKR-Quotes nicht aktualisiert werden:"
+                    << normalizedSymbol;
         db.rollback();
         return false;
     }
@@ -2028,6 +2477,13 @@ bool DatabaseManager::saveIbkrQuoteSnapshot(const QString &symbol,
     if (!updateQuery.exec()) {
         qCritical() << "Stock-Update nach IBKR-Snapshot fehlgeschlagen:"
                     << updateQuery.lastError().text() << normalizedSymbol;
+        db.rollback();
+        return false;
+    }
+
+    if (!updateActiveBoughtStockCurrentValue(db, normalizedSymbol, closePrice)) {
+        qCritical() << "Depotwert konnte nach IBKR-Snapshot nicht aktualisiert werden:"
+                    << normalizedSymbol;
         db.rollback();
         return false;
     }
@@ -2230,6 +2686,7 @@ void DatabaseManager::finishIbkrDataRequest(int exitCode, QProcess::ExitStatus e
             m_pendingIbkrQuotesFallbackIndex = 0;
             m_pendingIbkrQuotesSupportsSmart = false;
             m_pendingIbkrQuotesForceDirectProbeResult = false;
+            m_pendingIbkrQuotesSmartHistoricalRetry = false;
             m_ibkrPendingSymbol.clear();
             m_ibkrDataTimeout.setInterval(25000);
             if (m_ibkrGetStocksBatchActive)
@@ -2320,14 +2777,14 @@ void DatabaseManager::finishIbkrDataRequest(int exitCode, QProcess::ExitStatus e
         }
 
         const QString validationMessage = isins.isEmpty()
-            ? message
-            : QStringLiteral("%1 ISINs: %2%3")
-                  .arg(message,
-                       isins.join(QStringLiteral(", ")),
-                       existingIsins.isEmpty()
-                           ? QString()
-                           : QStringLiteral(" Bereits vorhanden: %1")
-                                 .arg(existingIsins.join(QStringLiteral(", "))));
+                                              ? message
+                                              : QStringLiteral("%1 ISINs: %2%3")
+                                                    .arg(message,
+                                                         isins.join(QStringLiteral(", ")),
+                                                         existingIsins.isEmpty()
+                                                             ? QString()
+                                                             : QStringLiteral(" Bereits vorhanden: %1")
+                                                                   .arg(existingIsins.join(QStringLiteral(", "))));
         markIbkrValidationIssue(m_ibkrPendingSymbol,
                                 QStringLiteral("ambiguous_isin"),
                                 validationMessage);
@@ -2364,10 +2821,10 @@ void DatabaseManager::finishIbkrDataRequest(int exitCode, QProcess::ExitStatus e
                 sample.value(QStringLiteral("primaryExchange")).toString().trimmed();
             const QString currency = sample.value(QStringLiteral("currency")).toString().trimmed();
             const bool preferredByCurrency = !m_pendingIbkrCurrency.isEmpty()
-                && currency.compare(m_pendingIbkrCurrency, Qt::CaseInsensitive) == 0;
+                                             && currency.compare(m_pendingIbkrCurrency, Qt::CaseInsensitive) == 0;
             const bool preferredByExchange = !primaryExchange.isEmpty()
-                && (primaryExchange.compare(m_pendingIbkrExchange, Qt::CaseInsensitive) == 0
-                    || m_pendingIbkrDirectExchanges.contains(primaryExchange, Qt::CaseInsensitive));
+                                             && (primaryExchange.compare(m_pendingIbkrExchange, Qt::CaseInsensitive) == 0
+                                                 || m_pendingIbkrDirectExchanges.contains(primaryExchange, Qt::CaseInsensitive));
             const QString candidateKey = ibkrCandidateKey(candidateSymbol);
             if (!candidateKey.isEmpty()) {
                 if (!currency.isEmpty())
@@ -2417,17 +2874,17 @@ void DatabaseManager::finishIbkrDataRequest(int exitCode, QProcess::ExitStatus e
             }
             m_pendingIbkrReviewRequired = true;
             m_pendingIbkrReviewReason = QStringLiteral(
-                                             "IBKR-Namenssuche nach \"%1\": %2 Kandidaten, uebernommenen Treffer bitte pruefen (%3).")
-                                             .arg(m_pendingIbkrSearchKeywords)
-                                             .arg(added)
-                                             .arg(labels.mid(0, 5).join(QStringLiteral(", ")));
+                                            "IBKR-Namenssuche nach \"%1\": %2 Kandidaten, uebernommenen Treffer bitte pruefen (%3).")
+                                            .arg(m_pendingIbkrSearchKeywords)
+                                            .arg(added)
+                                            .arg(labels.mid(0, 5).join(QStringLiteral(", ")));
             if (tryNextIbkrCandidate())
                 return;
         }
 
         const QString failure = message.trimmed().isEmpty()
-            ? QStringLiteral("IBKR-Namenssuche fand keinen brauchbaren Aktienkandidaten.")
-            : message;
+                                    ? QStringLiteral("IBKR-Namenssuche fand keinen brauchbaren Aktienkandidaten.")
+                                    : message;
         if (tryNextIbkrCandidate(failure))
             return;
         finalizeIbkrDataFailure(failure);
@@ -2505,6 +2962,7 @@ void DatabaseManager::finishIbkrDataRequest(int exitCode, QProcess::ExitStatus e
     }
 
     const QString completedSymbol = m_ibkrPendingSymbol;
+    const bool quoteAfterMetadata = m_pendingIbkrQuoteAfterMetadata;
     m_ibkrPendingSymbol.clear();
     m_pendingIbkrCurrency.clear();
     m_pendingIbkrExchange.clear();
@@ -2525,11 +2983,33 @@ void DatabaseManager::finishIbkrDataRequest(int exitCode, QProcess::ExitStatus e
     m_pendingIbkrProcessIsNameSearch = false;
     m_pendingIbkrReviewRequired = false;
     m_pendingIbkrReviewReason.clear();
+    m_pendingIbkrQuoteAfterMetadata = false;
     m_pendingIbkrTryWithoutIsin = false;
     m_pendingIbkrDirectExchange = false;
     m_pendingIbkrDirectExchanges.clear();
     m_pendingIbkrDirectExchangeIndex = 0;
     m_pendingIbkrCurrentDirectExchange.clear();
+    if (quoteAfterMetadata && m_ibkrGetStocksBatchActive) {
+        setIbkrConnectionState(
+            QStringLiteral("%1: IBKR-Stammdaten fuer %2 aktualisiert, lade Quotes ...")
+                .arg(m_ibkrGetStocksBatchName, completedSymbol),
+            true,
+            false);
+        const bool quoteStarted = startIbkrQuoteExchangeProbeForSymbol(completedSymbol);
+        if (!quoteStarted) {
+            ++m_ibkrGetStocksFailureCount;
+            setIbkrConnectionState(
+                QStringLiteral("%1: %2 Stammdaten aktualisiert, Quote-Abruf konnte nicht gestartet werden. OK: %3, Fehler: %4.")
+                    .arg(m_ibkrGetStocksBatchName)
+                    .arg(completedSymbol)
+                    .arg(m_ibkrGetStocksSuccessCount)
+                    .arg(m_ibkrGetStocksFailureCount),
+                m_ibkrConnected,
+                false);
+            scheduleNextIbkrGetStocksSymbol(500);
+        }
+        return;
+    }
     if (m_pendingIbkrDataForNameCheckRecovery) {
         m_pendingIbkrDataForNameCheckRecovery = false;
         if (m_ibkrNameCheckBatchActive) {
@@ -2685,12 +3165,12 @@ void DatabaseManager::loadNextIbkrNameCheckBatchSymbol()
 
     m_pendingIbkrNameCheckSymbol = symbol;
     m_pendingIbkrNameCheckName = stockExists
-        ? query.value(QStringLiteral("Name")).toString()
-        : symbol.section(QLatin1Char('.'), 0, 0).trimmed();
+                                     ? query.value(QStringLiteral("Name")).toString()
+                                     : symbol.section(QLatin1Char('.'), 0, 0).trimmed();
     m_pendingIbkrNameCheckIsin = ibkrNameCheckIsinOverride(symbol);
     m_pendingIbkrNameCheckHasConId = stockExists
-        && !query.value(QStringLiteral("IBKRConId")).isNull()
-        && query.value(QStringLiteral("IBKRConId")).toLongLong() > 0;
+                                     && !query.value(QStringLiteral("IBKRConId")).isNull()
+                                     && query.value(QStringLiteral("IBKRConId")).toLongLong() > 0;
     m_pendingIbkrNameCheckRequestUsesIsin = false;
     if (m_pendingIbkrNameCheckIsin.isEmpty()) {
         ++m_ibkrNameCheckBatchFailureCount;
@@ -2722,8 +3202,8 @@ void DatabaseManager::loadNextIbkrNameCheckBatchSymbol()
     if (!duplicateQuery.exec() || duplicateQuery.next()) {
         ++m_ibkrNameCheckBatchFailureCount;
         const QString duplicateSymbol = duplicateQuery.isActive()
-            ? duplicateQuery.value(0).toString()
-            : QString();
+                                            ? duplicateQuery.value(0).toString()
+                                            : QString();
         if (stockExists && deleteStockWithReferencedData(symbol)) {
             setIbkrConnectionState(
                 duplicateSymbol.isEmpty()
@@ -2743,18 +3223,18 @@ void DatabaseManager::loadNextIbkrNameCheckBatchSymbol()
         return;
     }
     QString ibkrSymbol = stockExists
-        ? query.value(QStringLiteral("IBKRResolvedSymbol")).toString().trimmed()
-        : QString();
+                             ? query.value(QStringLiteral("IBKRResolvedSymbol")).toString().trimmed()
+                             : QString();
     const QString localSymbol = stockExists
-        ? query.value(QStringLiteral("LocalSymbol")).toString().trimmed()
-        : QString();
+                                    ? query.value(QStringLiteral("LocalSymbol")).toString().trimmed()
+                                    : QString();
     if (ibkrSymbol.isEmpty())
         ibkrSymbol = localSymbol;
     if (ibkrSymbol.isEmpty())
         ibkrSymbol = symbol.section(QLatin1Char('.'), 0, 0).trimmed();
     QString currency = stockExists
-        ? query.value(QStringLiteral("Currency")).toString().trimmed()
-        : QString();
+                           ? query.value(QStringLiteral("Currency")).toString().trimmed()
+                           : QString();
     if (currency.isEmpty() && stockExists)
         currency = currencyForCountry(query.value(QStringLiteral("CountryCode")).toString());
     if (currency.isEmpty())
@@ -2767,12 +3247,12 @@ void DatabaseManager::loadNextIbkrNameCheckBatchSymbol()
         }
     }
     QString exchange = stockExists
-        ? query.value(QStringLiteral("PrimaryExchange")).toString().trimmed()
-        : QString();
+                           ? query.value(QStringLiteral("PrimaryExchange")).toString().trimmed()
+                           : QString();
     if (exchange.isEmpty())
         exchange = stockExists
-            ? query.value(QStringLiteral("MIC")).toString().trimmed()
-            : symbol.section(QLatin1Char('.'), 1, 1).trimmed().toUpper();
+                       ? query.value(QStringLiteral("MIC")).toString().trimmed()
+                       : symbol.section(QLatin1Char('.'), 1, 1).trimmed().toUpper();
 
     setIbkrConnectionState(
         QStringLiteral("IBKR-Namenspruefung: %1/%2 %3 wird geprueft ... OK: %4, Fehler/Pruefen: %5")
@@ -2921,7 +3401,7 @@ void DatabaseManager::startIbkrNameCheckRequest(const QString &requestSymbol,
 {
     Q_UNUSED(conId)
     const QString helperPath = QDir(QCoreApplication::applicationDirPath())
-        .filePath(QStringLiteral("ibkr-helper/IbkrHelper.exe"));
+                                   .filePath(QStringLiteral("ibkr-helper/IbkrHelper.exe"));
     if (!QFileInfo::exists(helperPath)) {
         finishIbkrNameCheckBatch(QStringLiteral("Fehler: Der IBKR-Helfer fehlt im Build-Verzeichnis."));
         return;
@@ -2931,7 +3411,7 @@ void DatabaseManager::startIbkrNameCheckRequest(const QString &requestSymbol,
     m_pendingIbkrProcessIsNameCheck = true;
     m_pendingIbkrNameCheckRequestUsesIsin = useIsin && !m_pendingIbkrNameCheckIsin.isEmpty();
     const qint64 clientIdSeed = (QDateTime::currentMSecsSinceEpoch() / 1000)
-        + m_ibkrNameCheckBatchIndex;
+                                + m_ibkrNameCheckBatchIndex;
     const int clientId = 60000 + int(clientIdSeed % 5000);
     QStringList arguments = {
         QStringLiteral("--host"), QStringLiteral("127.0.0.1"),
@@ -2966,7 +3446,7 @@ void DatabaseManager::finishIbkrNameCheckRequest(const QJsonObject &result)
     const QString databaseName = m_pendingIbkrNameCheckName;
     const QString databaseIsin = m_pendingIbkrNameCheckIsin;
     const bool usesListIsin = m_pendingIbkrNameCheckRequestUsesIsin
-        && !ibkrNameCheckIsinOverride(symbol).isEmpty();
+                              && !ibkrNameCheckIsinOverride(symbol).isEmpty();
 
     const QString message = result.value(QStringLiteral("message")).toString();
     if (!result.value(QStringLiteral("success")).toBool()) {
@@ -3148,10 +3628,10 @@ void DatabaseManager::finishIbkrNameCheckRequest(const QJsonObject &result)
             WHERE "Symbol" = :symbol
         )SQL");
         const QString okMessage = (!databaseIsin.isEmpty() && databaseIsin == ibkrIsin)
-            ? QStringLiteral("ISIN und Name OK: %1, DB-Name=\"%2\", IBKR=\"%3\"")
-                  .arg(databaseIsin, databaseName, ibkrName)
-            : QStringLiteral("Namenspruefung OK: DB=\"%1\", IBKR=\"%2\"")
-                  .arg(databaseName, ibkrName);
+                                      ? QStringLiteral("ISIN und Name OK: %1, DB-Name=\"%2\", IBKR=\"%3\"")
+                                            .arg(databaseIsin, databaseName, ibkrName)
+                                      : QStringLiteral("Namenspruefung OK: DB=\"%1\", IBKR=\"%2\"")
+                                            .arg(databaseName, ibkrName);
         query.bindValue(QStringLiteral(":message"), okMessage);
         ++m_ibkrNameCheckBatchSuccessCount;
     } else {
@@ -3165,10 +3645,10 @@ void DatabaseManager::finishIbkrNameCheckRequest(const QJsonObject &result)
             WHERE "Symbol" = :symbol
         )SQL");
         const QString mismatchMessage = (!databaseIsin.isEmpty() && databaseIsin == ibkrIsin)
-            ? QStringLiteral("Name trotz gleicher ISIN pruefen: %1, DB=\"%2\", IBKR=\"%3\"")
-                  .arg(databaseIsin, databaseName, ibkrName)
-            : QStringLiteral("Namensabweichung: DB=\"%1\", IBKR=\"%2\"")
-                  .arg(databaseName, ibkrName);
+                                            ? QStringLiteral("Name trotz gleicher ISIN pruefen: %1, DB=\"%2\", IBKR=\"%3\"")
+                                                  .arg(databaseIsin, databaseName, ibkrName)
+                                            : QStringLiteral("Namensabweichung: DB=\"%1\", IBKR=\"%2\"")
+                                                  .arg(databaseName, ibkrName);
         query.bindValue(QStringLiteral(":message"), mismatchMessage);
         ++m_ibkrNameCheckBatchFailureCount;
     }
@@ -3296,7 +3776,7 @@ bool DatabaseManager::saveIbkrContractDetails(const QString &symbol, const QVari
             "IBKRLastAttemptAt", "IBKRFailureCount", "IBKRLastError", "IBKRLastSyncAt"
         )
         VALUES (
-            :symbol, :mic, COALESCE(NULLIF(:name, ''), NULLIF(:ibkrResolvedSymbol, ''), :symbol),
+            :symbol, :mic, COALESCE(NULLIF(:name, ''), :symbol),
             :exchange, NULLIF(LEFT(:isin, 2), ''),
             CURRENT_DATE, NULLIF(:isin, ''), :ibkrConId, NULLIF(:ibkrResolvedSymbol, ''),
             NULLIF(:currency, ''), NULLIF(:primaryExchange, ''), NULLIF(:localSymbol, ''),
@@ -3310,7 +3790,10 @@ bool DatabaseManager::saveIbkrContractDetails(const QString &symbol, const QVari
         )
         ON CONFLICT ("Symbol") DO UPDATE
         SET
-            "Name" = COALESCE(NULLIF(EXCLUDED."Name", ''), "Stocks"."Name"),
+            "Name" = CASE
+                WHEN NULLIF(:name, '') IS NOT NULL THEN EXCLUDED."Name"
+                ELSE "Stocks"."Name"
+            END,
             "IBKRConId" = EXCLUDED."IBKRConId",
             "IBKRResolvedSymbol" = COALESCE(EXCLUDED."IBKRResolvedSymbol", "Stocks"."IBKRResolvedSymbol"),
             "Currency" = COALESCE(EXCLUDED."Currency", "Stocks"."Currency"),

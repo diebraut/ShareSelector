@@ -90,6 +90,7 @@ public:
     Q_INVOKABLE double closePriceOnOrBefore(const QString &symbol, const QString &date);
     Q_INVOKABLE QVariantList getTestPortfolio();
     Q_INVOKABLE QVariantList getTestPortfolioSummary();
+    Q_INVOKABLE QVariantMap getTestPortfolioSummaryForSymbol(const QString &symbol);
     Q_INVOKABLE QVariantMap getPortfolioDetails(const QString &symbol);
     Q_INVOKABLE QVariantMap getPortfolioChartData(const QString &symbol);
     Q_INVOKABLE void connectToIbkr();
@@ -102,6 +103,8 @@ public:
     Q_INVOKABLE void stopIbkrBatch();
     Q_INVOKABLE void startIbkrGetStocks();
     Q_INVOKABLE void startIbkrGetAllStocks();
+    Q_INVOKABLE bool startIbkrQuoteWorkerAll();
+    Q_INVOKABLE void getIbkrQuotesForSingleStock(const QString &symbol);
     Q_INVOKABLE void startIbkrGetStocksForSymbols(const QVariantList &symbols);
     Q_INVOKABLE void stopIbkrGetStocks();
     Q_INVOKABLE void startMarketstackBatch();
@@ -178,6 +181,9 @@ private:
     bool ensureSchema();
     void tryNextIbkrPort();
     void setIbkrConnectionState(const QString &status, bool connected, bool connecting);
+    bool probeIbkrConnection(int timeoutMs, quint16 *connectedPort = nullptr);
+    void pollIbkrConnectionState();
+    bool refreshIbkrConnectionState(const QString &action = QString());
     void finishIbkrDataRequest(int exitCode, QProcess::ExitStatus exitStatus);
     void startIbkrHelperRequest(const QString &candidateSymbol);
     void startIbkrNameSearchRequest();
@@ -195,7 +201,16 @@ private:
     bool startIbkrQuoteExchangeProbeForSymbol(const QString &symbol);
     void startIbkrQuotesRequestForIsin(const QString &isin, int days);
     void startIbkrQuoteHelperRequest(bool probeExchange);
+    void startIbkrSmartHistoricalRetry(const QString &symbol,
+                                       const QString &isin,
+                                       const QString &ibkrSymbol,
+                                       const QString &currency,
+                                       qint64 conId,
+                                       int days,
+                                       const QStringList &fallbackExchanges,
+                                       const QString &reason);
     void startIbkrQuoteSnapshotFallback(const QString &reason);
+    bool retryIbkrQuoteSnapshotSmartFallback(const QString &reason);
     void finishIbkrQuotesRequest(const QJsonObject &result);
     void finishIbkrQuoteSnapshotRequest(const QJsonObject &result);
     void finishIbkrQuoteExchangeProbe(const QJsonObject &result);
@@ -207,6 +222,7 @@ private:
                                const QJsonObject &snapshotData,
                                double *savedPrice = nullptr);
     int ibkrMissingQuoteDays(const QString &symbol, int fallbackDays = 90);
+    bool ibkrHasQuoteForExpectedDate(const QString &symbol) const;
     bool saveIbkrQuoteExchange(const QString &symbol,
                                const QString &quoteExchange,
                                double turnover,
@@ -288,6 +304,7 @@ private:
     MarketStackClient marketStackClient; // Mitgliedsvariable hinzufügen
     QTcpSocket m_ibkrSocket;
     QTimer m_ibkrConnectTimeout;
+    QTimer m_ibkrConnectionProbeTimer;
     QList<quint16> m_ibkrPorts;
     qsizetype m_ibkrPortIndex = 0;
     QString m_ibkrConnectionStatus = QStringLiteral("IBKR-Verbindung wurde noch nicht geprüft.");
@@ -332,6 +349,7 @@ private:
     bool m_pendingIbkrProcessIsQuoteExchangeProbe = false;
     bool m_pendingIbkrProcessIsMarketSnapshot = false;
     bool m_pendingIbkrDataForNameCheckRecovery = false;
+    bool m_pendingIbkrQuoteAfterMetadata = false;
     bool m_pendingIbkrReviewRequired = false;
     QString m_pendingIbkrReviewReason;
     bool m_pendingIbkrTryWithoutIsin = false;
@@ -434,6 +452,7 @@ private:
     int m_pendingIbkrQuotesFallbackIndex = 0;
     bool m_pendingIbkrQuotesSupportsSmart = false;
     bool m_pendingIbkrQuotesForceDirectProbeResult = false;
+    bool m_pendingIbkrQuotesSmartHistoricalRetry = false;
     bool m_pendingIbkrNameCheckHasConId = false;
     bool m_pendingIbkrNameCheckRequestUsesIsin = false;
     QStringList m_pendingIbkrNameCheckCandidates;
