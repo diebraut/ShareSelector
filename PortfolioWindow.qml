@@ -27,6 +27,10 @@ Window {
     property int soldBuyDateColumnWidth: 105
     property int soldSellDateColumnX: soldBuyDateColumnX + soldBuyDateColumnWidth + 22
     property int soldSellDateColumnWidth: 115
+    property int depotYearColumnWidth: 96
+    property int depotSummaryTableWidth: 82 + 150 + 160 + 115 + 115 + 105 + depotYearColumnWidth * 6
+                                         + 11 * 1 + 22 * 8
+    property int depotYearColumnsWidth: depotYearColumnWidth * 6 + 5 * 1 + 10 * 8
 
     function showLocalPortfolioBusy(message) {
         localPortfolioBusyMessage = message
@@ -84,8 +88,32 @@ Window {
         positionEditDialog.savePosition()
     }
 
+    function depotYearDateLabel(month) {
+        const year = new Date().getFullYear()
+        const date = new Date(year, month, 0)
+        const dayText = String(date.getDate()).padStart(2, "0")
+        const monthText = String(month).padStart(2, "0")
+        return dayText + "." + monthText + "." + year
+    }
+
+    function depotYearGainText(month) {
+        const value = app.depotYearGainPercent(month)
+        return isNaN(value) ? "---" : value.toLocaleString(Qt.locale(), "f", 2) + " %"
+    }
+
+    function depotYearGainColor(month) {
+        const value = app.depotYearGainPercent(month)
+        return isNaN(value) || value === 0 ? "#475569" : (value > 0 ? "#15803d" : "#b91c1c")
+    }
+
     PositionEditDialog {
         id: positionEditDialog
+        app: portfolioWindow.app
+        hostWindow: portfolioWindow
+    }
+
+    DepotMasterDataDialog {
+        id: depotMasterDataDialog
         app: portfolioWindow.app
         hostWindow: portfolioWindow
     }
@@ -117,8 +145,10 @@ Window {
         minimumHeight: 520
 
         onVisibleChanged: {
-            if (visible && !app.portfolioLoaded)
-                app.loadTestPortfolio()
+            if (visible) {
+                if (!app.portfolioLoaded)
+                    app.loadTestPortfolio()
+            }
         }
 
         Rectangle {
@@ -140,15 +170,20 @@ Window {
                     }
 
                     ComboBox {
+                        id: depotComboBox
                         model: app.depotListModel
                         textRole: "name"
                         valueRole: "depotId"
                         currentIndex: app.selectedDepotIndex
+                        displayText: currentIndex >= 0 && currentIndex < app.depotListModel.count
+                            ? app.depotListModel.get(currentIndex).name
+                            : app.selectedDepotName
                         Layout.preferredWidth: 180
                         onActivated: function(index) {
                             app.selectedDepotIndex = index
                             app.selectedDepotId = app.depotListModel.get(index).depotId
                             app.selectedDepotName = app.depotListModel.get(index).name
+                            app.loadDepotYearGainPercentages()
                         }
                     }
 
@@ -177,7 +212,7 @@ Window {
 
                 GroupBox {
                     id: portfolioMasterDataGroupBox
-                    title: "Depotstammdaten"
+                    title: "Depot"
                     topPadding: 22
                     label: Label {
                         text: portfolioMasterDataGroupBox.title
@@ -197,12 +232,65 @@ Window {
                     }
                     clip: false
                     Layout.fillWidth: true
-                    Layout.preferredHeight: app.portfolioObservedCountValue > 0 ? 198 : 170
+                    Layout.preferredHeight: app.portfolioObservedCountValue > 0 ? 230 : 202
 
                     ColumnLayout {
                         anchors.fill: parent
                         anchors.margins: 10
                         spacing: 5
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 28
+                            spacing: 8
+
+                            Item { Layout.preferredWidth: 82 }
+                            Item { Layout.preferredWidth: 1 }
+                            Item { Layout.preferredWidth: 150 }
+                            Item { Layout.preferredWidth: 1 }
+                            Item { Layout.preferredWidth: 160 }
+                            Item { Layout.preferredWidth: 1 }
+                            Item { Layout.preferredWidth: 115 }
+                            Item { Layout.preferredWidth: 1 }
+                            Item { Layout.preferredWidth: 115 }
+                            Item { Layout.preferredWidth: 1 }
+                            Item { Layout.preferredWidth: 105 }
+                            Item { Layout.preferredWidth: 1 }
+                            Label {
+                                text: "Gewinn am"
+                                color: "#475569"
+                                font.bold: true
+                                font.weight: Font.Bold
+                                Layout.preferredWidth: portfolioWindow.depotYearColumnWidth * 3
+                                horizontalAlignment: Text.AlignLeft
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 2
+                            spacing: 8
+
+                            Item { Layout.preferredWidth: 82 }
+                            Item { Layout.preferredWidth: 1 }
+                            Item { Layout.preferredWidth: 150 }
+                            Item { Layout.preferredWidth: 1 }
+                            Item { Layout.preferredWidth: 160 }
+                            Item { Layout.preferredWidth: 1 }
+                            Item { Layout.preferredWidth: 115 }
+                            Item { Layout.preferredWidth: 1 }
+                            Item { Layout.preferredWidth: 115 }
+                            Item { Layout.preferredWidth: 1 }
+                            Item { Layout.preferredWidth: 105 }
+                            Item { Layout.preferredWidth: 1 }
+                            Rectangle {
+                                Layout.preferredWidth: portfolioWindow.depotYearColumnsWidth
+                                Layout.preferredHeight: 2
+                                color: "#8b98a5"
+                            }
+                        }
 
                         RowLayout {
                             Layout.fillWidth: true
@@ -220,21 +308,21 @@ Window {
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label { text: "Gewinn (%)"; color: "#475569"; font.bold: true; Layout.preferredWidth: 105; horizontalAlignment: Text.AlignRight }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
-                        Label { text: "10 Tage"; color: "#475569"; font.bold: true; Layout.preferredWidth: 82; horizontalAlignment: Text.AlignRight }
+                        Label { text: portfolioWindow.depotYearDateLabel(2); color: "#475569"; font.bold: true; Layout.preferredWidth: portfolioWindow.depotYearColumnWidth; horizontalAlignment: Text.AlignRight }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
-                        Label { text: "20 Tage"; color: "#475569"; font.bold: true; Layout.preferredWidth: 82; horizontalAlignment: Text.AlignRight }
+                        Label { text: portfolioWindow.depotYearDateLabel(4); color: "#475569"; font.bold: true; Layout.preferredWidth: portfolioWindow.depotYearColumnWidth; horizontalAlignment: Text.AlignRight }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
-                        Label { text: "40 Tage"; color: "#475569"; font.bold: true; Layout.preferredWidth: 82; horizontalAlignment: Text.AlignRight }
+                        Label { text: portfolioWindow.depotYearDateLabel(6); color: "#475569"; font.bold: true; Layout.preferredWidth: portfolioWindow.depotYearColumnWidth; horizontalAlignment: Text.AlignRight }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
-                        Label { text: "60 Tage"; color: "#475569"; font.bold: true; Layout.preferredWidth: 82; horizontalAlignment: Text.AlignRight }
+                        Label { text: portfolioWindow.depotYearDateLabel(8); color: "#475569"; font.bold: true; Layout.preferredWidth: portfolioWindow.depotYearColumnWidth; horizontalAlignment: Text.AlignRight }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
-                        Label { text: "90 Tage"; color: "#475569"; font.bold: true; Layout.preferredWidth: 82; horizontalAlignment: Text.AlignRight }
+                        Label { text: portfolioWindow.depotYearDateLabel(10); color: "#475569"; font.bold: true; Layout.preferredWidth: portfolioWindow.depotYearColumnWidth; horizontalAlignment: Text.AlignRight }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
-                        Label { text: "Investiert seit"; color: "#475569"; font.bold: true; Layout.preferredWidth: 115; horizontalAlignment: Text.AlignRight }
+                        Label { text: portfolioWindow.depotYearDateLabel(12); color: "#475569"; font.bold: true; Layout.preferredWidth: portfolioWindow.depotYearColumnWidth; horizontalAlignment: Text.AlignRight }
                         }
 
                         Rectangle {
-                            Layout.fillWidth: true
+                            Layout.preferredWidth: portfolioWindow.depotSummaryTableWidth
                             Layout.preferredHeight: 1
                             color: "#c9d0d5"
                         }
@@ -290,49 +378,50 @@ Window {
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: app.formatPercentValue(app.portfolioDays10Percent)
+                            text: portfolioWindow.depotYearGainText(2)
                             font.bold: true
-                            color: app.portfolioDayTrendColor(app.portfolioDays10Percent, 10)
-                            Layout.preferredWidth: 82
+                            color: portfolioWindow.depotYearGainColor(2)
+                            Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: app.formatPercentValue(app.portfolioDays20Percent)
+                            text: portfolioWindow.depotYearGainText(4)
                             font.bold: true
-                            color: app.portfolioDayTrendColor(app.portfolioDays20Percent, 20)
-                            Layout.preferredWidth: 82
+                            color: portfolioWindow.depotYearGainColor(4)
+                            Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: app.formatPercentValue(app.portfolioDays40Percent)
+                            text: portfolioWindow.depotYearGainText(6)
                             font.bold: true
-                            color: app.portfolioDayTrendColor(app.portfolioDays40Percent, 40)
-                            Layout.preferredWidth: 82
+                            color: portfolioWindow.depotYearGainColor(6)
+                            Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: app.formatPercentValue(app.portfolioDays60Percent)
+                            text: portfolioWindow.depotYearGainText(8)
                             font.bold: true
-                            color: app.portfolioDayTrendColor(app.portfolioDays60Percent, 60)
-                            Layout.preferredWidth: 82
+                            color: portfolioWindow.depotYearGainColor(8)
+                            Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: app.formatPercentValue(app.portfolioDays90Percent)
+                            text: portfolioWindow.depotYearGainText(10)
                             font.bold: true
-                            color: app.portfolioDayTrendColor(app.portfolioDays90Percent, 90)
-                            Layout.preferredWidth: 82
+                            color: portfolioWindow.depotYearGainColor(10)
+                            Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: app.portfolioStartInvest || "-"
+                            text: portfolioWindow.depotYearGainText(12)
                             font.bold: true
-                            Layout.preferredWidth: 115
+                            color: portfolioWindow.depotYearGainColor(12)
+                            Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         }
@@ -390,54 +479,61 @@ Window {
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: app.formatPercentValue(app.portfolioObservedDays10Percent)
+                            text: ""
                             font.bold: true
-                            color: app.portfolioDayTrendColor(app.portfolioObservedDays10Percent, 10)
-                            Layout.preferredWidth: 82
+                            Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: app.formatPercentValue(app.portfolioObservedDays20Percent)
+                            text: ""
                             font.bold: true
-                            color: app.portfolioDayTrendColor(app.portfolioObservedDays20Percent, 20)
-                            Layout.preferredWidth: 82
+                            Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: app.formatPercentValue(app.portfolioObservedDays40Percent)
+                            text: ""
                             font.bold: true
-                            color: app.portfolioDayTrendColor(app.portfolioObservedDays40Percent, 40)
-                            Layout.preferredWidth: 82
+                            Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: app.formatPercentValue(app.portfolioObservedDays60Percent)
+                            text: ""
                             font.bold: true
-                            color: app.portfolioDayTrendColor(app.portfolioObservedDays60Percent, 60)
-                            Layout.preferredWidth: 82
+                            Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: app.formatPercentValue(app.portfolioObservedDays90Percent)
+                            text: ""
                             font.bold: true
-                            color: app.portfolioDayTrendColor(app.portfolioObservedDays90Percent, 90)
-                            Layout.preferredWidth: 82
+                            Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: app.portfolioObservedStartInvest || "-"
+                            text: ""
                             font.bold: true
-                            Layout.preferredWidth: 115
+                            Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         }
 
                         Item { Layout.fillHeight: true }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 32
+                            Item { Layout.fillWidth: true }
+                            Button {
+                                text: "Stammdaten"
+                                Layout.preferredWidth: 110
+                                onClicked: depotMasterDataDialog.openForDepot()
+                            }
+                        }
+
                     }
                 }
 

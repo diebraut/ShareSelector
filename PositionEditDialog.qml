@@ -13,9 +13,9 @@ Window {
 
     title: "Ändere Daten"
     width: 430
-    height: 285
+    height: 350
     minimumWidth: 400
-    minimumHeight: 260
+    minimumHeight: 330
     flags: Qt.Dialog
     modality: Qt.ApplicationModal
     visible: false
@@ -144,6 +144,8 @@ Window {
 
             RowLayout {
                 Layout.fillWidth: true
+                Layout.preferredHeight: 36
+                Layout.topMargin: 6
                 Item { Layout.fillWidth: true }
                 Button {
                     text: "Abbrechen"

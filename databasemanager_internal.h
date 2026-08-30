@@ -13,6 +13,7 @@
 #include <QVariant>
 #include <QtGlobal>
 
+#include <algorithm>
 #include <utility>
 namespace DatabaseManagerInternal {
 const QString MarketstackApiKey = QStringLiteral("2c7445a74b7f5ed6371d655f39ab4f4f");
@@ -228,6 +229,84 @@ inline QStringList ibkrDirectExchanges(const QString &exchange)
     return normalized.isEmpty() ? QStringList{} : QStringList{normalized};
 }
 
+inline bool ibkrIsEuroQuoteExchange(const QString &exchange)
+{
+    const QString normalized = exchange.trimmed().toUpper();
+    static const QSet<QString> euroExchanges = {
+        QStringLiteral("AEB"), QStringLiteral("BATEEN"),
+        QStringLiteral("BM"), QStringLiteral("BME"),
+        QStringLiteral("BRU"),
+        QStringLiteral("BVME"),
+        QStringLiteral("ENEXT.BE"), QStringLiteral("ENEXT.FR"),
+        QStringLiteral("ENEXT.NL"), QStringLiteral("ENEXT.PT"),
+        QStringLiteral("FRA"), QStringLiteral("FWB"), QStringLiteral("FWB2"),
+        QStringLiteral("GETTEX"), QStringLiteral("GETTEX2"),
+        QStringLiteral("IBIS"), QStringLiteral("IBIS2"),
+        QStringLiteral("LISB"),
+        QStringLiteral("MCE"),
+        QStringLiteral("MIL"),
+        QStringLiteral("PAR"),
+        QStringLiteral("SBF"),
+        QStringLiteral("SWB"),
+        QStringLiteral("TGATE"),
+        QStringLiteral("VIE"), QStringLiteral("VSE"),
+        QStringLiteral("XAMS"), QStringLiteral("XATH"), QStringLiteral("XBRU"),
+        QStringLiteral("XDUB"), QStringLiteral("XETR"), QStringLiteral("XFRA"),
+        QStringLiteral("XHEL"), QStringLiteral("XLIS"), QStringLiteral("XMAD"),
+        QStringLiteral("XMIL"), QStringLiteral("XPAR"), QStringLiteral("XVIE")
+    };
+    return euroExchanges.contains(normalized);
+}
+
+inline bool ibkrQuoteExchangesContainEuro(const QStringList &exchanges)
+{
+    for (const QString &exchange : exchanges) {
+        if (ibkrIsEuroQuoteExchange(exchange))
+            return true;
+    }
+    return false;
+}
+
+inline int ibkrQuoteExchangePreferenceRank(const QString &exchange)
+{
+    const QString normalized = exchange.trimmed().toUpper();
+    if (normalized == QStringLiteral("FWB"))
+        return 0;
+    if (normalized == QStringLiteral("FWB2"))
+        return 1;
+    if (normalized == QStringLiteral("GETTEX"))
+        return 2;
+    if (normalized == QStringLiteral("GETTEX2"))
+        return 3;
+    if (normalized == QStringLiteral("TGATE"))
+        return 4;
+    if (normalized == QStringLiteral("IBIS") || normalized == QStringLiteral("IBIS2"))
+        return 5;
+    if (normalized == QStringLiteral("SBF"))
+        return 90;
+    return 50;
+}
+
+inline QStringList preferEuroQuoteExchanges(const QStringList &exchanges)
+{
+    QStringList preferred;
+    QStringList fallback;
+    const bool hasFwb = exchanges.contains(QStringLiteral("FWB"), Qt::CaseInsensitive);
+    for (const QString &exchange : exchanges) {
+        if (hasFwb && exchange.trimmed().compare(QStringLiteral("SBF"), Qt::CaseInsensitive) == 0)
+            continue;
+        if (ibkrIsEuroQuoteExchange(exchange))
+            preferred << exchange;
+        else
+            fallback << exchange;
+    }
+    std::stable_sort(preferred.begin(), preferred.end(), [](const QString &left, const QString &right) {
+        return ibkrQuoteExchangePreferenceRank(left) < ibkrQuoteExchangePreferenceRank(right);
+    });
+    preferred << fallback;
+    return preferred;
+}
+
 inline QStringList ibkrQuoteExchangeCandidates(const QString &validExchanges,
                                         const QString &primaryExchange,
                                         const QString &mic)
@@ -253,7 +332,7 @@ inline QStringList ibkrQuoteExchangeCandidates(const QString &validExchanges,
             append(exchange);
     }
 
-    return candidates;
+    return preferEuroQuoteExchanges(candidates);
 }
 
 inline bool ibkrValidExchangesContainSmart(const QString &validExchanges)
@@ -282,7 +361,7 @@ inline QStringList ibkrQuoteFallbackExchanges(const QString &preferredExchange,
     append(preferredExchange);
     for (const QString &candidate : candidates)
         append(candidate);
-    return exchanges;
+    return preferEuroQuoteExchanges(exchanges);
 }
 
 inline bool shouldUseMarketstackForIbkrQuoteError(const QString &error)

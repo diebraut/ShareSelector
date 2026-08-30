@@ -682,8 +682,12 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
         validExchanges,
         stockQuery.value(QStringLiteral("PrimaryExchange")).toString(),
         stockQuery.value(QStringLiteral("MIC")).toString());
+    const bool hasEuroProbeExchange = ibkrQuoteExchangesContainEuro(probeExchanges);
+    const bool cachedExchangeIsEuro =
+        ibkrIsEuroQuoteExchange(cachedQuoteExchange)
+        || ibkrIsEuroQuoteExchange(cachedPrimaryExchange);
 
-    if (!cachedQuoteExchange.isEmpty()) {
+    if (!cachedQuoteExchange.isEmpty() && (!hasEuroProbeExchange || cachedExchangeIsEuro)) {
         m_ibkrSocket.abort();
         m_ibkrPendingSymbol = symbol.trimmed();
         m_pendingIbkrQuotesSymbol = symbol.trimmed();
@@ -857,6 +861,12 @@ void DatabaseManager::startIbkrQuotesRequestForIsin(const QString &isin, int day
         validExchanges,
         stockQuery.value(QStringLiteral("PrimaryExchange")).toString(),
         stockQuery.value(QStringLiteral("MIC")).toString());
+    const bool hasEuroProbeExchange = ibkrQuoteExchangesContainEuro(probeExchanges);
+    const bool cachedExchangeIsEuro =
+        ibkrIsEuroQuoteExchange(cachedQuoteExchange)
+        || ibkrIsEuroQuoteExchange(cachedPrimaryExchange);
+    const bool useCachedQuoteExchange =
+        !cachedQuoteExchange.isEmpty() && (!hasEuroProbeExchange || cachedExchangeIsEuro);
 
     const QString helperPath = QDir(QCoreApplication::applicationDirPath())
                                    .filePath(QStringLiteral("ibkr-helper/IbkrHelper.exe"));
@@ -871,9 +881,10 @@ void DatabaseManager::startIbkrQuotesRequestForIsin(const QString &isin, int day
     m_pendingIbkrQuotesIsin = isin.trimmed().toUpper();
     m_pendingIbkrQuotesIbkrSymbol = ibkrSymbol;
     m_pendingIbkrQuotesCurrency = currency;
-    m_pendingIbkrQuotesExchange = cachedQuoteExchange.isEmpty() ? QStringLiteral("SMART") : cachedQuoteExchange;
+    m_pendingIbkrQuotesExchange = useCachedQuoteExchange ? cachedQuoteExchange : QStringLiteral("SMART");
     m_pendingIbkrQuotesPrimaryExchange = cachedPrimaryExchange;
-    if (!cachedPrimaryExchange.isEmpty()
+    if (useCachedQuoteExchange
+        && !cachedPrimaryExchange.isEmpty()
         && m_pendingIbkrQuotesExchange.compare(cachedPrimaryExchange, Qt::CaseInsensitive) != 0) {
         m_pendingIbkrQuotesExchange = cachedPrimaryExchange;
         m_pendingIbkrQuotesPrimaryExchange.clear();
@@ -901,7 +912,7 @@ void DatabaseManager::startIbkrQuotesRequestForIsin(const QString &isin, int day
     if (startWithSnapshot) {
         startIbkrQuoteSnapshotFallback(
             QStringLiteral("Quote fuer aktuellen Handelstag vorhanden, aktualisiere Live-Snapshot"));
-    } else if (cachedQuoteExchange.isEmpty() && !probeExchanges.isEmpty()) {
+    } else if (!useCachedQuoteExchange && !probeExchanges.isEmpty()) {
         m_pendingIbkrProcessIsHistoricalQuotes = false;
         m_pendingIbkrProcessIsQuoteExchangeProbe = true;
         m_pendingIbkrProcessIsMarketSnapshot = false;

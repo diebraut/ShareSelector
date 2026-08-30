@@ -87,6 +87,286 @@ QVariantList DatabaseManager::getBoughtStocks()
     return results;
 }
 
+QVariantList DatabaseManager::getDepots()
+{
+    QVariantList results;
+
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return results;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT
+            "DepotId",
+            "Name",
+            COALESCE("IsActive", TRUE) AS "IsActive"
+        FROM "Depots"
+        ORDER BY "DepotId" ASC
+    )SQL");
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Laden der Depots:" << query.lastError().text();
+        return results;
+    }
+
+    while (query.next()) {
+        QVariantMap row;
+        row["depotId"] = query.value(QStringLiteral("DepotId"));
+        row["name"] = query.value(QStringLiteral("Name"));
+        row["isActive"] = query.value(QStringLiteral("IsActive"));
+        results << row;
+    }
+
+    return results;
+}
+
+QVariantMap DatabaseManager::getDepotMasterData(int depotId, int investmentYear)
+{
+    QVariantMap row;
+
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return row;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT
+            d."DepotId",
+            d."Name",
+            TO_CHAR(d."StartInvest", 'YYYY-MM-DD') AS "StartInvest",
+            COALESCE(d."Currency", 'EUR') AS "Currency",
+            COALESCE(d."Description", '') AS "Description",
+            COALESCE(d."IsActive", TRUE) AS "IsActive",
+            :investmentYear AS "InvestmentYear",
+            COALESCE(y."InvestmentAmount", 0) AS "InvestmentAmount",
+            COALESCE(y."YearEndValue", 0) AS "YearEndValue",
+            TO_CHAR(d."CreatedAt", 'YYYY-MM-DD HH24:MI:SS') AS "CreatedAt",
+            TO_CHAR(d."UpdatedAt", 'YYYY-MM-DD HH24:MI:SS') AS "UpdatedAt"
+        FROM "Depots" d
+        LEFT JOIN "DepotYearInvestments" y
+          ON y."DepotId" = d."DepotId"
+         AND y."InvestmentYear" = :investmentYear
+        WHERE d."DepotId" = :depotId
+        LIMIT 1
+    )SQL");
+    query.bindValue(QStringLiteral(":depotId"), depotId);
+    query.bindValue(QStringLiteral(":investmentYear"), investmentYear);
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Laden der Depotstammdaten:" << query.lastError().text() << depotId << investmentYear;
+        return row;
+    }
+
+    if (!query.next())
+        return row;
+
+    row["depotId"] = query.value(QStringLiteral("DepotId"));
+    row["name"] = query.value(QStringLiteral("Name"));
+    row["startInvest"] = query.value(QStringLiteral("StartInvest"));
+    row["currency"] = query.value(QStringLiteral("Currency"));
+    row["description"] = query.value(QStringLiteral("Description"));
+    row["isActive"] = query.value(QStringLiteral("IsActive"));
+    row["investmentYear"] = query.value(QStringLiteral("InvestmentYear"));
+    row["investmentAmount"] = query.value(QStringLiteral("InvestmentAmount"));
+    row["yearEndValue"] = query.value(QStringLiteral("YearEndValue"));
+    row["createdAt"] = query.value(QStringLiteral("CreatedAt"));
+    row["updatedAt"] = query.value(QStringLiteral("UpdatedAt"));
+    return row;
+}
+
+QVariantMap DatabaseManager::getDepotYearGainPercentages(int depotId, int investmentYear)
+{
+    QVariantMap result;
+
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return result;
+    }
+
+    const QList<int> months = {2, 4, 6, 8, 10, 12};
+    for (int month : months)
+        result[QStringLiteral("month%1").arg(month)] = QVariant();
+
+    if (depotId <= 0 || investmentYear < 1900 || investmentYear > 3000)
+        return result;
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        WITH year_data AS (
+            SELECT COALESCE("InvestmentAmount", 0) AS investment_amount
+            FROM "DepotYearInvestments"
+            WHERE "DepotId" = :depotId
+              AND "InvestmentYear" = :investmentYear
+        ),
+        positions AS (
+            SELECT
+                COALESCE(b."Quantity", 1) AS quantity,
+                COALESCE(b."EntryValue", 0) AS entry_value,
+                COALESCE(q.close_price, b."CurrentValue", b."EntryValue", 0) AS value_at_date
+            FROM "BoughtStocks" b
+            LEFT JOIN LATERAL (
+                SELECT q."ClosePrice" AS close_price
+                FROM "Quotes" q
+                WHERE q."Symbol" = b."Symbol"
+                  AND q."CloseDate" <= :asOfDate
+                  AND COALESCE(q."ClosePrice", 0) > 0
+                ORDER BY q."CloseDate" DESC
+                LIMIT 1
+            ) q ON true
+            WHERE b."DepotId" = :depotId
+              AND b."BuyDate" <= :asOfDate
+              AND (b."SellDate" IS NULL OR b."SellDate" > :asOfDate)
+        ),
+        totals AS (
+            SELECT
+                COALESCE((SELECT investment_amount FROM year_data), 0) AS investment_amount,
+                COALESCE(SUM(quantity * entry_value), 0) AS invested_amount,
+                COALESCE(SUM(quantity * value_at_date), 0) AS position_value
+            FROM positions
+        )
+        SELECT
+            CASE
+                WHEN investment_amount <= 0 THEN NULL
+                ELSE ROUND(((position_value + (investment_amount - invested_amount) - investment_amount)
+                            / NULLIF(investment_amount, 0) * 100)::numeric, 2)
+            END AS gain_percent
+        FROM totals
+    )SQL");
+
+    for (int month : months) {
+        const QDate asOfDate(investmentYear, month, 1);
+        const QDate periodEndDate = asOfDate.addMonths(1).addDays(-1);
+        if (periodEndDate > QDate::currentDate())
+            continue;
+
+        const QString asOfDateText = periodEndDate.toString(QStringLiteral("yyyy-MM-dd"));
+
+        query.bindValue(QStringLiteral(":depotId"), depotId);
+        query.bindValue(QStringLiteral(":investmentYear"), investmentYear);
+        query.bindValue(QStringLiteral(":asOfDate"), asOfDateText);
+
+        if (!query.exec()) {
+            qCritical() << "Fehler beim Berechnen der Depot-Jahresgewinne:"
+                        << query.lastError().text() << depotId << investmentYear << asOfDateText;
+            query.finish();
+            continue;
+        }
+
+        if (query.next())
+            result[QStringLiteral("month%1").arg(month)] = query.value(QStringLiteral("gain_percent"));
+
+        query.finish();
+    }
+
+    return result;
+}
+
+bool DatabaseManager::saveDepotMasterData(
+    int depotId,
+    const QString &name,
+    const QString &startInvest,
+    int investmentYear,
+    double investmentAmount,
+    double yearEndValue,
+    const QString &currency,
+    const QString &description,
+    bool isActive)
+{
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return false;
+    }
+
+    const QString normalizedName = name.trimmed();
+    const QString normalizedStartInvest = startInvest.trimmed();
+    const QString normalizedCurrency = currency.trimmed().toUpper();
+    if (depotId <= 0
+        || normalizedName.isEmpty()
+        || normalizedCurrency.isEmpty()
+        || investmentYear < 1900
+        || investmentYear > 3000) {
+        qWarning() << "Pflichtfelder fuer Depotstammdaten fehlen.";
+        return false;
+    }
+
+    if (!db.transaction()) {
+        qCritical() << "Fehler beim Starten der Depotstammdaten-Transaktion:" << db.lastError().text();
+        return false;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        UPDATE "Depots"
+        SET
+            "Name" = :name,
+            "StartInvest" = NULLIF(:startInvest, '')::date,
+            "Currency" = :currency,
+            "Description" = NULLIF(:description, ''),
+            "IsActive" = :isActive,
+            "UpdatedAt" = CURRENT_TIMESTAMP
+        WHERE "DepotId" = :depotId
+    )SQL");
+    query.bindValue(QStringLiteral(":depotId"), depotId);
+    query.bindValue(QStringLiteral(":name"), normalizedName);
+    query.bindValue(QStringLiteral(":startInvest"), normalizedStartInvest);
+    query.bindValue(QStringLiteral(":currency"), normalizedCurrency);
+    query.bindValue(QStringLiteral(":description"), description.trimmed());
+    query.bindValue(QStringLiteral(":isActive"), isActive);
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Speichern der Depotstammdaten:" << query.lastError().text() << depotId;
+        db.rollback();
+        return false;
+    }
+
+    if (query.numRowsAffected() <= 0) {
+        db.rollback();
+        return false;
+    }
+
+    QSqlQuery yearQuery(db);
+    yearQuery.prepare(R"SQL(
+        INSERT INTO "DepotYearInvestments" (
+            "DepotId",
+            "InvestmentYear",
+            "InvestmentAmount",
+            "YearEndValue"
+        )
+        VALUES (
+            :depotId,
+            :investmentYear,
+            :investmentAmount,
+            :yearEndValue
+        )
+        ON CONFLICT ("DepotId", "InvestmentYear") DO UPDATE SET
+            "InvestmentAmount" = EXCLUDED."InvestmentAmount",
+            "YearEndValue" = EXCLUDED."YearEndValue",
+            "UpdatedAt" = CURRENT_TIMESTAMP
+    )SQL");
+    yearQuery.bindValue(QStringLiteral(":depotId"), depotId);
+    yearQuery.bindValue(QStringLiteral(":investmentYear"), investmentYear);
+    yearQuery.bindValue(QStringLiteral(":investmentAmount"), investmentAmount);
+    yearQuery.bindValue(QStringLiteral(":yearEndValue"), yearEndValue);
+
+    if (!yearQuery.exec()) {
+        qCritical() << "Fehler beim Speichern der Depot-Jahreswerte:"
+                    << yearQuery.lastError().text() << depotId << investmentYear;
+        db.rollback();
+        return false;
+    }
+
+    if (!db.commit()) {
+        qCritical() << "Fehler beim Abschliessen der Depotstammdaten-Transaktion:" << db.lastError().text();
+        db.rollback();
+        return false;
+    }
+
+    return true;
+}
+
 QVariantMap DatabaseManager::getPortfolioChartData(const QString &symbol)
 {
     QVariantMap result;

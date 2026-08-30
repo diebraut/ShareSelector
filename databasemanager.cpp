@@ -781,7 +781,13 @@ bool DatabaseManager::ensureSchema()
         )SQL"),
         QStringLiteral(R"SQL(
             ALTER TABLE "Depots"
-                ADD COLUMN IF NOT EXISTS "StartInvestAmount" NUMERIC(20, 2) NOT NULL DEFAULT 0
+                ADD COLUMN IF NOT EXISTS "StartInvest" DATE,
+                ADD COLUMN IF NOT EXISTS "StartInvestAmount" NUMERIC(20, 2) NOT NULL DEFAULT 0,
+                ADD COLUMN IF NOT EXISTS "Currency" VARCHAR(8) NOT NULL DEFAULT 'EUR',
+                ADD COLUMN IF NOT EXISTS "Description" TEXT,
+                ADD COLUMN IF NOT EXISTS "IsActive" BOOLEAN NOT NULL DEFAULT TRUE,
+                ADD COLUMN IF NOT EXISTS "CreatedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                ADD COLUMN IF NOT EXISTS "UpdatedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         )SQL"),
         QStringLiteral(R"SQL(
             INSERT INTO "Depots" ("DepotId", "Name", "StartInvestAmount", "Currency", "IsActive")
@@ -794,6 +800,39 @@ bool DatabaseManager::ensureSchema()
                 "UpdatedAt" = CURRENT_TIMESTAMP
             WHERE "DepotId" = 1
               AND COALESCE("StartInvestAmount", 0) = 0
+        )SQL"),
+        QStringLiteral(R"SQL(
+            CREATE TABLE IF NOT EXISTS "DepotYearInvestments" (
+                "DepotId" INTEGER NOT NULL,
+                "InvestmentYear" INTEGER NOT NULL,
+                "InvestmentAmount" NUMERIC(20, 2) NOT NULL DEFAULT 0,
+                "YearEndValue" NUMERIC(20, 2) NOT NULL DEFAULT 0,
+                "CreatedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                "UpdatedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY ("DepotId", "InvestmentYear"),
+                CONSTRAINT "DepotYearInvestments_DepotId_fkey"
+                    FOREIGN KEY ("DepotId")
+                    REFERENCES "Depots" ("DepotId")
+                    ON DELETE CASCADE,
+                CONSTRAINT "DepotYearInvestments_InvestmentYear_chk"
+                    CHECK ("InvestmentYear" BETWEEN 1900 AND 3000)
+            )
+        )SQL"),
+        QStringLiteral(R"SQL(
+            INSERT INTO "DepotYearInvestments" (
+                "DepotId",
+                "InvestmentYear",
+                "InvestmentAmount",
+                "YearEndValue"
+            )
+            SELECT
+                "DepotId",
+                EXTRACT(YEAR FROM CURRENT_DATE)::integer,
+                COALESCE("StartInvestAmount", 0),
+                0
+            FROM "Depots"
+            WHERE COALESCE("StartInvestAmount", 0) <> 0
+            ON CONFLICT ("DepotId", "InvestmentYear") DO NOTHING
         )SQL"),
         QStringLiteral(R"SQL(
             SELECT setval(

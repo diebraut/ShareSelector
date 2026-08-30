@@ -624,17 +624,28 @@ def better_direct_exchange_attempts(request: StockRequest) -> list[tuple[str, St
     attempts: list[tuple[str, StockRequest]] = []
     valid = exchange_values(request.valid_exchanges)
     current = request.quote_exchange.strip().upper()
+    primary = request.primary_exchange.strip().upper()
 
-    if current == "SWB" and (not valid or "FWB" in valid or request.symbol.upper().endswith(".XFRA")):
-        attempts.append(("FWB", exchange_request(request, "FWB")))
+    def append_attempt(exchange: str, candidate_request: StockRequest) -> None:
+        normalized = exchange.strip().upper()
+        if normalized and normalized not in {existing for existing, _ in attempts}:
+            attempts.append((normalized, candidate_request))
 
-    if current and current != "SMART" and current not in {exchange for exchange, _ in attempts}:
-        attempts.append((current, request))
+    if "FWB" in valid:
+        append_attempt("FWB", exchange_request(request, "FWB"))
+
+    has_fwb = "FWB" in valid
+
+    if current and current != "SMART" and not (current == "SBF" and has_fwb):
+        append_attempt(current, request)
     elif current == "SMART":
-        primary = request.primary_exchange.strip().upper()
-        if primary and primary != "SMART":
-            attempts.append((primary, exchange_request(request, primary)))
-        attempts.append(("SMART", request))
+        if primary and primary != "SMART" and not (primary == "SBF" and has_fwb):
+            append_attempt(primary, exchange_request(request, primary))
+        append_attempt("SMART", request)
+
+    for fallback in ("SWB", "GETTEX", "TGATE", "IBIS"):
+        if fallback in valid:
+            append_attempt(fallback, exchange_request(request, fallback))
 
     return attempts or [("SMART", smart_snapshot_request(request))]
 

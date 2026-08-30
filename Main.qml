@@ -77,6 +77,7 @@ ApplicationWindow {
 
     Component.onCompleted: Qt.callLater(function() {
         applyStartupWindowGeometry()
+        loadDepots()
         loadIbkrQuoteSchedule()
         loadStockAnalysisConfigs()
         loadLastStockAnalysisConfig()
@@ -102,7 +103,7 @@ ApplicationWindow {
 
     ListModel {
         id: depotModel
-        ListElement { depotId: 1; name: "Default" }
+        ListElement { depotId: 1; name: "Default"; isActive: true }
     }
     property alias depotListModel: depotModel
     property int selectedDepotIndex: 0
@@ -164,6 +165,7 @@ ApplicationWindow {
     property double portfolioObservedDays40Percent: 0
     property double portfolioObservedDays60Percent: 0
     property double portfolioObservedDays90Percent: 0
+    property var depotYearGainPercentages: ({})
     property bool portfolioLoaded: false
     property var portfolioDetails: ({})
     property string portfolioDetailsSymbol: ""
@@ -637,6 +639,69 @@ ApplicationWindow {
         return isNaN(value) ? 0 : value
     }
 
+    function currentInvestmentYear() {
+        return new Date().getFullYear()
+    }
+
+    function loadDepots(preferredDepotId) {
+        const selectedId = Number(preferredDepotId || selectedDepotId || 1)
+        const depots = dbManager.getDepots()
+        selectedDepotIndex = -1
+        depotModel.clear()
+        let selectedIndex = -1
+        depots.forEach(function(depot, index) {
+            depotModel.append({
+                depotId: Number(depot.depotId || 0),
+                name: String(depot.name || ""),
+                isActive: Boolean(depot.isActive)
+            })
+            if (Number(depot.depotId || 0) === selectedId)
+                selectedIndex = index
+        })
+        if (depotModel.count === 0)
+            depotModel.append({ depotId: 1, name: "Default", isActive: true })
+        if (selectedIndex < 0)
+            selectedIndex = 0
+        selectedDepotIndex = selectedIndex
+        selectedDepotId = Number(depotModel.get(selectedIndex).depotId || 1)
+        selectedDepotName = depotModel.get(selectedIndex).name || "Default"
+        loadDepotYearGainPercentages()
+    }
+
+    function loadDepotYearGainPercentages() {
+        depotYearGainPercentages = dbManager.getDepotYearGainPercentages(selectedDepotId, currentInvestmentYear())
+    }
+
+    function depotYearGainPercent(month) {
+        const value = depotYearGainPercentages["month" + month]
+        return value === undefined || value === null ? Number.NaN : Number(value)
+    }
+
+    function saveSelectedDepotMasterData(name, startInvest, investmentYear, investmentAmount, yearEndValue, currency, description, isActive) {
+        const ok = dbManager.saveDepotMasterData(
+            selectedDepotId,
+            name,
+            startInvest,
+            investmentYear,
+            investmentAmount,
+            yearEndValue,
+            currency,
+            description,
+            isActive
+        )
+        if (ok) {
+            selectedDepotName = name
+            if (selectedDepotIndex >= 0 && selectedDepotIndex < depotModel.count) {
+                depotModel.setProperty(selectedDepotIndex, "name", name)
+                depotModel.setProperty(selectedDepotIndex, "isActive", Boolean(isActive))
+            } else {
+                loadDepots(selectedDepotId)
+            }
+            loadDepotYearGainPercentages()
+        }
+        return ok
+    }
+
     function loadTestPortfolio(preferredSymbol, preserveView) {
         portfolioPendingPreferredSymbol = preferredSymbol || ""
         portfolioPendingPreserveView = Boolean(preserveView)
@@ -658,6 +723,7 @@ ApplicationWindow {
         data.forEach(item => rows.push(item))
         portfolioRows = rows
         updatePortfolioTotals()
+        loadDepotYearGainPercentages()
         portfolioLoaded = true
         portfolioDetails = ({})
         portfolioDetailsSymbol = ""
@@ -1980,6 +2046,7 @@ ApplicationWindow {
                     isin: baseRow.isin || "",
                     name: baseRow.name || "",
                     mic: baseRow.mic || "",
+                    quotecurrency: baseRow.quotecurrency || "",
                     quotesource: baseRow.quotesource || "-",
                     increasepercent: 0,
                     firstquotedate: "",
@@ -2150,6 +2217,7 @@ ApplicationWindow {
             isin: row.isin || "",
             name: row.name || "",
             mic: row.mic || "",
+            quotecurrency: row.quotecurrency || "",
             quotesource: row.quotesource || "",
             increasepercent: Number(row.increasepercent || 0),
             firstquotedate: row.firstquotedate || "",
@@ -2535,6 +2603,7 @@ ApplicationWindow {
                 turnover: 0,
                 peratio: row.fundamentalPERatio || "",
                 quotecount: stockAnalysisQuoteCount,
+                quotecurrency: row.currency || "",
                 ibkrsource: "Depot",
                 corridorhitpercent: 0,
                 increasepercent: Number(row.valueIncreasePercent || 0),
@@ -2637,6 +2706,7 @@ ApplicationWindow {
                             Label { text: "IBKR/MS"; Layout.preferredWidth: 75; font.bold: true; horizontalAlignment: Text.AlignHCenter }
                             Label { text: "Korridor"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
                             Label { text: "Steigerung"; Layout.preferredWidth: 100; font.bold: true; horizontalAlignment: Text.AlignRight }
+                            Label { text: "Quote-Währung"; Layout.preferredWidth: 105; Layout.leftMargin: 12; font.bold: true; horizontalAlignment: Text.AlignHCenter }
                             Label { text: "Quote-Datum"; Layout.preferredWidth: 110; Layout.leftMargin: 12; font.bold: true; horizontalAlignment: Text.AlignRight }
                             Item { Layout.fillWidth: true }
                         }
@@ -2803,6 +2873,7 @@ ApplicationWindow {
                                     Label { text: model.quotesource || "-"; Layout.preferredWidth: 75; horizontalAlignment: Text.AlignHCenter }
                                     Label { text: Number(model.corridorhitpercent || 0).toFixed(1) + "%"; Layout.preferredWidth: 90; horizontalAlignment: Text.AlignRight }
                                     Label { text: Number(model.increasepercent || 0).toFixed(2) + "%"; Layout.preferredWidth: 100; horizontalAlignment: Text.AlignRight }
+                                    Label { text: model.quotecurrency || "-"; Layout.preferredWidth: 105; Layout.leftMargin: 12; horizontalAlignment: Text.AlignHCenter }
                                     Label { text: model.lastquotedate || "-"; Layout.preferredWidth: 110; Layout.leftMargin: 12; horizontalAlignment: Text.AlignRight }
                                     Item { Layout.fillWidth: true }
                                 }

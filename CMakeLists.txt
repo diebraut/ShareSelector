@@ -62,6 +62,7 @@ qt_add_qml_module(appShareSelector
         Main.qml  # Groß-/Kleinschreibung prüfen!
         PortfolioChartWindow.qml
         PortfolioWindow.qml
+        DepotMasterDataDialog.qml
         StockAnalysisConfigPanel.qml
         StockAnalysisChartPanel.qml
         StockAnalysisBuyDialog.qml

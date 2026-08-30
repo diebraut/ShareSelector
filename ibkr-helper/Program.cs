@@ -32,10 +32,14 @@ var isinOnly = args.Any(value => string.Equals(value, "--isin-only", StringCompa
 var historicalQuotes = args.Any(value => string.Equals(value, "--historical-quotes", StringComparison.OrdinalIgnoreCase));
 var marketSnapshot = args.Any(value => string.Equals(value, "--market-snapshot", StringComparison.OrdinalIgnoreCase));
 var probeQuoteExchanges = args.Any(value => string.Equals(value, "--probe-quote-exchanges", StringComparison.OrdinalIgnoreCase));
-var exchanges = (Argument(args, "--exchanges") ?? string.Empty)
+var rawExchanges = (Argument(args, "--exchanges") ?? string.Empty)
     .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
     .Where(value => !string.Equals(value, "SMART", StringComparison.OrdinalIgnoreCase))
     .Distinct(StringComparer.OrdinalIgnoreCase)
+    .ToArray();
+var hasFwbExchange = rawExchanges.Any(value => string.Equals(value, "FWB", StringComparison.OrdinalIgnoreCase));
+var exchanges = rawExchanges
+    .Where(value => !(hasFwbExchange && string.Equals(value, "SBF", StringComparison.OrdinalIgnoreCase)))
     .ToArray();
 var daysText = Argument(args, "--days")?.Trim() ?? string.Empty;
 var days = int.TryParse(daysText, out var parsedDays) ? parsedDays : 90;
@@ -733,11 +737,19 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
             return;
         }
 
-        var best = quoteExchangeProbeResults
+        var successfulProbeResults = quoteExchangeProbeResults
             .Where(result => result.turnover > 0)
-            .OrderByDescending(result => result.turnover)
+            .ToArray();
+        var best = successfulProbeResults
+            .Where(result => IsEuroQuoteExchange(result.exchange))
+            .OrderBy(result => EuroQuoteExchangePreferenceRank(result.exchange))
+            .ThenByDescending(result => result.turnover)
             .ThenByDescending(result => result.volume)
-            .FirstOrDefault();
+            .FirstOrDefault()
+            ?? successfulProbeResults
+                .OrderByDescending(result => result.turnover)
+                .ThenByDescending(result => result.volume)
+                .FirstOrDefault();
         if (best is null) {
             Result.TrySetResult(new {
                 success = false,
@@ -758,6 +770,46 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
                 candidates = quoteExchangeProbeResults.ToArray()
             }
         });
+    }
+
+    private static bool IsEuroQuoteExchange(string exchange)
+    {
+        var normalized = (exchange ?? string.Empty).Trim().ToUpperInvariant();
+        return normalized is "AEB" or "BATEEN"
+            or "BM" or "BME"
+            or "BRU"
+            or "BVME"
+            or "ENEXT.BE" or "ENEXT.FR" or "ENEXT.NL" or "ENEXT.PT"
+            or "FRA" or "FWB" or "FWB2"
+            or "GETTEX" or "GETTEX2"
+            or "IBIS" or "IBIS2"
+            or "LISB"
+            or "MCE"
+            or "MIL"
+            or "PAR"
+            or "SBF"
+            or "SWB"
+            or "TGATE"
+            or "VIE" or "VSE"
+            or "XAMS" or "XATH" or "XBRU"
+            or "XDUB" or "XETR" or "XFRA"
+            or "XHEL" or "XLIS" or "XMAD"
+            or "XMIL" or "XPAR" or "XVIE";
+    }
+
+    private static int EuroQuoteExchangePreferenceRank(string exchange)
+    {
+        var normalized = (exchange ?? string.Empty).Trim().ToUpperInvariant();
+        return normalized switch {
+            "FWB" => 0,
+            "FWB2" => 1,
+            "GETTEX" => 2,
+            "GETTEX2" => 3,
+            "TGATE" => 4,
+            "IBIS" or "IBIS2" => 5,
+            "SBF" => 90,
+            _ => 50
+        };
     }
 
     private bool TryRetryWithSymbol(string reason)

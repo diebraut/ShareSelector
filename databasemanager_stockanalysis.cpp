@@ -256,6 +256,7 @@ QVariantList DatabaseManager::getStockAnalysisResults(double minIncreasePercent,
             s."ISIN" AS isin,
             s."Name" AS name,
             s."MIC" AS mic,
+            s."Currency" AS quotecurrency,
             CASE
                 WHEN NOT COALESCE(s."from_IBKR", true) THEN 'MS'
                 WHEN COALESCE(s."IBKRQuoteExchange", '') <> '' THEN 'IBKR'
@@ -381,6 +382,7 @@ QVariantList DatabaseManager::findStockAnalysisDirectSearchStocks(const QString 
             s."ISIN" AS isin,
             s."Name" AS name,
             s."MIC" AS mic,
+            s."Currency" AS quotecurrency,
             CASE
                 WHEN NOT COALESCE(s."from_IBKR", true) THEN 'MS'
                 WHEN COALESCE(s."IBKRQuoteExchange", '') <> '' THEN 'IBKR'
@@ -492,6 +494,7 @@ QVariantMap DatabaseManager::getStockAnalysisCandidate(const QString &symbol, do
             s."ISIN" AS isin,
             s."Name" AS name,
             s."MIC" AS mic,
+            s."Currency" AS quotecurrency,
             'IBKR' AS quotesource,
             ROUND(((trend_summary.newest_average - trend_summary.oldest_average)
                 / NULLIF(trend_summary.oldest_average, 0) * 100)::numeric, 2) AS increasepercent,

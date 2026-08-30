@@ -87,6 +87,19 @@ public:
     Q_INVOKABLE QVariantList findStockAnalysisDirectSearchStocks(const QString &isin, const QString &name);
     Q_INVOKABLE QVariantMap getStockAnalysisCandidate(const QString &symbol, double minIncreasePercent, int quoteCount);
     Q_INVOKABLE QVariantList getBoughtStocks();
+    Q_INVOKABLE QVariantList getDepots();
+    Q_INVOKABLE QVariantMap getDepotMasterData(int depotId, int investmentYear);
+    Q_INVOKABLE QVariantMap getDepotYearGainPercentages(int depotId, int investmentYear);
+    Q_INVOKABLE bool saveDepotMasterData(
+        int depotId,
+        const QString &name,
+        const QString &startInvest,
+        int investmentYear,
+        double investmentAmount,
+        double yearEndValue,
+        const QString &currency,
+        const QString &description,
+        bool isActive);
     Q_INVOKABLE double closePriceOnOrBefore(const QString &symbol, const QString &date);
     Q_INVOKABLE QVariantList getTestPortfolio();
     Q_INVOKABLE QVariantList getTestPortfolioSummary();
