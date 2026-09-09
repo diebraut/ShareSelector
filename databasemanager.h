@@ -90,6 +90,7 @@ public:
     Q_INVOKABLE QVariantList getDepots();
     Q_INVOKABLE QVariantMap getDepotMasterData(int depotId, int investmentYear);
     Q_INVOKABLE QVariantMap getDepotYearGainPercentages(int depotId, int investmentYear);
+    Q_INVOKABLE QVariantMap getObservedDepotYearGainPercentages(int depotId, int investmentYear);
     Q_INVOKABLE bool saveDepotMasterData(
         int depotId,
         const QString &name,
@@ -117,6 +118,7 @@ public:
     Q_INVOKABLE void startIbkrGetStocks();
     Q_INVOKABLE void startIbkrGetAllStocks();
     Q_INVOKABLE bool startIbkrQuoteWorkerAll();
+    Q_INVOKABLE bool startIbkrQuoteHistoryBackfill2024_2025();
     Q_INVOKABLE void getIbkrQuotesForSingleStock(const QString &symbol);
     Q_INVOKABLE void startIbkrGetStocksForSymbols(const QVariantList &symbols);
     Q_INVOKABLE void stopIbkrGetStocks();
@@ -235,7 +237,7 @@ private:
                                const QJsonObject &snapshotData,
                                double *savedPrice = nullptr);
     int ibkrMissingQuoteDays(const QString &symbol, int fallbackDays = 90);
-    bool ibkrHasQuoteForExpectedDate(const QString &symbol) const;
+    bool ibkrHasFinalCloseForLastCompletedDay(const QString &symbol) const;
     bool saveIbkrQuoteExchange(const QString &symbol,
                                const QString &quoteExchange,
                                double turnover,

@@ -632,6 +632,7 @@ bool DatabaseManager::ensureSchema()
                 ADD COLUMN IF NOT EXISTS "IBKRBestDirectExchange" VARCHAR(32),
                 ADD COLUMN IF NOT EXISTS "IBKRBestDirectExchangeTurnover" NUMERIC(28, 4),
                 ADD COLUMN IF NOT EXISTS "IBKRBestDirectExchangeCheckedAt" TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS "IBKRFinalCloseDate" DATE,
                 ADD COLUMN IF NOT EXISTS "from_IBKR" BOOLEAN,
                 ADD COLUMN IF NOT EXISTS "marketplace_sym" VARCHAR(128),
                 ADD COLUMN IF NOT EXISTS "marketplace_exchange" VARCHAR(32),

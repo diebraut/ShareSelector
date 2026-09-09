@@ -17,6 +17,7 @@
 #include <QSqlRecord>
 #include <QTextStream>
 #include <QTimer>
+#include <QVariant>
 
 using namespace DatabaseManagerInternal;
 
@@ -84,9 +85,11 @@ void appendIbkrQuoteTimingLog(const QString &symbol,
            << csvField(message.left(500)) << '\n';
 }
 
-QDate mostRecentWeekday(const QDate &date)
+QDate lastCompletedWeekday(const QDate &date)
 {
-    QDate result = date;
+    // Tagesdaten sind erst nach Handelsschluss final. Der heutige Balken ist
+    // deshalb kein Maßstab für die Prüfung des gespeicherten Schlusskurses.
+    QDate result = date.addDays(-1);
     while (result.dayOfWeek() > 5)
         result = result.addDays(-1);
     return result;
@@ -514,13 +517,16 @@ int DatabaseManager::ibkrMissingQuoteDays(const QString &symbol, int fallbackDay
         return calendarDaysForTradingWindow;
 
     const int validQuoteCount = query.value(QStringLiteral("valid_quote_count")).toInt();
-    const int missingCalendarDays = qMax(1, lastQuoteDate.daysTo(QDate::currentDate()) + 2);
+    // Mindestens drei Kalendertage anfordern: so ist der letzte abgeschlossene
+    // Handelstag auch dann enthalten, wenn heute bereits ein Live-Snapshot
+    // gespeichert wurde.
+    const int missingCalendarDays = qMax(3, lastQuoteDate.daysTo(QDate::currentDate()) + 2);
     if (validQuoteCount < fallbackDays)
         return qMax(missingCalendarDays, calendarDaysForTradingWindow);
     return missingCalendarDays;
 }
 
-bool DatabaseManager::ibkrHasQuoteForExpectedDate(const QString &symbol) const
+bool DatabaseManager::ibkrHasFinalCloseForLastCompletedDay(const QString &symbol) const
 {
     const QString normalizedSymbol = symbol.trimmed();
     if (normalizedSymbol.isEmpty() || !db.isOpen())
@@ -529,14 +535,13 @@ bool DatabaseManager::ibkrHasQuoteForExpectedDate(const QString &symbol) const
     QSqlQuery query(db);
     query.prepare(R"SQL(
         SELECT 1
-        FROM "Quotes"
+        FROM "Stocks"
         WHERE "Symbol" = :symbol
-          AND "CloseDate" = :closeDate
-          AND COALESCE("ClosePrice", 0) > 0
+          AND "IBKRFinalCloseDate" = :closeDate
         LIMIT 1
     )SQL");
     query.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
-    query.bindValue(QStringLiteral(":closeDate"), mostRecentWeekday(QDate::currentDate()));
+    query.bindValue(QStringLiteral(":closeDate"), lastCompletedWeekday(QDate::currentDate()));
     return query.exec() && query.next();
 }
 
@@ -694,9 +699,16 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
         m_pendingIbkrQuotesIsin = stockQuery.value(QStringLiteral("ISIN")).toString().trimmed().toUpper();
         m_pendingIbkrQuotesIbkrSymbol = ibkrSymbol;
         m_pendingIbkrQuotesCurrency = currency;
-        m_pendingIbkrQuotesExchange = cachedQuoteExchange;
-        m_pendingIbkrQuotesPrimaryExchange = cachedPrimaryExchange;
-        if (!cachedPrimaryExchange.isEmpty()
+        // Fuer Tageskurse zuerst SMART verwenden. Eine zwischengespeicherte
+        // Direktboerse kann zwar einen Snapshot liefern, aber deutlich
+        // weniger bzw. aeltere historische Tagesdaten enthalten.
+        m_pendingIbkrQuotesExchange = supportsSmart
+            ? QStringLiteral("SMART")
+            : cachedQuoteExchange;
+        m_pendingIbkrQuotesPrimaryExchange = supportsSmart
+            ? QString()
+            : cachedPrimaryExchange;
+        if (!supportsSmart && !cachedPrimaryExchange.isEmpty()
             && m_pendingIbkrQuotesExchange.compare(cachedPrimaryExchange, Qt::CaseInsensitive) != 0) {
             m_pendingIbkrQuotesExchange = cachedPrimaryExchange;
             m_pendingIbkrQuotesPrimaryExchange.clear();
@@ -711,9 +723,8 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
         m_pendingIbkrQuotesSupportsSmart = supportsSmart;
         m_pendingIbkrQuotesForceDirectProbeResult = false;
         m_pendingIbkrQuotesSmartHistoricalRetry = false;
-        const bool startWithSnapshot = !m_ibkrGetStocksBatchActive
-                                       && ibkrHasQuoteForExpectedDate(m_pendingIbkrQuotesSymbol)
-                                       && m_pendingIbkrQuotesExchange.compare(QStringLiteral("SMART"), Qt::CaseInsensitive) != 0;
+        const bool startWithSnapshot = !m_ibkrGetStocksHistoricalOnlyBatch
+                                       && ibkrHasFinalCloseForLastCompletedDay(m_pendingIbkrQuotesSymbol);
         m_pendingIbkrProcessIsHistoricalQuotes = !startWithSnapshot;
         m_pendingIbkrProcessIsQuoteExchangeProbe = false;
         m_pendingIbkrProcessIsMarketSnapshot = startWithSnapshot;
@@ -725,6 +736,21 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
                 QStringLiteral("Quote fuer aktuellen Handelstag vorhanden, aktualisiere Live-Snapshot"));
             return true;
         }
+        startIbkrQuoteHelperRequest(false);
+        return true;
+    }
+
+    // SMART ist vorhanden: Keine Direktboersen-Probe vorschalten. Diese kann
+    // sonst einen alten Boersen-Cache erneut aktivieren.
+    if (supportsSmart) {
+        m_pendingIbkrQuotesExchange = QStringLiteral("SMART");
+        m_pendingIbkrQuotesPrimaryExchange.clear();
+        m_pendingIbkrProcessIsHistoricalQuotes = true;
+        m_pendingIbkrProcessIsQuoteExchangeProbe = false;
+        m_pendingIbkrProcessIsMarketSnapshot = false;
+        m_pendingIbkrProcessIsNameSearch = false;
+        m_pendingIbkrProcessIsNameCheck = false;
+        m_ibkrDataLoading = true;
         startIbkrQuoteHelperRequest(false);
         return true;
     }
@@ -774,7 +800,8 @@ bool DatabaseManager::startIbkrQuoteExchangeProbeForSymbol(const QString &symbol
         m_pendingIbkrQuotesExchange = quoteExchange;
         m_pendingIbkrQuotesPrimaryExchange.clear();
         if (m_ibkrGetStocksBatchActive) {
-            const bool startWithSnapshot = false;
+            const bool startWithSnapshot = !m_ibkrGetStocksHistoricalOnlyBatch
+                                           && ibkrHasFinalCloseForLastCompletedDay(m_pendingIbkrQuotesSymbol);
             setIbkrConnectionState(
                 QStringLiteral("%1: %2 -> %3, beste Direktboerse %4. %5 ... OK: %6, Fehler: %7.")
                     .arg(m_ibkrGetStocksBatchName)
@@ -865,8 +892,12 @@ void DatabaseManager::startIbkrQuotesRequestForIsin(const QString &isin, int day
     const bool cachedExchangeIsEuro =
         ibkrIsEuroQuoteExchange(cachedQuoteExchange)
         || ibkrIsEuroQuoteExchange(cachedPrimaryExchange);
+    // SMART liefert fuer den Kontrakt die vollstaendigeren Tageskurse. Die
+    // gespeicherte Direktboerse verwenden wir nur, wenn SMART nicht moeglich
+    // ist.
     const bool useCachedQuoteExchange =
-        !cachedQuoteExchange.isEmpty() && (!hasEuroProbeExchange || cachedExchangeIsEuro);
+        !supportsSmart && !cachedQuoteExchange.isEmpty()
+        && (!hasEuroProbeExchange || cachedExchangeIsEuro);
 
     const QString helperPath = QDir(QCoreApplication::applicationDirPath())
                                    .filePath(QStringLiteral("ibkr-helper/IbkrHelper.exe"));
@@ -894,14 +925,15 @@ void DatabaseManager::startIbkrQuotesRequestForIsin(const QString &isin, int day
     }
     m_pendingIbkrQuotesProbeExchanges = ibkrQuoteFallbackExchanges(cachedPrimaryExchange, probeExchanges);
     m_pendingIbkrQuotesConId = conId;
-    m_pendingIbkrQuotesDays = qMax(1, days);
+    // Neben dem heutigen Live-Wert muss immer der Schlusskurs des letzten
+    // abgeschlossenen Handelstags im historischen Abruf enthalten sein.
+    m_pendingIbkrQuotesDays = qMax(3, days);
     m_pendingIbkrQuotesFallbackIndex = 0;
     m_pendingIbkrQuotesSupportsSmart = supportsSmart;
     m_pendingIbkrQuotesForceDirectProbeResult = false;
     m_pendingIbkrQuotesSmartHistoricalRetry = false;
-    const bool startWithSnapshot = !m_ibkrGetStocksBatchActive
-                                   && ibkrHasQuoteForExpectedDate(m_pendingIbkrQuotesSymbol)
-                                   && m_pendingIbkrQuotesExchange.compare(QStringLiteral("SMART"), Qt::CaseInsensitive) != 0;
+    const bool startWithSnapshot = !m_ibkrGetStocksHistoricalOnlyBatch
+                                   && ibkrHasFinalCloseForLastCompletedDay(m_pendingIbkrQuotesSymbol);
     m_pendingIbkrProcessIsHistoricalQuotes = !startWithSnapshot;
     m_pendingIbkrProcessIsQuoteExchangeProbe = false;
     m_pendingIbkrProcessIsMarketSnapshot = startWithSnapshot;
@@ -912,7 +944,7 @@ void DatabaseManager::startIbkrQuotesRequestForIsin(const QString &isin, int day
     if (startWithSnapshot) {
         startIbkrQuoteSnapshotFallback(
             QStringLiteral("Quote fuer aktuellen Handelstag vorhanden, aktualisiere Live-Snapshot"));
-    } else if (!useCachedQuoteExchange && !probeExchanges.isEmpty()) {
+    } else if (!supportsSmart && !useCachedQuoteExchange && !probeExchanges.isEmpty()) {
         m_pendingIbkrProcessIsHistoricalQuotes = false;
         m_pendingIbkrProcessIsQuoteExchangeProbe = true;
         m_pendingIbkrProcessIsMarketSnapshot = false;
@@ -1262,6 +1294,7 @@ bool DatabaseManager::startIbkrQuoteWorkerAll()
               << QStringLiteral("cmd.exe")
               << QStringLiteral("/k")
               << QStringLiteral("python")
+              << QStringLiteral("-u")
               << scriptInfo.absoluteFilePath()
               << QStringLiteral("--all-ibkr")
               << QStringLiteral("--snapshot-timeout-seconds")
@@ -1956,13 +1989,14 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
         return;
     }
 
-    const QDate expectedQuoteDate = mostRecentWeekday(QDate::currentDate());
+    // Der von IBKR gelieferte Schlusskurs des letzten abgeschlossenen
+    // Handelstags überschreibt den gespeicherten Tagesbalken. Ein heutiger
+    // Live-Snapshot bleibt davon getrennt.
+    const QDate expectedQuoteDate = lastCompletedWeekday(QDate::currentDate());
     if (!historicalOnlyBatch && latestQuoteDate.isValid() && latestQuoteDate < expectedQuoteDate) {
         const QString staleMessage =
-            QStringLiteral("IBKR lieferte fuer %1 nur Quotes bis %2, erwartet mindestens %3.")
-                .arg(symbol,
-                     latestQuoteDate.toString(QStringLiteral("yyyy-MM-dd")),
-                     expectedQuoteDate.toString(QStringLiteral("yyyy-MM-dd")));
+            QStringLiteral("IBKR lieferte fuer %1 nur Tageskurse bis %2, aktiviere aktuellen Snapshot.")
+                .arg(symbol, latestQuoteDate.toString(QStringLiteral("yyyy-MM-dd")));
         m_ibkrPendingSymbol = symbol;
         m_pendingIbkrQuotesSymbol = symbol;
         m_pendingIbkrQuotesIsin = isin;
@@ -1981,13 +2015,10 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
         return;
     }
 
+    // Unabhängig vom finalen Vortags-Close aktualisiert der Snapshot weiterhin
+    // ausschließlich den heutigen Live-Wert.
     if (!historicalOnlyBatch
-        && !getStocksBatchActive
-        && latestQuoteDate.isValid()
-        && latestQuoteDate >= expectedQuoteDate
-        && expectedQuoteDate == QDate::currentDate()
-        && !quoteExchange.isEmpty()
-        && quoteExchange.compare(QStringLiteral("SMART"), Qt::CaseInsensitive) != 0) {
+        && latestQuoteDate.isValid()) {
         m_ibkrPendingSymbol = symbol;
         m_pendingIbkrQuotesSymbol = symbol;
         m_pendingIbkrQuotesIsin = isin;
@@ -2003,8 +2034,7 @@ void DatabaseManager::finishIbkrQuotesRequest(const QJsonObject &result)
         m_pendingIbkrQuotesForceDirectProbeResult = forceDirectProbeResult;
         m_pendingIbkrQuotesSmartHistoricalRetry = smartHistoricalRetry;
         startIbkrQuoteSnapshotFallback(
-            QStringLiteral("Historical Data bis %1 gespeichert, aktualisiere heutigen Live-Snapshot")
-                .arg(latestQuoteDate.toString(QStringLiteral("yyyy-MM-dd"))));
+            QStringLiteral("Historische Tagesdaten gespeichert, aktualisiere aktuellen letzten Kurs."));
         return;
     }
 
@@ -2324,6 +2354,8 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
     int changed = 0;
     QDate newestQuoteDate;
     double newestClosePrice = 0.0;
+    const QDate requiredFinalCloseDate = lastCompletedWeekday(QDate::currentDate());
+    QDate confirmedFinalCloseDate;
     for (const QJsonValue &value : bars) {
         const QJsonObject bar = value.toObject();
         const QDate closeDate = QDate::fromString(
@@ -2332,6 +2364,15 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
         if (!closeDate.isValid())
             continue;
         const double closePrice = bar.value(QStringLiteral("close")).toDouble();
+        const double volume = bar.value(QStringLiteral("volume")).toDouble();
+        // IBKR liefert fuer den laufenden Handelstag teilweise einen
+        // Null-Volumen-Platzhalter. Er ist kein abgeschlossener Tageskurs und
+        // darf weder einen vorhandenen Tageskurs noch den aktuellen Snapshot
+        // verdecken.
+        if (closeDate == QDate::currentDate() && volume <= 0.0)
+            continue;
+        if (closeDate == requiredFinalCloseDate && closePrice > 0.0)
+            confirmedFinalCloseDate = closeDate;
         if (!newestQuoteDate.isValid() || closeDate > newestQuoteDate) {
             newestQuoteDate = closeDate;
             newestClosePrice = closePrice;
@@ -2340,8 +2381,6 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
         const double openPrice = bar.value(QStringLiteral("open")).toDouble();
         const double highestPrice = bar.value(QStringLiteral("high")).toDouble();
         const double lowestPrice = bar.value(QStringLiteral("low")).toDouble();
-        const double volume = bar.value(QStringLiteral("volume")).toDouble();
-
         existingQuery.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
         existingQuery.bindValue(QStringLiteral(":closeDate"), closeDate);
         existingQuery.bindValue(QStringLiteral(":closePrice"), closePrice);
@@ -2380,13 +2419,41 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
         return false;
     }
 
+    // Aeltere Snapshots wurden ohne eigene Quellkennzeichnung in derselben
+    // Tabelle gespeichert. Ungueltige OHLC-Werte (z. B. Tageshoch kleiner als
+    // Eröffnung) koennen daher einen korrekten Tageskurs mit juengerem Datum
+    // verdecken. Solche Daten sind kein verwertbarer Tageskurs und werden beim
+    // erfolgreichen historischen Abruf bereinigt.
+    QSqlQuery invalidQuoteCleanupQuery(db);
+    invalidQuoteCleanupQuery.prepare(R"SQL(
+        DELETE FROM "Quotes"
+        WHERE "Symbol" = :symbol
+          AND (
+              "HighestPrice" < GREATEST("OpenPrice", "ClosePrice")
+              OR "LowestPrice" > LEAST("OpenPrice", "ClosePrice")
+          )
+    )SQL");
+    invalidQuoteCleanupQuery.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
+    if (!invalidQuoteCleanupQuery.exec()) {
+        qCritical() << "Ungueltige IBKR-Quotes konnten nicht bereinigt werden:"
+                    << invalidQuoteCleanupQuery.lastError().text() << normalizedSymbol;
+        db.rollback();
+        return false;
+    }
+    const int removedInvalidQuotes = invalidQuoteCleanupQuery.numRowsAffected();
+
     QSqlQuery updateQuery(db);
     updateQuery.prepare(R"SQL(
         UPDATE "Stocks"
-        SET "LastUpdateDate" = CURRENT_DATE
+        SET "LastUpdateDate" = CURRENT_DATE,
+            "IBKRFinalCloseDate" = COALESCE(:finalCloseDate, "IBKRFinalCloseDate")
         WHERE "Symbol" = :symbol
     )SQL");
     updateQuery.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
+    updateQuery.bindValue(QStringLiteral(":finalCloseDate"),
+                          confirmedFinalCloseDate.isValid()
+                              ? QVariant(confirmedFinalCloseDate)
+                              : QVariant());
     if (!updateQuery.exec()) {
         qCritical() << "Stock-Update nach IBKR-Quotes fehlgeschlagen:"
                     << updateQuery.lastError().text() << normalizedSymbol;
@@ -2407,9 +2474,68 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
         return false;
     }
     if (changedQuoteCount)
-        *changedQuoteCount = changed;
+        *changedQuoteCount = changed + qMax(0, removedInvalidQuotes);
     if (latestQuoteDate)
         *latestQuoteDate = newestQuoteDate;
+    return true;
+}
+
+bool DatabaseManager::startIbkrQuoteHistoryBackfill2024_2025()
+{
+    if (!refreshIbkrConnectionState(QStringLiteral("IBKR Kurs-Backfill 2024-2025")))
+        return false;
+
+    const QString projectDir = QStringLiteral("K:/QT-Projekte/ShareSelector");
+    QString scriptPath = QDir(projectDir).filePath(QStringLiteral("scripts/run_ibkr_quote_job.py"));
+    if (!QFileInfo::exists(scriptPath)) {
+        const QString appDirScript = QDir(QCoreApplication::applicationDirPath())
+        .filePath(QStringLiteral("scripts/run_ibkr_quote_job.py"));
+        if (QFileInfo::exists(appDirScript))
+            scriptPath = appDirScript;
+    }
+
+    const QFileInfo scriptInfo(scriptPath);
+    if (!scriptInfo.exists() || !scriptInfo.isFile()) {
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: IBKR Quote Worker Script wurde nicht gefunden: %1").arg(scriptPath),
+            m_ibkrConnected,
+            false);
+        return false;
+    }
+
+    QStringList arguments;
+    arguments << QStringLiteral("/c")
+              << QStringLiteral("start")
+              << QStringLiteral("IBKR Kurs-Backfill 2024-2025")
+              << QStringLiteral("cmd.exe")
+              << QStringLiteral("/k")
+              << QStringLiteral("python")
+              << QStringLiteral("-u")
+              << scriptInfo.absoluteFilePath()
+              << QStringLiteral("--backfill-2024-2025")
+              << QStringLiteral("--snapshot-timeout-seconds")
+              << QStringLiteral("5")
+              << QStringLiteral("--job-name")
+              << QStringLiteral("IBKR Kurs-Backfill 2024-2025");
+
+    qint64 processId = 0;
+    const bool started = QProcess::startDetached(
+        QStringLiteral("cmd.exe"),
+        arguments,
+        scriptInfo.absolutePath(),
+        &processId);
+    if (!started) {
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: Externer IBKR Kurs-Backfill konnte nicht gestartet werden."),
+            m_ibkrConnected,
+            false);
+        return false;
+    }
+
+    setIbkrConnectionState(
+        QStringLiteral("Externer IBKR Kurs-Backfill fuer 2024 und 2025 wurde gestartet. ShareSelector bleibt bedienbar."),
+        m_ibkrConnected,
+        false);
     return true;
 }
 

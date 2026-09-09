@@ -25,7 +25,8 @@ DEFAULT_DB_USER = "postgres"
 DEFAULT_DB_PASSWORD = "castell"
 DEFAULT_DB_HOST = "localhost"
 DEFAULT_HELPER = (
-    r"K:\QT-Projekte\Desktop_Qt_6_10_1_MSVC2022_64bit-Debug\ibkr-helper\IbkrHelper.exe"
+    Path(__file__).resolve().parents[1]
+    / "ibkr-helper/bin/Release/net8.0/win-x64/publish/IbkrHelper.exe"
 )
 
 
@@ -50,6 +51,12 @@ class StockRequest:
     primary_exchange: str
     valid_exchanges: str
     days: int
+    history_start: str = ""
+    history_end: str = ""
+
+    @property
+    def is_historical_backfill(self) -> bool:
+        return bool(self.history_start and self.history_end)
 
 
 @dataclass
@@ -138,6 +145,8 @@ def ensure_schema(db: DbConfig) -> None:
             id BIGSERIAL PRIMARY KEY,
             name TEXT NOT NULL,
             scope TEXT NOT NULL,
+            history_start DATE,
+            history_end DATE,
             status TEXT NOT NULL DEFAULT 'pending',
             total_items INTEGER NOT NULL DEFAULT 0,
             done_items INTEGER NOT NULL DEFAULT 0,
@@ -169,17 +178,34 @@ def ensure_schema(db: DbConfig) -> None:
 
         CREATE INDEX IF NOT EXISTS ibkr_quote_job_items_job_status_idx
             ON ibkr_quote_job_items(job_id, status, id);
+
+        ALTER TABLE ibkr_quote_jobs
+            ADD COLUMN IF NOT EXISTS history_start DATE;
+        ALTER TABLE ibkr_quote_jobs
+            ADD COLUMN IF NOT EXISTS history_end DATE;
         """,
         capture=False,
     )
 
 
-def create_job(db: DbConfig, name: str, scope: str, symbols: list[str] | None) -> int:
+def create_job(
+    db: DbConfig,
+    name: str,
+    scope: str,
+    symbols: list[str] | None,
+    history_start: str = "",
+    history_end: str = "",
+) -> int:
     job_id_text = run_psql(
         db,
         f"""
-        INSERT INTO ibkr_quote_jobs(name, scope, status)
-        VALUES ({sql_literal(name)}, {sql_literal(scope)}, 'pending')
+        INSERT INTO ibkr_quote_jobs(name, scope, history_start, history_end, status)
+        VALUES (
+            {sql_literal(name)}, {sql_literal(scope)},
+            {sql_literal(history_start) if history_start else 'NULL'}::date,
+            {sql_literal(history_end) if history_end else 'NULL'}::date,
+            'pending'
+        )
         RETURNING id;
         """,
     )
@@ -371,11 +397,14 @@ def fetch_next_item(db: DbConfig, job_id: int) -> StockRequest | None:
         quote_state AS (
             SELECT
                 sr.*,
+                j.history_start,
+                j.history_end,
                 MAX(q."CloseDate") AS last_quote_date,
                 COUNT(*) FILTER (WHERE COALESCE(q."ClosePrice", 0) > 0) AS valid_quote_count
             FROM stock_rows sr
+            JOIN ibkr_quote_jobs j ON j.id = {job_id}
             LEFT JOIN "Quotes" q ON q."Symbol" = sr.symbol
-            GROUP BY sr.item_id, sr.symbol, sr.con_id, sr.ibkr_symbol, sr.currency, sr.isin, sr.quote_exchange, sr.primary_exchange, sr.valid_exchanges
+            GROUP BY sr.item_id, sr.symbol, sr.con_id, sr.ibkr_symbol, sr.currency, sr.isin, sr.quote_exchange, sr.primary_exchange, sr.valid_exchanges, j.history_start, j.history_end
         )
         SELECT
             item_id,
@@ -388,10 +417,14 @@ def fetch_next_item(db: DbConfig, job_id: int) -> StockRequest | None:
             primary_exchange,
             valid_exchanges,
             CASE
+                WHEN history_start IS NOT NULL AND history_end IS NOT NULL
+                THEN (history_end - history_start + 1)::int
                 WHEN last_quote_date IS NULL THEN 147
                 WHEN valid_quote_count < 90 THEN GREATEST((CURRENT_DATE - last_quote_date + 2)::int, 147)
                 ELSE GREATEST((CURRENT_DATE - last_quote_date + 2)::int, 1)
-            END AS days
+            END AS days,
+            COALESCE(history_start::text, '') AS history_start,
+            COALESCE(history_end::text, '') AS history_end
         FROM quote_state
         """,
     )
@@ -409,6 +442,8 @@ def fetch_next_item(db: DbConfig, job_id: int) -> StockRequest | None:
         primary_exchange=(row["primary_exchange"] or "").upper(),
         valid_exchanges=row["valid_exchanges"] or "",
         days=max(1, int(row["days"])),
+        history_start=row["history_start"] or "",
+        history_end=row["history_end"] or "",
     )
 
 
@@ -463,11 +498,17 @@ def save_bars(db: DbConfig, symbol: str, bars: list[dict[str, object]]) -> int:
     if not values:
         return 0
 
-    changed_text = run_psql(
-        db,
-        f"""
+    # Windows limits a process command line to roughly 32 KB.  A two-year
+    # response can contain more than 500 bars, therefore save bounded batches
+    # instead of passing every VALUES tuple to one psql invocation.
+    changed_total = 0
+    for offset in range(0, len(values), 100):
+        batch_values = values[offset : offset + 100]
+        changed_text = run_psql(
+            db,
+            f"""
         WITH incoming("Symbol", "CloseDate", "ClosePrice", "OpenPrice", "HighestPrice", "LowestPrice", "Volume") AS (
-            VALUES {", ".join(values)}
+            VALUES {", ".join(batch_values)}
         ),
         changed AS (
             SELECT COUNT(*)::int AS changed_count
@@ -513,8 +554,9 @@ def save_bars(db: DbConfig, symbol: str, bars: list[dict[str, object]]) -> int:
         )
         SELECT changed_count FROM changed;
         """,
-    )
-    return int(changed_text.splitlines()[-1]) if changed_text else 0
+        )
+        changed_total += int(changed_text.splitlines()[-1]) if changed_text else 0
+    return changed_total
 
 
 def save_working_quote_exchange(db: DbConfig, symbol: str, exchange: str) -> None:
@@ -663,6 +705,8 @@ def call_helper(args: argparse.Namespace, request: StockRequest) -> tuple[bool, 
         "--days",
         str(request.days),
     ] + helper_contract_args(request)
+    if request.history_end:
+        helper_args += ["--end-date", request.history_end]
 
     started = time.monotonic()
     completed = subprocess.run(
@@ -738,6 +782,17 @@ def snapshot_attempts(request: StockRequest) -> list[tuple[str, StockRequest]]:
 
 def should_try_snapshot_fallback(message: str) -> bool:
     normalized = message.lower()
+    retryable_failures = [
+        "ibkr-fehler 2188",
+        "up-to-the-second historical data",
+        "ibkr-fehler 162",
+        "hmds-anfrage ergab keine daten",
+        "no market data permissions",
+        "no data",
+    ]
+    if any(value in normalized for value in retryable_failures):
+        return True
+
     hard_failures = [
         "ibkr-fehler 200",
         "keine wertpapierdefinition",
@@ -745,13 +800,7 @@ def should_try_snapshot_fallback(message: str) -> bool:
     ]
     if any(value in normalized for value in hard_failures):
         return False
-    return (
-        "ibkr-fehler 2188" in normalized
-        or "up-to-the-second historical data" in normalized
-        or "ibkr-fehler 162" in normalized
-        or "hmds-anfrage ergab keine daten" in normalized
-        or "no data" in normalized
-    )
+    return False
 
 
 def append_timing_log(path: Path, request: StockRequest, elapsed_ms: int, success: bool, message: str, phase: str = "historical") -> None:
@@ -847,6 +896,18 @@ def get_job_progress(db: DbConfig, job_id: int) -> JobProgress:
     )
 
 
+def job_is_historical_backfill(db: DbConfig, job_id: int) -> bool:
+    result = run_psql(
+        db,
+        f"""
+        SELECT history_start IS NOT NULL AND history_end IS NOT NULL
+        FROM ibkr_quote_jobs
+        WHERE id = {job_id};
+        """,
+    )
+    return result.splitlines()[-1].strip().lower() in {"t", "true", "1"} if result else False
+
+
 def run_worker(args: argparse.Namespace, db: DbConfig, job_id: int) -> None:
     timing_log = Path(args.timing_log)
     run_psql(
@@ -868,7 +929,7 @@ def run_worker(args: argparse.Namespace, db: DbConfig, job_id: int) -> None:
             mark_job_status(db, job_id, "paused")
             break
 
-        if not args.include_current:
+        if not args.include_current and not job_is_historical_backfill(db, job_id):
             mark_current_items_skipped(db, job_id)
         request = fetch_next_item(db, job_id)
         if request is None:
@@ -909,7 +970,7 @@ def run_worker(args: argparse.Namespace, db: DbConfig, job_id: int) -> None:
 
             if not success:
                 combined_historical_message = "; ".join(historical_errors) or message
-                if not should_try_snapshot_fallback(combined_historical_message):
+                if request.is_historical_backfill or not should_try_snapshot_fallback(combined_historical_message):
                     mark_item(
                         db,
                         request.item_id,
@@ -977,7 +1038,7 @@ def run_worker(args: argparse.Namespace, db: DbConfig, job_id: int) -> None:
                     f"  OK historical-{historical_request.quote_exchange}: "
                     f"rows={len(bars)}, changed={changed}, api={elapsed_ms / 1000:.2f}s"
                 )
-                if not has_expected_quote(db, request.symbol):
+                if not request.is_historical_backfill and not has_expected_quote(db, request.symbol):
                     print("  Historical data is still stale, trying snapshot fallback ...")
                     fallback_saved = False
                     fallback_errors: list[str] = []
@@ -1072,6 +1133,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         action="store_true",
         help="Create a job only for IBKR stocks older than the previous trading day or without quotes.",
     )
+    scope.add_argument(
+        "--backfill-2024-2025",
+        action="store_true",
+        help="Create a resumable IBKR history backfill for 2024 and 2025 only.",
+    )
     scope.add_argument("--symbol-file", type=Path, help="Create a job from a newline-separated symbol file.")
     parser.add_argument("--resume-job", type=int, help="Resume an existing job id.")
     parser.add_argument("--status", type=int, metavar="JOB_ID", help="Print job status and exit.")
@@ -1118,13 +1184,15 @@ def main(argv: list[str]) -> int:
     if args.resume_job:
         job_id = args.resume_job
     else:
-        if not args.all_ibkr and not args.stale_ibkr and not args.symbol_file:
-            print("Use --all-ibkr, --stale-ibkr, --symbol-file, --resume-job, or --status.", file=sys.stderr)
+        if not args.all_ibkr and not args.stale_ibkr and not args.backfill_2024_2025 and not args.symbol_file:
+            print("Use --all-ibkr, --stale-ibkr, --backfill-2024-2025, --symbol-file, --resume-job, or --status.", file=sys.stderr)
             return 2
         symbols = read_symbol_file(args.symbol_file) if args.symbol_file else None
-        scope = "symbol_file" if symbols is not None else ("stale_ibkr" if args.stale_ibkr else "all_ibkr")
-        name = args.job_name or f"IBKR quote job {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-        job_id = create_job(db, name, scope, symbols)
+        scope = "symbol_file" if symbols is not None else ("stale_ibkr" if args.stale_ibkr else ("backfill_2024_2025" if args.backfill_2024_2025 else "all_ibkr"))
+        history_start = "2024-01-01" if args.backfill_2024_2025 else ""
+        history_end = "2025-12-31" if args.backfill_2024_2025 else ""
+        name = args.job_name or ("IBKR Kurs-Backfill 2024-2025" if args.backfill_2024_2025 else f"IBKR quote job {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        job_id = create_job(db, name, scope, symbols, history_start, history_end)
         print(f"Created job {job_id}")
         print_job_status(db, job_id)
         if args.create_only:

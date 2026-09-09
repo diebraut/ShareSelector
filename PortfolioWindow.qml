@@ -39,6 +39,8 @@ Window {
     }
 
     function positionListAtBeginning() {
+        portfolioListView.contentY = 0
+        portfolioListView.forceLayout()
         Qt.callLater(function() {
             portfolioListView.forceLayout()
             portfolioListView.positionViewAtBeginning()
@@ -69,6 +71,8 @@ Window {
     }
 
     function refreshPortfolioListLayout() {
+        portfolioListView.forceLayout()
+        portfolioWindow.clampPortfolioListContentY()
         Qt.callLater(function() {
             portfolioListView.forceLayout()
             portfolioWindow.clampPortfolioListContentY()
@@ -103,6 +107,16 @@ Window {
 
     function depotYearGainColor(month) {
         const value = app.depotYearGainPercent(month)
+        return isNaN(value) || value === 0 ? "#475569" : (value > 0 ? "#15803d" : "#b91c1c")
+    }
+
+    function observedDepotYearGainText(month) {
+        const value = app.observedDepotYearGainPercent(month)
+        return isNaN(value) ? "---" : value.toLocaleString(Qt.locale(), "f", 2) + " %"
+    }
+
+    function observedDepotYearGainColor(month) {
+        const value = app.observedDepotYearGainPercent(month)
         return isNaN(value) || value === 0 ? "#475569" : (value > 0 ? "#15803d" : "#b91c1c")
     }
 
@@ -479,43 +493,49 @@ Window {
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: ""
+                            text: portfolioWindow.observedDepotYearGainText(2)
                             font.bold: true
+                            color: portfolioWindow.observedDepotYearGainColor(2)
                             Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: ""
+                            text: portfolioWindow.observedDepotYearGainText(4)
                             font.bold: true
+                            color: portfolioWindow.observedDepotYearGainColor(4)
                             Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: ""
+                            text: portfolioWindow.observedDepotYearGainText(6)
                             font.bold: true
+                            color: portfolioWindow.observedDepotYearGainColor(6)
                             Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: ""
+                            text: portfolioWindow.observedDepotYearGainText(8)
                             font.bold: true
+                            color: portfolioWindow.observedDepotYearGainColor(8)
                             Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: ""
+                            text: portfolioWindow.observedDepotYearGainText(10)
                             font.bold: true
+                            color: portfolioWindow.observedDepotYearGainColor(10)
                             Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }
                         Rectangle { Layout.preferredWidth: 1; Layout.fillHeight: true; color: "#c9d0d5" }
                         Label {
-                            text: ""
+                            text: portfolioWindow.observedDepotYearGainText(12)
                             font.bold: true
+                            color: portfolioWindow.observedDepotYearGainColor(12)
                             Layout.preferredWidth: portfolioWindow.depotYearColumnWidth
                             horizontalAlignment: Text.AlignRight
                         }

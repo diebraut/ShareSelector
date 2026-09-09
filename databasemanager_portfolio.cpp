@@ -220,17 +220,28 @@ QVariantMap DatabaseManager::getDepotYearGainPercentages(int depotId, int invest
               AND b."BuyDate" <= :asOfDate
               AND (b."SellDate" IS NULL OR b."SellDate" > :asOfDate)
         ),
+        realized AS (
+            SELECT COALESCE(SUM(
+                COALESCE(b."Quantity", 1)
+                * (COALESCE(b."CurrentValue", b."EntryValue", 0) - COALESCE(b."EntryValue", 0))
+            ), 0) AS realized_gain
+            FROM "BoughtStocks" b
+            WHERE b."DepotId" = :depotId
+              AND b."BuyDate" <= :asOfDate
+              AND b."SellDate" <= :asOfDate
+        ),
         totals AS (
             SELECT
                 COALESCE((SELECT investment_amount FROM year_data), 0) AS investment_amount,
                 COALESCE(SUM(quantity * entry_value), 0) AS invested_amount,
-                COALESCE(SUM(quantity * value_at_date), 0) AS position_value
+                COALESCE(SUM(quantity * value_at_date), 0) AS position_value,
+                COALESCE((SELECT realized_gain FROM realized), 0) AS realized_gain
             FROM positions
         )
         SELECT
             CASE
                 WHEN investment_amount <= 0 THEN NULL
-                ELSE ROUND(((position_value + (investment_amount - invested_amount) - investment_amount)
+                ELSE ROUND(((position_value - invested_amount + realized_gain)
                             / NULLIF(investment_amount, 0) * 100)::numeric, 2)
             END AS gain_percent
         FROM totals
@@ -257,6 +268,82 @@ QVariantMap DatabaseManager::getDepotYearGainPercentages(int depotId, int invest
 
         if (query.next())
             result[QStringLiteral("month%1").arg(month)] = query.value(QStringLiteral("gain_percent"));
+
+        query.finish();
+    }
+
+    return result;
+}
+
+QVariantMap DatabaseManager::getObservedDepotYearGainPercentages(int depotId, int investmentYear)
+{
+    QVariantMap result;
+
+    const QList<int> months = {2, 4, 6, 8, 10, 12};
+    for (int month : months)
+        result[QStringLiteral("month%1").arg(month)] = QVariant();
+
+    if (!db.isOpen() || depotId <= 0 || investmentYear < 1900 || investmentYear > 3000)
+        return result;
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        WITH year_data AS (
+            SELECT COALESCE("InvestmentAmount", 0) AS investment_amount
+            FROM "DepotYearInvestments"
+            WHERE "DepotId" = :depotId
+              AND "InvestmentYear" = :investmentYear
+        ),
+        positions AS (
+            SELECT
+                COALESCE(b."Quantity", 1) AS quantity,
+                COALESCE(b."EntryValue", 0) AS entry_value,
+                COALESCE(q.close_price, b."CurrentValue", b."EntryValue", 0) AS value_at_date
+            FROM "BoughtStocks" b
+            LEFT JOIN LATERAL (
+                SELECT q."ClosePrice" AS close_price
+                FROM "Quotes" q
+                WHERE q."Symbol" = b."Symbol"
+                  AND q."CloseDate" <= :asOfDate
+                  AND COALESCE(q."ClosePrice", 0) > 0
+                ORDER BY q."CloseDate" DESC
+                LIMIT 1
+            ) q ON true
+            WHERE b."DepotId" = :depotId
+              AND COALESCE(b."Observed", FALSE)
+              AND b."BuyDate" <= :asOfDate
+              AND (b."SellDate" IS NULL OR b."SellDate" > :asOfDate)
+        ),
+        totals AS (
+            SELECT
+                COALESCE((SELECT investment_amount FROM year_data), 0) AS investment_amount,
+                COALESCE(SUM(quantity * entry_value), 0) AS invested_amount,
+                COALESCE(SUM(quantity * value_at_date), 0) AS position_value
+            FROM positions
+        )
+        SELECT
+            CASE
+                WHEN investment_amount <= 0 THEN NULL
+                ELSE ROUND(((position_value - invested_amount)
+                            / NULLIF(investment_amount, 0) * 100)::numeric, 2)
+            END AS gain_percent
+        FROM totals
+    )SQL");
+
+    for (int month : months) {
+        const QDate periodEndDate = QDate(investmentYear, month, 1).addMonths(1).addDays(-1);
+        if (periodEndDate > QDate::currentDate())
+            continue;
+
+        query.bindValue(QStringLiteral(":depotId"), depotId);
+        query.bindValue(QStringLiteral(":investmentYear"), investmentYear);
+        query.bindValue(QStringLiteral(":asOfDate"), periodEndDate.toString(QStringLiteral("yyyy-MM-dd")));
+
+        if (query.exec() && query.next())
+            result[QStringLiteral("month%1").arg(month)] = query.value(QStringLiteral("gain_percent"));
+        else if (query.lastError().isValid())
+            qCritical() << "Fehler beim Berechnen der Observed-Depot-Jahresgewinne:"
+                        << query.lastError().text() << depotId << investmentYear << periodEndDate;
 
         query.finish();
     }

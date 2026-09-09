@@ -43,6 +43,11 @@ var exchanges = rawExchanges
     .ToArray();
 var daysText = Argument(args, "--days")?.Trim() ?? string.Empty;
 var days = int.TryParse(daysText, out var parsedDays) ? parsedDays : 90;
+var endDateArgument = Argument(args, "--end-date")?.Trim() ?? string.Empty;
+var endDate = DateOnly.TryParseExact(endDateArgument, "yyyy-MM-dd", CultureInfo.InvariantCulture,
+                                     DateTimeStyles.None, out var parsedEndDate)
+    ? $"{parsedEndDate:yyyyMMdd} 23:59:59 UTC"
+    : endDateArgument;
 var timeoutSecondsText = Argument(args, "--timeout-seconds")?.Trim() ?? string.Empty;
 var timeoutSeconds = int.TryParse(timeoutSecondsText, out var parsedTimeoutSeconds)
     ? Math.Max(1, parsedTimeoutSeconds)
@@ -114,7 +119,7 @@ try {
             : $"{requestedDays} D";
         client.reqHistoricalData(RequestId,
                                  wrapper.CreateCurrentContract(),
-                                 string.Empty,
+                                 endDate,
                                  duration,
                                  "1 day",
                                  "TRADES",
@@ -122,7 +127,7 @@ try {
                                  1,
                                  false,
                                  []);
-        Console.Error.WriteLine($"Historical quotes requested for {symbol}/{conId}, days={days}, duration={duration}.");
+        Console.Error.WriteLine($"Historical quotes requested for {symbol}/{conId}, days={days}, duration={duration}, end={endDate}.");
     } else if (marketSnapshot) {
         client.reqMarketDataType(3);
         client.reqMktData(RequestId,
@@ -631,7 +636,11 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
         }
 
         double? mid = bid.HasValue && ask.HasValue ? (bid.Value + ask.Value) / 2.0 : null;
-        var selected = last ?? mid ?? close ?? bid ?? ask;
+        // Ein vorhandener letzter Kurs entspricht dem Trader-Wert. Fehlt er,
+        // ist der Schlusskurs verlässlicher als ein Geld/Brief-Mittelwert,
+        // der bei illiquiden Papieren massiv falsch sein kann
+        // (z. B. 0,0005 / 153 statt CLOSE 132).
+        var selected = last ?? close ?? mid ?? bid ?? ask;
 
         if (selected.HasValue)
             Client?.cancelMktData(requestId);

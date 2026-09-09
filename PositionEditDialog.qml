@@ -10,6 +10,7 @@ Window {
     property var positionRow: ({})
     property bool entryEditedByUser: false
     property bool updatingEntryFromDate: false
+    property bool largeInvestmentWarningVisible: false
 
     title: "Ändere Daten"
     width: 430
@@ -29,6 +30,7 @@ Window {
         updatingEntryFromDate = true
         positionEditEntryInput.text = Number(positionRow.entryValue || 0).toLocaleString(Qt.locale(), "f", 2)
         updatingEntryFromDate = false
+        largeInvestmentWarningVisible = false
         positionEditError.text = ""
 
         if (hostWindow) {
@@ -60,21 +62,55 @@ Window {
         updatingEntryFromDate = false
     }
 
+    function availableCashForPosition() {
+        if (!app)
+            return Number.NaN
+
+        const investmentBudget = Number(app.selectedDepotInvestmentAmount || 0)
+        if (investmentBudget <= 0)
+            return Number.NaN
+
+        const editedSymbol = String(positionRow.symbol || "").trim()
+        let investedInOtherPositions = 0
+        const rows = app.portfolioRows || []
+        rows.forEach(function(row) {
+            if (Number(row.status || 0) === 10)
+                return
+            if (String(row.symbol || "").trim() === editedSymbol)
+                return
+            investedInOtherPositions += Number(app.portfolioPositionEntryTotal(row) || 0)
+        })
+        return investmentBudget - investedInOtherPositions
+    }
+
     function savePosition() {
         updateEntryFromBuyDate()
         const buyDate = positionEditBuyDateInput.text.trim()
         const invested = app.parseDecimal(positionEditInvestedInput.text)
         const entry = app.parseDecimal(positionEditEntryInput.text)
         if (!/^\d{4}-\d{2}-\d{2}$/.test(buyDate)) {
+            largeInvestmentWarningVisible = false
             positionEditError.text = "Bitte Kaufdatum im Format JJJJ-MM-TT eingeben."
             return
         }
         if (invested <= 0) {
+            largeInvestmentWarningVisible = false
             positionEditError.text = "Bitte eine investierte Summe groesser 0 eingeben."
             return
         }
         if (entry <= 0) {
+            largeInvestmentWarningVisible = false
             positionEditError.text = "Bitte einen Einstiegswert groesser 0 eingeben."
+            return
+        }
+
+        const availableCash = availableCashForPosition()
+        if (!isNaN(availableCash) && invested > availableCash && !largeInvestmentWarningVisible) {
+            largeInvestmentWarningVisible = true
+            positionEditError.text = "Warnung: Die Investitionssumme ("
+                + invested.toLocaleString(Qt.locale(), "f", 2) + " €) ist höher als das verfügbare Guthaben ("
+                + availableCash.toLocaleString(Qt.locale(), "f", 2) + " €). "
+                + "Bitte nur bei Absicht auf ‚Trotzdem speichern‘ klicken."
             return
         }
 
@@ -119,6 +155,7 @@ Window {
                 selectByMouse: true
                 inputMethodHints: Qt.ImhFormattedNumbersOnly
                 onTextEdited: {
+                    positionEditDialog.largeInvestmentWarningVisible = false
                     if (!positionEditDialog.updatingEntryFromDate)
                         positionEditDialog.entryEditedByUser = true
                 }
@@ -136,7 +173,7 @@ Window {
             Label {
                 id: positionEditError
                 Layout.fillWidth: true
-                color: "#b91c1c"
+                color: positionEditDialog.largeInvestmentWarningVisible ? "#b45309" : "#b91c1c"
                 wrapMode: Text.WordWrap
             }
 
@@ -152,7 +189,7 @@ Window {
                     onClicked: positionEditDialog.close()
                 }
                 Button {
-                    text: "OK"
+                    text: positionEditDialog.largeInvestmentWarningVisible ? "Trotzdem speichern" : "OK"
                     onClicked: positionEditDialog.savePosition()
                 }
             }

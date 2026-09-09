@@ -159,8 +159,16 @@ Window {
 
                     Button { text: "Get New Quotes for Depot starten"; Layout.fillWidth: true; enabled: app.canStartIbkrQuoteBatch(); onClicked: dbManager.startIbkrGetStocks() }
                     Button { text: "Get New Quotes for Depot stoppen"; Layout.fillWidth: true; enabled: dbManager.ibkrGetStocksActive && dbManager.ibkrGetStocksBatchName === "Get New Quotes for Depot"; onClicked: dbManager.stopIbkrGetStocks() }
-                    Button { text: "IBKR Gesamtbatch extern starten"; Layout.fillWidth: true; enabled: dbManager.ibkrConnected && !dbManager.ibkrGetStocksActive; onClicked: dbManager.startIbkrQuoteWorkerAll() }
+
+                    Button { text: "Get new Quotes for IBKR Data starten"; Layout.fillWidth: true; enabled: dbManager.ibkrConnected && !dbManager.ibkrGetStocksActive; onClicked: dbManager.startIbkrGetAllStocks() }
                     Button { text: "Get new Quotes for IBKR Data stoppen"; Layout.fillWidth: true; enabled: dbManager.ibkrGetStocksActive && dbManager.ibkrGetStocksBatchName === "Get new Quotes for IBKR Data"; onClicked: dbManager.stopIbkrGetStocks() }
+
+                    Button { text: "IBKR Gesamtbatch extern starten"; Layout.fillWidth: true; enabled: dbManager.ibkrConnected && !dbManager.ibkrGetStocksActive; onClicked: dbManager.startIbkrQuoteWorkerAll() }
+                    Item { Layout.fillWidth: true }
+
+                    Button { text: "IBKR Kurs-Backfill 2024-2025 starten"; Layout.fillWidth: true; enabled: dbManager.ibkrConnected && !dbManager.ibkrGetStocksActive; onClicked: dbManager.startIbkrQuoteHistoryBackfill2024_2025() }
+                    Item { Layout.fillWidth: true }
+
                     Button { text: "IBKR Stammdaten Batch starten"; Layout.fillWidth: true; enabled: dbManager.ibkrConnected && !dbManager.ibkrDataLoading && !dbManager.ibkrBatchActive && !dbManager.ibkrNameCheckBatchActive && !dbManager.ibkrGetStocksActive; onClicked: dbManager.startIbkrBatch() }
                     Button { text: "IBKR Stammdaten Batch stoppen"; Layout.fillWidth: true; enabled: dbManager.ibkrBatchActive; onClicked: dbManager.stopIbkrBatch() }
                     Button { text: "Marketstack Set Exchange starten"; Layout.fillWidth: true; enabled: !dbManager.yahooFundamentalsBatchActive && !dbManager.marketstackBatchActive && !dbManager.marketstackQuotesBatchActive && !dbManager.marketstackValidationBatchActive; onClicked: dbManager.startMarketstackBatch() }

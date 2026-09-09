@@ -9,6 +9,9 @@ Der Worker nutzt:
 - Datenbank `TotalStocks`, User `postgres`, Passwort `castell`
 - Job-Tabellen `ibkr_quote_jobs` und `ibkr_quote_job_items`
 
+Der Helfer liegt nach dem Build unter
+`ibkr-helper\\bin\\Release\\net8.0\\win-x64\\publish\\IbkrHelper.exe`.
+
 ## Gesamtlauf anlegen
 
 ```powershell
@@ -28,6 +31,21 @@ python .\scripts\run_ibkr_quote_job.py --all-ibkr --job-name "IBKR Gesamtlauf"
 Der Worker ueberspringt standardmaessig Symbole, die inzwischen schon einen Quote fuer den
 erwarteten Handelstag haben. Dadurch kann ShareSelector parallel einzelne Quotes aktualisieren;
 der Worker laesst diese Symbole beim naechsten Check liegen.
+
+## Historische Luecken 2024–2025 fuellen
+
+Der getrennte Backfill ruft je IBKR-Wert die Tageskurse vom 01.01.2024 bis
+31.12.2025 ab. Vorhandene identische Zeilen bleiben unveraendert; fehlende oder
+abweichende Kurse werden per Upsert ergaenzt. Der Job wird nicht wegen bereits
+aktueller Kurse uebersprungen und kann deshalb auch nach einem Abbruch sicher
+fortgesetzt werden.
+
+```powershell
+python .\scripts\run_ibkr_quote_job.py --backfill-2024-2025 --job-name "IBKR Kurs-Backfill 2024-2025"
+```
+
+In ShareSelector steht derselbe Lauf unter **Manuelle Batchaufrufe** als
+`IBKR Kurs-Backfill 2024-2025 starten` bereit.
 
 Vorhandenen Job fortsetzen:
 

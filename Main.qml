@@ -109,6 +109,7 @@ ApplicationWindow {
     property int selectedDepotIndex: 0
     property int selectedDepotId: 1
     property string selectedDepotName: "Default"
+    property double selectedDepotInvestmentAmount: 0
 
 
     ListModel {
@@ -166,6 +167,7 @@ ApplicationWindow {
     property double portfolioObservedDays60Percent: 0
     property double portfolioObservedDays90Percent: 0
     property var depotYearGainPercentages: ({})
+    property var observedDepotYearGainPercentages: ({})
     property bool portfolioLoaded: false
     property var portfolioDetails: ({})
     property string portfolioDetailsSymbol: ""
@@ -190,6 +192,7 @@ ApplicationWindow {
     property int stockAnalysisScanIndex: 0
     property int stockAnalysisScanFound: 0
     property bool stockAnalysisHideBoughtStocks: true
+    property bool stockAnalysisTurnoverAscending: false
     property bool ibkrQuoteScheduleEnabled: false
     property string ibkrQuoteScheduleTime: "18:00"
     property string ibkrQuoteScheduleLastRunDate: ""
@@ -669,11 +672,21 @@ ApplicationWindow {
     }
 
     function loadDepotYearGainPercentages() {
-        depotYearGainPercentages = dbManager.getDepotYearGainPercentages(selectedDepotId, currentInvestmentYear())
+        const investmentYear = currentInvestmentYear()
+        depotYearGainPercentages = dbManager.getDepotYearGainPercentages(selectedDepotId, investmentYear)
+        observedDepotYearGainPercentages = dbManager.getObservedDepotYearGainPercentages(selectedDepotId, investmentYear)
+        const depotData = dbManager.getDepotMasterData(selectedDepotId, investmentYear)
+        selectedDepotInvestmentAmount = Number(depotData.investmentAmount || 0)
+        updatePortfolioTotals()
     }
 
     function depotYearGainPercent(month) {
         const value = depotYearGainPercentages["month" + month]
+        return value === undefined || value === null ? Number.NaN : Number(value)
+    }
+
+    function observedDepotYearGainPercent(month) {
+        const value = observedDepotYearGainPercentages["month" + month]
         return value === undefined || value === null ? Number.NaN : Number(value)
     }
 
@@ -721,15 +734,20 @@ ApplicationWindow {
         const data = dbManager.getTestPortfolioSummary()
         let rows = []
         data.forEach(item => rows.push(item))
+        const selectedSymbolStillVisible = selectedSymbol.length > 0
+            && rows.some(item => String(item.symbol || "").trim() === selectedSymbol
+                              && portfolioRowMatchesStatusFilter(item))
         portfolioRows = rows
         updatePortfolioTotals()
         loadDepotYearGainPercentages()
         portfolioLoaded = true
         portfolioDetails = ({})
         portfolioDetailsSymbol = ""
-        rebuildPortfolioModel(preserveView ? selectedSymbol : preferredSymbol, true)
+        rebuildPortfolioModel(preserveView ? selectedSymbol : preferredSymbol,
+                              true,
+                              preserveView && !selectedSymbolStillVisible)
 
-        if (preserveView && previousContentY >= 0)
+        if (preserveView && selectedSymbolStillVisible && previousContentY >= 0)
             portfolioWindow.restorePortfolioListContentY(previousContentY)
         portfolioUpdateDoneTimer.restart()
     }
@@ -963,7 +981,7 @@ ApplicationWindow {
             quantity,
             row.analysisConfigName || ""
         )
-        if (ok)
+        if (ok && !refreshPortfolioRow(symbol))
             loadTestPortfolio(symbol, true)
         return ok
     }
@@ -1334,8 +1352,9 @@ ApplicationWindow {
         let performanceBase = entryTotal - realizedGain
         if (performanceBase <= 0 && realizedEntryTotal > 0)
             performanceBase = realizedEntryTotal
-        portfolioTotalCurrentAmount = currentTotal
-        portfolioTotalEntryAmount = performanceBase
+        const investmentAmount = Number(selectedDepotInvestmentAmount || 0)
+        portfolioTotalCurrentAmount = investmentAmount > 0 ? investmentAmount + totalGain : currentTotal
+        portfolioTotalEntryAmount = investmentAmount > 0 ? investmentAmount : performanceBase
         portfolioTotalGainAmount = totalGain
         portfolioRealizedGainAmount = realizedGain
         portfolioActiveCountValue = activeCount
@@ -1348,8 +1367,8 @@ ApplicationWindow {
         portfolioDays60Percent = days60Weight > 0 ? days60Weighted / days60Weight : 0
         portfolioDays90Percent = days90Weight > 0 ? days90Weighted / days90Weight : 0
         portfolioObservedCountValue = observedCount
-        portfolioObservedCurrentAmount = observedCurrentTotal
-        portfolioObservedEntryAmount = observedEntryTotal
+        portfolioObservedCurrentAmount = investmentAmount > 0 ? investmentAmount + observedCurrentTotal - observedEntryTotal : observedCurrentTotal
+        portfolioObservedEntryAmount = investmentAmount > 0 ? investmentAmount : observedEntryTotal
         portfolioObservedGainAmount = observedCurrentTotal - observedEntryTotal
         portfolioObservedStartInvest = observedStartInvest
         portfolioObservedLatestChangeAmount = observedLatestChangeAmount
@@ -2179,7 +2198,9 @@ ApplicationWindow {
             let turnoverA = Number(a.periodturnover || 0)
             let turnoverB = Number(b.periodturnover || 0)
             if (turnoverA !== turnoverB)
-                return turnoverB - turnoverA
+                return stockAnalysisTurnoverAscending
+                    ? turnoverA - turnoverB
+                    : turnoverB - turnoverA
 
             let increaseA = Number(a.increasepercent || 0)
             let increaseB = Number(b.increasepercent || 0)
@@ -2700,7 +2721,20 @@ ApplicationWindow {
                             Label { text: "Nr"; Layout.preferredWidth: 42; font.bold: true; horizontalAlignment: Text.AlignLeft; leftPadding: 4 }
                             Label { text: "ISIN"; Layout.preferredWidth: 130; font.bold: true }
                             Label { text: "Name"; Layout.preferredWidth: 340; font.bold: true }
-                            Label { text: "Handelsumsatz"; Layout.preferredWidth: 150; font.bold: true; horizontalAlignment: Text.AlignRight }
+                            Label {
+                                text: "Handelsumsatz " + (stockAnalysisTurnoverAscending ? "↑" : "↓")
+                                Layout.preferredWidth: 150
+                                font.bold: true
+                                horizontalAlignment: Text.AlignRight
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        stockAnalysisTurnoverAscending = !stockAnalysisTurnoverAscending
+                                        sortStockAnalysisResults()
+                                    }
+                                }
+                            }
                             Label { text: "KGV"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
                             Label { text: "Quotes"; Layout.preferredWidth: 80; font.bold: true; horizontalAlignment: Text.AlignRight }
                             Label { text: "IBKR/MS"; Layout.preferredWidth: 75; font.bold: true; horizontalAlignment: Text.AlignHCenter }
