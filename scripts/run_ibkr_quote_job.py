@@ -53,6 +53,7 @@ class StockRequest:
     days: int
     history_start: str = ""
     history_end: str = ""
+    preferred_quote_exchange: str = ""
 
     @property
     def is_historical_backfill(self) -> bool:
@@ -141,6 +142,17 @@ def ensure_schema(db: DbConfig) -> None:
     run_psql(
         db,
         """
+        ALTER TABLE "Quotes" ADD COLUMN IF NOT EXISTS "IBKRCloseSource" TEXT;
+        ALTER TABLE "Stocks"
+            ADD COLUMN IF NOT EXISTS "IBKRFinalCloseDate" DATE,
+            ADD COLUMN IF NOT EXISTS "IBKRSnapshotLast" NUMERIC(28, 8),
+            ADD COLUMN IF NOT EXISTS "IBKRSnapshotRaw" JSONB,
+            ADD COLUMN IF NOT EXISTS "IBKRSnapshotReceivedAt" TIMESTAMPTZ,
+            ADD COLUMN IF NOT EXISTS "IBKRChangeReference" JSONB,
+            ADD COLUMN IF NOT EXISTS "IBKRSnapshotClose" NUMERIC(28, 8),
+            ADD COLUMN IF NOT EXISTS "IBKRSnapshotLastDate" DATE,
+            ADD COLUMN IF NOT EXISTS "IBKRSnapshotCloseDate" DATE,
+            ADD COLUMN IF NOT EXISTS "IBKRSnapshotTimeZone" TEXT;
         CREATE TABLE IF NOT EXISTS ibkr_quote_jobs (
             id BIGSERIAL PRIMARY KEY,
             name TEXT NOT NULL,
@@ -439,6 +451,7 @@ def fetch_next_item(db: DbConfig, job_id: int) -> StockRequest | None:
         currency=row["currency"],
         isin=row["isin"],
         quote_exchange=(row["quote_exchange"] or "SMART").upper(),
+        preferred_quote_exchange=(row["quote_exchange"] or "SMART").upper(),
         primary_exchange=(row["primary_exchange"] or "").upper(),
         valid_exchanges=row["valid_exchanges"] or "",
         days=max(1, int(row["days"])),
@@ -544,6 +557,7 @@ def save_bars(db: DbConfig, symbol: str, bars: list[dict[str, object]]) -> int:
                 "HighestPrice" = EXCLUDED."HighestPrice",
                 "LowestPrice" = EXCLUDED."LowestPrice",
                 "Volume" = EXCLUDED."Volume"
+            WHERE "Quotes"."IBKRCloseSource" IS DISTINCT FROM 'snapshot'
             RETURNING 1
         ),
         stock_update AS (
@@ -587,7 +601,10 @@ def expected_quote_date() -> str:
 
 def save_snapshot_quote(db: DbConfig, symbol: str, data: dict[str, object]) -> int:
     selected = float(data.get("selected") or 0)
-    if selected <= 0:
+    reference = data.get("changeReference")
+    reference_only = (isinstance(reference, dict) and len(str(reference.get("currency") or '')) == 3
+                      and float(reference.get("last") or 0) > 0 and float(reference.get("close") or 0) > 0)
+    if selected <= 0 and not reference_only:
         return 0
 
     sizes = data.get("sizes")
@@ -595,20 +612,79 @@ def save_snapshot_quote(db: DbConfig, symbol: str, data: dict[str, object]) -> i
     if isinstance(sizes, dict):
         volume = float(sizes.get("VOLUME") or sizes.get("DELAYED_VOLUME") or 0)
 
-    return save_bars(
+    native_history = data.get("nativeHistory")
+    reference = data.get("changeReference")
+    historical_eur = (isinstance(reference, dict) and reference.get("currency") == "EUR"
+                      and reference.get("source") == "historical" and isinstance(native_history, list) and bool(native_history))
+    last = float(data.get("last") or 0)
+    last_date = str(data.get("lastDate") or "")
+    try:
+        dated_last = (last > 0 and float(data.get("lastTimestamp") or 0) > 0
+                      and date.fromisoformat(last_date) <= date.today())
+    except (ValueError, TypeError):
+        dated_last = False
+    # Never manufacture a trading date from the retrieval date or a weekday.
+    changed = 0 if not historical_eur and not dated_last else save_bars(
         db,
         symbol,
-        [
+        native_history if historical_eur else [
             {
-                "date": expected_quote_date(),
-                "open": selected,
-                "high": selected,
-                "low": selected,
-                "close": selected,
+                "date": last_date,
+                "open": last,
+                "high": last,
+                "low": last,
+                "close": last,
                 "volume": volume,
             }
         ],
     )
+
+    last = float(data.get("last") or 0)
+    close = float(data.get("close") or 0)
+    reference = data.get("changeReference")
+    valid_reference = (last <= 0 and isinstance(reference, dict) and len(str(reference.get("currency") or '')) == 3
+                       and float(reference.get("last") or 0) > 0 and float(reference.get("close") or 0) > 0)
+    reference_sql = sql_literal(json.dumps(reference)) if valid_reference else 'NULL'
+    last_date = str(data.get("lastDate") or "")
+    close_date = str(data.get("closeDate") or "")
+    try:
+        dated_close = dated_last and 0 < close and date.fromisoformat(close_date) < date.fromisoformat(last_date) <= date.today()
+    except ValueError:
+        dated_close = False
+    final_sql = ""
+    if dated_close:
+        final_sql = f"""
+            INSERT INTO "Quotes" ("Symbol", "CloseDate", "ClosePrice", "OpenPrice",
+                                  "HighestPrice", "LowestPrice", "Volume", "IBKRCloseSource")
+            VALUES ({sql_literal(symbol)}, {sql_literal(close_date)}::date, {close}, {close}, {close}, {close}, 0, 'snapshot')
+            ON CONFLICT ("Symbol", "CloseDate") DO UPDATE
+            SET "ClosePrice" = EXCLUDED."ClosePrice",
+                "HighestPrice" = GREATEST("Quotes"."HighestPrice", EXCLUDED."ClosePrice"),
+                "LowestPrice" = LEAST("Quotes"."LowestPrice", EXCLUDED."ClosePrice"),
+                "IBKRCloseSource" = 'snapshot'
+            WHERE "Quotes"."IBKRCloseSource" IS DISTINCT FROM 'snapshot';
+            UPDATE "Stocks" SET "IBKRFinalCloseDate" = {sql_literal(close_date)}::date
+            WHERE "Symbol" = {sql_literal(symbol)};
+        """
+    else:
+        print("  WARNING: Snapshot CLOSE date unknown; historical close not overwritten.")
+    run_psql(db, f"""
+        BEGIN;
+        {final_sql}
+        UPDATE "Stocks" SET
+            "LastUpdateDate" = CURRENT_DATE,
+            "IBKRSnapshotRaw" = {sql_literal(json.dumps(data))}::jsonb,
+            "IBKRSnapshotReceivedAt" = CURRENT_TIMESTAMP,
+            "IBKRSnapshotLast" = {last if last > 0 else 'NULL'},
+            "IBKRChangeReference" = {reference_sql}::jsonb,
+            "IBKRSnapshotClose" = {close if close > 0 else 'NULL'},
+            "IBKRSnapshotLastDate" = {sql_literal(last_date) if dated_last else 'NULL'}::date,
+            "IBKRSnapshotCloseDate" = {sql_literal(close_date) if dated_close else 'NULL'}::date,
+            "IBKRSnapshotTimeZone" = {sql_literal(str(data.get('timeZone') or '')) if dated_close else 'NULL'}
+        WHERE "Symbol" = {sql_literal(symbol)};
+        COMMIT;
+    """, capture=False)
+    return changed
 
 
 def has_expected_quote(db: DbConfig, symbol: str) -> bool:
@@ -636,6 +712,11 @@ def helper_contract_args(request: StockRequest) -> list[str]:
     ]
     if request.currency:
         helper_args += ["--currency", request.currency]
+    if request.isin:
+        helper_args += ["--reference-isin", request.isin]
+    if request.valid_exchanges:
+        helper_args += ["--reference-exchanges", request.valid_exchanges]
+    helper_args += ["--preferred-quote-exchange", request.preferred_quote_exchange or request.quote_exchange]
     if request.quote_exchange and request.quote_exchange != "SMART":
         helper_args += ["--exchange", request.quote_exchange, "--direct-exchange"]
     elif request.primary_exchange:
@@ -1148,7 +1229,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--ibkr-port", type=int, default=7496)
     parser.add_argument("--client-id", type=int, default=240)
     parser.add_argument("--timeout-seconds", type=int, default=90)
-    parser.add_argument("--snapshot-timeout-seconds", type=int, default=5)
+    parser.add_argument("--snapshot-timeout-seconds", type=int, default=25)
     parser.add_argument("--delay-seconds", type=float, default=0.2)
     parser.add_argument(
         "--include-current",

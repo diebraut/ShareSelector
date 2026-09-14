@@ -646,6 +646,7 @@ Window {
                             RowLayout {
                                 visible: app.portfolioStatusFilter !== "sold"
                                 Layout.fillWidth: true
+                                Layout.leftMargin: 28
                                 spacing: 1
                                 Layout.preferredHeight: 28
                                 Layout.minimumHeight: 28
@@ -807,6 +808,7 @@ Window {
                             Item {
                                 visible: app.portfolioStatusFilter === "sold"
                                 Layout.fillWidth: true
+                                Layout.leftMargin: 28
                                 Layout.preferredHeight: 28
                                 Layout.minimumHeight: 28
                                 Layout.maximumHeight: 28
@@ -853,6 +855,7 @@ Window {
                                             && app.portfolioPositionInSell(rowData)
                                         property bool positionSold: app.portfolioRowSold(rowData)
                                         property bool positionObserved: !positionSold && app.portfolioBoolValue(rowData.observed)
+                                        property var quoteIssue: app.portfolioQuoteIssues[String(rowData.symbol || "")] || ({})
                                         property bool positionSelected: app.portfolioSelectionContains(portfolioPositionDelegate.index)
                                         property bool multiplePositionsSelected: app.portfolioSelectionCount() > 1
                                         property bool dragActive: false
@@ -898,6 +901,7 @@ Window {
                                     RowLayout {
                                         visible: app.portfolioStatusFilter !== "sold"
                                         anchors.fill: parent
+                                        anchors.leftMargin: 28
                                         spacing: 1
                                         Label {
                                             text: Number(portfolioPositionDelegate.index + 1).toFixed(0)
@@ -939,12 +943,12 @@ Window {
                                             Layout.preferredWidth: 16
                                             Layout.preferredHeight: 16
                                             radius: 8
-                                            color: "#dc2626"
+                                            color: "#15803d"
                                             Layout.leftMargin: 6
 
                                             Label {
                                                 anchors.fill: parent
-                                                text: "!"
+                                                text: "B"
                                                 color: "#ffffff"
                                                 font.bold: true
                                                 font.pixelSize: 12
@@ -962,6 +966,15 @@ Window {
                                         }
                                         Label {
                                             text: app.formatPercentValue(portfolioPositionDelegate.rowData.latestChangePercent)
+                                            ToolTip.visible: usdReferenceHover.hovered && !!portfolioPositionDelegate.rowData.latestChangeCurrency
+                                            ToolTip.text: (portfolioPositionDelegate.rowData.latestChangeSource === "historical"
+                                                ? "Historische " + portfolioPositionDelegate.rowData.latestChangeCurrency + "-Referenz: " + portfolioPositionDelegate.rowData.latestChangeDate
+                                                    + " gegenüber " + portfolioPositionDelegate.rowData.latestChangePreviousDate
+                                                : (portfolioPositionDelegate.rowData.latestChangeDelayed ? "Verzögerte " : "")
+                                                    + portfolioPositionDelegate.rowData.latestChangeCurrency + "-Referenz")
+                                                + " über " + (portfolioPositionDelegate.rowData.latestChangeExchange || "SMART")
+                                                + "; Referenzänderung, nicht in der aktuellen Depot-Tagesänderung enthalten."
+                                            HoverHandler { id: usdReferenceHover }
                                             color: app.portfolioSignedPercentColor(portfolioPositionDelegate.rowData.latestChangePercent)
                                             font.bold: true
                                             Layout.preferredWidth: 112
@@ -1028,6 +1041,7 @@ Window {
                                     Item {
                                         visible: app.portfolioStatusFilter === "sold"
                                         anchors.fill: parent
+                                        anchors.leftMargin: 28
                                         Label {
                                             text: Number(portfolioPositionDelegate.index + 1).toFixed(0)
                                             x: 0
@@ -1095,10 +1109,34 @@ Window {
                                         }
                                     }
 
+                                    Rectangle {
+                                        x: 6
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: 16
+                                        height: 16
+                                        radius: 8
+                                        visible: String(portfolioPositionDelegate.quoteIssue.kind || "").length > 0
+                                        color: portfolioPositionDelegate.quoteIssue.kind === "E" ? "#fee2e2" : "#e5e7eb"
+                                        border.color: portfolioPositionDelegate.quoteIssue.kind === "E" ? "#dc2626" : "#9ca3af"
+                                        Label {
+                                            anchors.fill: parent
+                                            text: String(portfolioPositionDelegate.quoteIssue.kind || "")
+                                            color: portfolioPositionDelegate.quoteIssue.kind === "E" ? "#dc2626" : "#374151"
+                                            font.bold: true
+                                            font.pixelSize: 12
+                                            horizontalAlignment: Text.AlignHCenter
+                                            verticalAlignment: Text.AlignVCenter
+                                        }
+                                    }
+
                                     MouseArea {
                                         id: portfolioPositionDragMouse
                                         anchors.fill: parent
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                        hoverEnabled: true
+                                        ToolTip.visible: containsMouse && mouseX < 28
+                                            && String(portfolioPositionDelegate.quoteIssue.message || "").length > 0
+                                        ToolTip.text: String(portfolioPositionDelegate.quoteIssue.message || "")
                                         preventStealing: portfolioPositionDelegate.positionUsed || portfolioPositionDelegate.positionSold
                                         drag.target: portfolioPositionDelegate.positionUsed || portfolioPositionDelegate.positionSold ? null : portfolioPositionDragProxy
                                         onPressed: function(mouse) {

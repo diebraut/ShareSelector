@@ -81,6 +81,13 @@ var wrapper = new ContractDetailsWrapper(RequestId,
                                          exchanges,
                                          Math.Max(1, days));
 var signal = new EReaderMonitorSignal();
+wrapper.CachedSnapshotReference = new SnapshotReference(
+    Argument(args, "--snapshot-last-date") ?? string.Empty,
+    Argument(args, "--snapshot-close-date") ?? string.Empty,
+    Argument(args, "--snapshot-time-zone") ?? string.Empty);
+wrapper.ReferenceIsin = Argument(args, "--reference-isin") ?? string.Empty;
+wrapper.ReferenceExchanges = Argument(args, "--reference-exchanges") ?? string.Empty;
+wrapper.PreferredQuoteExchange = Argument(args, "--preferred-quote-exchange") ?? exchange;
 var client = new EClientSocket(wrapper, signal);
 wrapper.Client = client;
 client.SetConnectOptions("+PACEAPI");
@@ -129,7 +136,8 @@ try {
                                  []);
         Console.Error.WriteLine($"Historical quotes requested for {symbol}/{conId}, days={days}, duration={duration}, end={endDate}.");
     } else if (marketSnapshot) {
-        client.reqMarketDataType(3);
+        // TWS delivers live data while available, otherwise the frozen market state.
+        client.reqMarketDataType(2);
         client.reqMktData(RequestId,
                           wrapper.CreateCurrentContract(),
                           string.Empty,
@@ -137,6 +145,7 @@ try {
                           false,
                           []);
         Console.Error.WriteLine($"Market snapshot requested for {symbol}/{conId}.");
+        wrapper.StartSnapshotDeadline();
     } else if (matchSymbols) {
         client.reqMatchingSymbols(RequestId, symbol);
         Console.Error.WriteLine($"Matching symbols requested for {symbol}.");
@@ -165,7 +174,7 @@ finally {
         client.eDisconnect();
 }
 
-internal sealed class ContractDetailsWrapper : DefaultEWrapper
+internal sealed partial class ContractDetailsWrapper : DefaultEWrapper
 {
     private readonly int requestId;
     private readonly string requestedSymbol;
@@ -184,6 +193,7 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
     private readonly int historicalDays;
     private readonly List<ContractDetails> matches = [];
     private readonly List<HistoricalBar> historicalBars = [];
+    private readonly List<string> historicalWarnings = [];
     private readonly List<HistoricalBar> currentProbeBars = [];
     private readonly List<QuoteExchangeProbeResult> quoteExchangeProbeResults = [];
     private readonly List<int> snapshotMarketDataTypes = [];
@@ -191,6 +201,14 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
     private readonly Dictionary<string, long> snapshotSizes = [];
     private readonly object snapshotLock = new();
     private bool snapshotCompletionQueued;
+    private bool snapshotGraceQueued;
+    private bool delayedFrozenRequested;
+    private long? snapshotLastTimestamp;
+    private long snapshotReferenceTimestamp;
+    private int snapshotFinishing;
+    private readonly TaskCompletionSource<SnapshotReference?> snapshotReference =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public SnapshotReference? CachedSnapshotReference { get; set; }
     private bool usingIsinRequest;
     private bool retriedSymbolRequest;
     private int currentProbeIndex;
@@ -270,12 +288,27 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
 
     public override void contractDetails(int reqId, ContractDetails contractDetails)
     {
+        if (reqId == requestId + 2 && marketSnapshot) {
+            usdContracts.Add(contractDetails);
+            return;
+        }
         if (reqId == requestId)
             matches.Add(contractDetails);
     }
 
     public override void historicalData(int reqId, Bar bar)
     {
+        lock (snapshotLock) {
+            if (marketSnapshot && reqId == nativeHistoryRequestId) {
+                fwbHistory.Add(new HistoricalBar(NormalizeIbkrDate(bar.Time), bar.Open, bar.High, bar.Low, bar.Close, (double)bar.Volume));
+                return;
+            }
+        }
+        if (marketSnapshot && reqId == requestId + 4) {
+            if (DateOnly.TryParseExact(bar.Time, "yyyyMMdd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
+                usdHistory.Add((date, bar.Close));
+            return;
+        }
         if (reqId != requestId || (!historicalQuotes && !probeQuoteExchanges))
             return;
 
@@ -294,6 +327,16 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
 
     public override void historicalDataEnd(int reqId, string start, string end)
     {
+        lock (snapshotLock) {
+            if (marketSnapshot && reqId == nativeHistoryRequestId) {
+                fwbHistoryReady.TrySetResult(true);
+                return;
+            }
+        }
+        if (marketSnapshot && reqId == requestId + 4) {
+            usdHistoryReady.TrySetResult(true);
+            return;
+        }
         if (reqId != requestId || (!historicalQuotes && !probeQuoteExchanges))
             return;
 
@@ -314,6 +357,7 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
             message = historicalBars.Count > 0
                 ? $"IBKR-Quotes fuer {requestedSymbol} wurden empfangen."
                 : $"IBKR lieferte keine Quotes fuer {requestedSymbol}.",
+            warnings = historicalWarnings.ToArray(),
             data = historicalBars
                 .OrderBy(bar => bar.date, StringComparer.Ordinal)
                 .ToArray()
@@ -322,17 +366,33 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
 
     public override void tickPrice(int tickerId, int field, double price, TickAttrib attribs)
     {
+        if (tickerId == requestId + 3 && marketSnapshot) {
+            ReceiveUsdPrice(field, price);
+            return;
+        }
         if (tickerId != requestId || !marketSnapshot || price <= 0)
             return;
 
         lock (snapshotLock) {
             snapshotPrices[TickFieldName(field)] = price;
+            if (!snapshotGraceQueued) {
+                snapshotGraceQueued = true;
+                // Bound incomplete snapshots while still accepting later LAST ticks.
+                _ = Task.Run(async () => {
+                    await Task.Delay(3000);
+                    CompleteSnapshot();
+                });
+            }
         }
         QueueSnapshotCompletionIfUsable();
     }
 
     public override void marketDataType(int reqId, int marketDataType)
     {
+        if (marketSnapshot && reqId == requestId + 3) {
+            usdMarketDataType = marketDataType;
+            return;
+        }
         if (reqId != requestId || !marketSnapshot)
             return;
 
@@ -340,6 +400,36 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
             snapshotMarketDataTypes.Add(marketDataType);
         }
         Console.Error.WriteLine($"Market data type for {requestedSymbol}/{requestedConId}: {marketDataType}.");
+    }
+
+    public override void tickString(int tickerId, int field, string value)
+    {
+        if (tickerId == requestId + 3 && marketSnapshot && (field == 45 || field == 88)) {
+            if (long.TryParse(value, out var usdTimestamp) && usdTimestamp > 0)
+                lock (usdLock) { usdLastTimestamp = usdTimestamp; }
+            return;
+        }
+        // 45 = LAST_TIMESTAMP, 88 = DELAYED_LAST_TIMESTAMP (Unix seconds).
+        if (tickerId != requestId || !marketSnapshot || (field != 45 && field != 88))
+            return;
+        if (long.TryParse(value, out var timestamp) && timestamp > 0) {
+            lock (snapshotLock) { snapshotLastTimestamp = timestamp; }
+            QueueSnapshotCompletionIfUsable();
+        }
+    }
+
+    public override void historicalSchedule(int reqId, string startDateTime, string endDateTime,
+                                             string timeZone, HistoricalSession[] sessions)
+    {
+        lock (snapshotLock) {
+            if (marketSnapshot && reqId == nativeScheduleRequestId) {
+                nativeScheduleReady.TrySetResult(sessions);
+                return;
+            }
+        }
+        if (marketSnapshot && reqId == requestId + 1) {
+            snapshotReference.TrySetResult(SnapshotReference.Resolve(snapshotReferenceTimestamp, timeZone, sessions));
+        }
     }
 
     public override void tickSize(int tickerId, int field, decimal size)
@@ -354,6 +444,10 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
 
     public override void tickSnapshotEnd(int reqId)
     {
+        if (reqId == requestId + 3 && marketSnapshot) {
+            usdSnapshotReady.TrySetResult();
+            return;
+        }
         if (reqId != requestId || !marketSnapshot)
             return;
 
@@ -370,6 +464,10 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
 
     public override void contractDetailsEnd(int reqId)
     {
+        if (reqId == requestId + 2 && marketSnapshot) {
+            usdContractsReady.TrySetResult();
+            return;
+        }
         if (reqId != requestId)
             return;
 
@@ -484,6 +582,61 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
     {
         if (errorCode is 2104 or 2106 or 2107 or 2108 or 2158)
             return;
+        // A snapshot may already have ended when our cleanup cancels it.
+        // Its harmless cancellation acknowledgement must not abort the USD lookup.
+        if (marketSnapshot && id == requestId && errorCode == 300 && (snapshotFinishing != 0 || delayedFrozenRequested))
+            return;
+        if (marketSnapshot && id == requestId && errorCode is 10168 or 10089) {
+            Console.Error.WriteLine($"Snapshot unavailable: {errorCode}: {errorMsg}; trying history.");
+            CompleteSnapshot();
+            return;
+        }
+        lock (snapshotLock) {
+            if (marketSnapshot && nativeScheduleRequestId > 0 && id == nativeScheduleRequestId) {
+                Console.Error.WriteLine($"EUR history calendar: {errorCode}: {errorMsg}");
+                if (errorCode != 2188) nativeScheduleReady.TrySetResult([]);
+                return;
+            }
+            if (marketSnapshot && nativeHistoryRequestId > 0 && id == nativeHistoryRequestId) {
+                Console.Error.WriteLine($"EUR history: {errorCode}: {errorMsg}");
+                if (errorCode != 2188) fwbHistoryReady.TrySetResult(false);
+                return;
+            }
+        }
+        if (marketSnapshot && (id == requestId + 2 || id == requestId + 3)) {
+            if (errorCode == 300) return;
+            Console.Error.WriteLine($"Home reference: {errorCode}: {errorMsg}");
+            if (id == requestId + 3 && UseHistoryForUsdSubscriptionError(errorCode)) return;
+            if (errorCode is not (10090 or 10167)) {
+                usdContractsReady.TrySetResult();
+                usdSnapshotReady.TrySetResult();
+            }
+            return;
+        }
+
+        if (marketSnapshot && id == requestId + 4) {
+            if (errorCode != 2188) homeReferenceError = $"Heimatboersen-Historie: IBKR {errorCode}: {errorMsg}";
+            Console.Error.WriteLine($"Home history: {errorCode}: {errorMsg}");
+            // 2188 warns about real-time history; completed bars may still follow.
+            if (errorCode != 2188) usdHistoryReady.TrySetResult(false);
+            return;
+        }
+
+        if (marketSnapshot && id == requestId + 1) {
+            Console.Error.WriteLine($"Snapshot calendar: {errorCode}: {errorMsg}");
+            snapshotReference.TrySetResult(null);
+            return;
+        }
+
+        if (id == requestId && historicalQuotes && errorCode == 2188) {
+            // HMDS may deliver historical bars after this subscription warning.
+            // Complete only at historicalDataEnd; the existing timeout still applies.
+            var warning = $"IBKR-Warnung {errorCode}: {errorMsg}";
+            if (!historicalWarnings.Contains(warning))
+                historicalWarnings.Add(warning);
+            Console.Error.WriteLine(warning);
+            return;
+        }
 
         if (id == requestId || errorCode is 502 or 504 or 507) {
             if ((historicalQuotes || probeQuoteExchanges) && errorCode is 162 or 165 or 166 or 200) {
@@ -505,8 +658,14 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
             }
 
             if (marketSnapshot && errorCode is 10090 or 10167 or 10186 or 354) {
-                // IBKR may still deliver delayed snapshot ticks after these permission warnings.
-                // Keep the request alive so tickSnapshotEnd can select live or DELAYED_* values.
+                // Without live/frozen permissions retain the delayed-data fallback.
+                if (!delayedFrozenRequested && errorCode is 10186 or 354) {
+                    delayedFrozenRequested = true;
+                    Console.Error.WriteLine("Frozen data unavailable; requesting delayed frozen data.");
+                    Client?.cancelMktData(requestId);
+                    Client?.reqMarketDataType(4);
+                    Client?.reqMktData(requestId, CreateCurrentContract(), string.Empty, true, false, []);
+                }
                 return;
             }
 
@@ -592,7 +751,10 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
     private void QueueSnapshotCompletionIfUsable()
     {
         lock (snapshotLock) {
-            if (snapshotCompletionQueued || !HasUsableSnapshotLocked())
+            // CLOSE/BID/ASK may arrive before LAST. Never finish early on these.
+            if (snapshotCompletionQueued || !snapshotLastTimestamp.HasValue
+                || !(SnapshotValue("CLOSE").HasValue || SnapshotValue("DELAYED_CLOSE").HasValue)
+                || !(SnapshotValue("LAST").HasValue || SnapshotValue("DELAYED_LAST").HasValue))
                 return;
             snapshotCompletionQueued = true;
         }
@@ -617,6 +779,12 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
 
     private void CompleteSnapshot()
     {
+        if (Interlocked.Exchange(ref snapshotFinishing, 1) == 0)
+            _ = CompleteSnapshotAsync();
+    }
+
+    private async Task CompleteSnapshotAsync()
+    {
         double? last;
         double? bid;
         double? ask;
@@ -624,6 +792,7 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
         int[] marketDataTypes;
         Dictionary<string, double> prices;
         Dictionary<string, long> sizes;
+        long? lastTimestamp;
 
         lock (snapshotLock) {
             last = SnapshotValue("LAST") ?? SnapshotValue("DELAYED_LAST");
@@ -633,6 +802,7 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
             marketDataTypes = snapshotMarketDataTypes.Distinct().ToArray();
             prices = new Dictionary<string, double>(snapshotPrices);
             sizes = new Dictionary<string, long>(snapshotSizes);
+            lastTimestamp = snapshotLastTimestamp;
         }
 
         double? mid = bid.HasValue && ask.HasValue ? (bid.Value + ask.Value) / 2.0 : null;
@@ -645,10 +815,44 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
         if (selected.HasValue)
             Client?.cancelMktData(requestId);
 
+        SnapshotReference? reference = null;
+        if (last.HasValue && close.HasValue && lastTimestamp.HasValue) {
+            if (CachedSnapshotReference?.Matches(lastTimestamp.Value) == true) {
+                reference = CachedSnapshotReference;
+            } else {
+                try {
+                    // Calendar only: no historical price is used as Snapshot CLOSE.
+                    var endTime = DateTimeOffset.FromUnixTimeSeconds(lastTimestamp.Value).UtcDateTime.AddDays(2);
+                    if (endTime > DateTime.UtcNow)
+                        endTime = DateTime.UtcNow;
+                    var end = endTime.ToString("yyyyMMdd-HH:mm:ss", CultureInfo.InvariantCulture);
+                    snapshotReferenceTimestamp = lastTimestamp.Value;
+                    Client?.reqHistoricalData(requestId + 1, CreateCurrentContract(), end,
+                        "1 M", "1 day", "SCHEDULE", 0, 1, false, []);
+                    reference = await snapshotReference.Task.WaitAsync(TimeSpan.FromSeconds(5));
+                } catch (Exception exception) {
+                    Console.Error.WriteLine($"Snapshot calendar unavailable: {exception.Message}");
+                }
+            }
+        }
+        if (reference == null)
+            Console.Error.WriteLine("Snapshot CLOSE date unknown; historical close must not be overwritten.");
+
+        // Reference prices are separate data, never a replacement for EUR quotes.
+        var changeReference = !last.HasValue && requestedCurrency == "EUR"
+            ? await RequestFwbReferenceAsync(true) : null;
+        if (changeReference == null && !last.HasValue && requestedCurrency == "EUR")
+            changeReference = await RequestHomeReferenceAsync();
+        if (changeReference == null && !last.HasValue && requestedCurrency == "EUR")
+            changeReference = await RequestFwbReferenceAsync(false);
+        var nativeHistory = fwbCompletedBars;
+        if (nativeHistory.Length > 0 && changeReference != null) selected = changeReference.last;
+
         Result.TrySetResult(new {
-            success = selected.HasValue,
+            success = selected.HasValue || changeReference != null,
             message = selected.HasValue
                 ? $"IBKR-Snapshot fuer {requestedSymbol} wurde empfangen."
+                : changeReference != null ? $"Heimatboersen-Referenz fuer {requestedSymbol} wurde empfangen; kein EUR-Snapshot."
                 : $"IBKR lieferte keinen verwertbaren Snapshot fuer {requestedSymbol}.",
             data = new {
                 selected,
@@ -657,6 +861,13 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
                 ask,
                 mid,
                 close,
+                changeReference,
+                nativeHistory,
+                fallbackError = changeReference == null ? homeReferenceError : null,
+                lastTimestamp,
+                lastDate = reference?.lastDate,
+                closeDate = reference?.closeDate,
+                timeZone = reference?.timeZone,
                 marketDataTypes,
                 prices,
                 sizes
@@ -680,8 +891,9 @@ internal sealed class ContractDetailsWrapper : DefaultEWrapper
             68 => "DELAYED_LAST",
             72 => "DELAYED_HIGH",
             73 => "DELAYED_LOW",
-            74 => "DELAYED_CLOSE",
-            75 => "DELAYED_OPEN",
+            74 => "DELAYED_VOLUME",
+            75 => "DELAYED_CLOSE",
+            76 => "DELAYED_OPEN",
             _ => $"FIELD_{field}"
         };
     }

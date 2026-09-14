@@ -633,12 +633,23 @@ bool DatabaseManager::ensureSchema()
                 ADD COLUMN IF NOT EXISTS "IBKRBestDirectExchangeTurnover" NUMERIC(28, 4),
                 ADD COLUMN IF NOT EXISTS "IBKRBestDirectExchangeCheckedAt" TIMESTAMPTZ,
                 ADD COLUMN IF NOT EXISTS "IBKRFinalCloseDate" DATE,
+                ADD COLUMN IF NOT EXISTS "IBKRSnapshotLast" NUMERIC(28, 8),
+                ADD COLUMN IF NOT EXISTS "IBKRSnapshotRaw" JSONB,
+                ADD COLUMN IF NOT EXISTS "IBKRSnapshotReceivedAt" TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS "IBKRChangeReference" JSONB,
+                ADD COLUMN IF NOT EXISTS "IBKRSnapshotClose" NUMERIC(28, 8),
+                ADD COLUMN IF NOT EXISTS "IBKRSnapshotLastDate" DATE,
+                ADD COLUMN IF NOT EXISTS "IBKRSnapshotCloseDate" DATE,
+                ADD COLUMN IF NOT EXISTS "IBKRSnapshotTimeZone" TEXT,
                 ADD COLUMN IF NOT EXISTS "from_IBKR" BOOLEAN,
                 ADD COLUMN IF NOT EXISTS "marketplace_sym" VARCHAR(128),
                 ADD COLUMN IF NOT EXISTS "marketplace_exchange" VARCHAR(32),
                 ADD COLUMN IF NOT EXISTS "marketplace_turnover" NUMERIC(28, 4),
                 ADD COLUMN IF NOT EXISTS "marketplace_checked_at" TIMESTAMPTZ,
                 ADD COLUMN IF NOT EXISTS "marketplace_last_error" TEXT
+        )SQL"),
+        QStringLiteral(R"SQL(
+            ALTER TABLE "Quotes" ADD COLUMN IF NOT EXISTS "IBKRCloseSource" TEXT
         )SQL"),
         QStringLiteral(R"SQL(
             DO $$

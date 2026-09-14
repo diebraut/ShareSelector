@@ -137,6 +137,7 @@ ApplicationWindow {
     property bool portfolioBusyVisible: portfolioSortingActive || portfolioUpdatingActive
     property string portfolioBusyMessage: portfolioUpdatingActive ? "Aktualisiere ..." : "Sortiere ..."
     property string portfolioStatusFilter: "active"
+    property var portfolioQuoteIssues: dbManager.ibkrQuoteIssues
     property var portfolioRows: []
     property string portfolioPendingPreferredSymbol: ""
     property bool portfolioPendingPreserveView: false
@@ -1287,9 +1288,10 @@ ApplicationWindow {
                         observedStartInvest = buyDate
                 }
 
-                const latestChangePercent = Number(row.latestChangePercent)
+                const latestChangePercent = row.latestChangePercent === null || row.latestChangePercent === undefined
+                    ? NaN : Number(row.latestChangePercent)
                 const latestFactor = 1 + latestChangePercent / 100
-                if (portfolioHeldAtLeast(row, 1) && !isNaN(latestChangePercent) && latestFactor > 0 && currentValue > 0) {
+                if (!row.latestChangeCurrency && portfolioHeldAtLeast(row, 1) && !isNaN(latestChangePercent) && latestFactor > 0 && currentValue > 0) {
                     const previousValue = currentValue / latestFactor
                     if (isFinite(previousValue) && previousValue > 0) {
                         latestPreviousTotal += previousValue
@@ -1436,6 +1438,8 @@ ApplicationWindow {
     }
 
     function formatPercentValue(value) {
+        if (value === null || value === undefined)
+            return "-"
         let numberValue = Number(value)
         return isNaN(numberValue) ? "-" : numberValue.toLocaleString(Qt.locale(), "f", 2) + " %"
     }

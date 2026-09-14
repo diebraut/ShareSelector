@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../ibkr-helper/SnapshotReference.cs" Link="SnapshotReference.cs" />
+    <Compile Include="../../ibkr-helper/HistoricalExchangeOrder.cs" Link="HistoricalExchangeOrder.cs" />
+    <Compile Include="../../ibkr-helper/HomeListingSelector.cs" Link="HomeListingSelector.cs" />
+    <Reference Include="CSharpAPI"><HintPath>$(IbkrApiDll)</HintPath></Reference>
+  </ItemGroup>
+</Project>

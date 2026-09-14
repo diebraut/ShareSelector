@@ -32,6 +32,7 @@ class DatabaseManager : public QObject
 {
     Q_OBJECT
     Q_PROPERTY(QString ibkrConnectionStatus READ ibkrConnectionStatus NOTIFY ibkrConnectionChanged)
+    Q_PROPERTY(QVariantMap ibkrQuoteIssues READ ibkrQuoteIssues NOTIFY ibkrConnectionChanged)
     Q_PROPERTY(bool ibkrConnected READ ibkrConnected NOTIFY ibkrConnectionChanged)
     Q_PROPERTY(bool ibkrConnecting READ ibkrConnecting NOTIFY ibkrConnectionChanged)
     Q_PROPERTY(bool ibkrDataLoading READ ibkrDataLoading NOTIFY ibkrConnectionChanged)
@@ -131,6 +132,7 @@ public:
     Q_INVOKABLE void startIbkrNameCheckBatch();
     Q_INVOKABLE void stopIbkrNameCheckBatch();
     QString ibkrConnectionStatus() const;
+    QVariantMap ibkrQuoteIssues() const;
     bool ibkrConnected() const;
     bool ibkrConnecting() const;
     bool ibkrDataLoading() const;
@@ -237,7 +239,7 @@ private:
                                const QJsonObject &snapshotData,
                                double *savedPrice = nullptr);
     int ibkrMissingQuoteDays(const QString &symbol, int fallbackDays = 90);
-    bool ibkrHasFinalCloseForLastCompletedDay(const QString &symbol) const;
+    bool ibkrHasRecentQuotes(const QString &symbol) const;
     bool saveIbkrQuoteExchange(const QString &symbol,
                                const QString &quoteExchange,
                                double turnover,
@@ -406,6 +408,9 @@ private:
     int m_ibkrGetStocksSuccessCount = 0;
     int m_ibkrGetStocksFailureCount = 0;
     int m_ibkrGetStocksChangedQuoteCount = 0;
+    QStringList m_ibkrGetStocksWarningSymbols;
+    QStringList m_ibkrGetStocksWarningIsins;
+    void recordIbkrQuoteWarning(const QString &symbol, const QString &isin, const QString &message);
     bool m_marketstackBatchActive = false;
     QStringList m_marketstackBatchSymbols;
     int m_marketstackBatchIndex = 0;
@@ -460,6 +465,8 @@ private:
     QString m_pendingIbkrQuotesIbkrSymbol;
     QString m_pendingIbkrQuotesCurrency;
     QString m_pendingIbkrQuotesExchange;
+    QString m_pendingIbkrQuoteWarning;
+    QHash<QString, QString> m_ibkrQuoteWarnings;
     QString m_pendingIbkrQuotesPrimaryExchange;
     QStringList m_pendingIbkrQuotesProbeExchanges;
     qint64 m_pendingIbkrQuotesConId = 0;

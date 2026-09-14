@@ -757,6 +757,12 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
             qp.days60_value_inc AS "Days60ValueInc",
             qp.days90_value_inc AS "Days90ValueInc",
             qp.latest_change_percent AS "LatestChangePercent",
+            s."IBKRChangeReference"->>'source' AS "LatestChangeSource",
+            s."IBKRChangeReference"->>'lastDate' AS "LatestChangeDate",
+            s."IBKRChangeReference"->>'closeDate' AS "LatestChangePreviousDate",
+            COALESCE((s."IBKRChangeReference"->>'delayed')::boolean, false) AS "LatestChangeDelayed",
+            CASE WHEN s."IBKRSnapshotLast" IS NULL THEN COALESCE(s."IBKRChangeReference"->>'currency', '') ELSE '' END AS "LatestChangeCurrency",
+            s."IBKRChangeReference"->>'exchange' AS "LatestChangeExchange",
             TO_CHAR(qp.latest_date, 'YYYY-MM-DD') AS "QuoteLastDate"
         FROM "BoughtStocks" b
         LEFT JOIN "Stocks" s ON s."Symbol" = b."Symbol"
@@ -810,7 +816,11 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
                 ROUND(((p40.new_avg - p40.old_avg) / NULLIF(p40.old_avg, 0) * 100)::numeric, 2) AS days40_value_inc,
                 ROUND(((p60.new_avg - p60.old_avg) / NULLIF(p60.old_avg, 0) * 100)::numeric, 2) AS days60_value_inc,
                 ROUND(((p90.new_avg - p90.old_avg) / NULLIF(p90.old_avg, 0) * 100)::numeric, 2) AS days90_value_inc,
-                ROUND(((l.latest_close - pq.previous_close) / NULLIF(pq.previous_close, 0) * 100)::numeric, 2) AS latest_change_percent
+                ROUND((CASE WHEN s."IBKRSnapshotLast" IS NOT NULL
+                    THEN (s."IBKRSnapshotLast" - s."IBKRSnapshotClose") / NULLIF(s."IBKRSnapshotClose", 0)
+                    ELSE ((s."IBKRChangeReference"->>'last')::numeric - (s."IBKRChangeReference"->>'close')::numeric)
+                        / NULLIF((s."IBKRChangeReference"->>'close')::numeric, 0)
+                    END * 100)::numeric, 2) AS latest_change_percent
             FROM latest_quote l
             LEFT JOIN previous_quote pq ON true
             CROSS JOIN boundaries bd
@@ -921,7 +931,14 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
         row["days40ValueInc"] = query.value("Days40ValueInc");
         row["days60ValueInc"] = query.value("Days60ValueInc");
         row["days90ValueInc"] = query.value("Days90ValueInc");
-        row["latestChangePercent"] = query.value("LatestChangePercent");
+        row["latestChangePercent"] = query.value("LatestChangePercent").isNull()
+            ? QVariant() : query.value("LatestChangePercent");
+        row["latestChangeCurrency"] = query.value("LatestChangeCurrency");
+        row["latestChangeExchange"] = query.value("LatestChangeExchange");
+        row["latestChangeDelayed"] = query.value("LatestChangeDelayed");
+        row["latestChangeSource"] = query.value("LatestChangeSource");
+        row["latestChangeDate"] = query.value("LatestChangeDate");
+        row["latestChangePreviousDate"] = query.value("LatestChangePreviousDate");
         row["quoteLastDate"] = query.value("QuoteLastDate");
         row["status"] = query.value("Status");
         row["mic"] = query.value("MIC");
@@ -990,8 +1007,18 @@ QVariantMap DatabaseManager::getTestPortfolioSummaryForSymbol(const QString &sym
             s."Exchange",
             s."CountryCode",
             s."City",
-            ROUND(((lq.latest_close - pq.previous_close) / NULLIF(pq.previous_close, 0) * 100)::numeric, 2) AS "LatestChangePercent",
+            ROUND((CASE WHEN s."IBKRSnapshotLast" IS NOT NULL
+                THEN (s."IBKRSnapshotLast" - s."IBKRSnapshotClose") / NULLIF(s."IBKRSnapshotClose", 0)
+                ELSE ((s."IBKRChangeReference"->>'last')::numeric - (s."IBKRChangeReference"->>'close')::numeric)
+                    / NULLIF((s."IBKRChangeReference"->>'close')::numeric, 0)
+                END * 100)::numeric, 2) AS "LatestChangePercent",
+            CASE WHEN s."IBKRSnapshotLast" IS NULL THEN COALESCE(s."IBKRChangeReference"->>'currency', '') ELSE '' END AS "LatestChangeCurrency",
+            s."IBKRChangeReference"->>'exchange' AS "LatestChangeExchange",
             TO_CHAR(lq.latest_date, 'YYYY-MM-DD') AS "QuoteLastDate"
+            , COALESCE((s."IBKRChangeReference"->>'delayed')::boolean, false) AS "LatestChangeDelayed"
+            , s."IBKRChangeReference"->>'source' AS "LatestChangeSource"
+            , s."IBKRChangeReference"->>'lastDate' AS "LatestChangeDate"
+            , s."IBKRChangeReference"->>'closeDate' AS "LatestChangePreviousDate"
         FROM "BoughtStocks" b
         LEFT JOIN "Stocks" s ON s."Symbol" = b."Symbol"
         LEFT JOIN LATERAL (
@@ -1037,7 +1064,14 @@ QVariantMap DatabaseManager::getTestPortfolioSummaryForSymbol(const QString &sym
     row["quantity"] = query.value("Quantity");
     row["observed"] = query.value("Observed");
     row["analysisConfigName"] = query.value("AnalysisConfigName");
-    row["latestChangePercent"] = query.value("LatestChangePercent");
+    row["latestChangePercent"] = query.value("LatestChangePercent").isNull()
+        ? QVariant() : query.value("LatestChangePercent");
+    row["latestChangeCurrency"] = query.value("LatestChangeCurrency");
+    row["latestChangeExchange"] = query.value("LatestChangeExchange");
+    row["latestChangeDelayed"] = query.value("LatestChangeDelayed");
+    row["latestChangeSource"] = query.value("LatestChangeSource");
+    row["latestChangeDate"] = query.value("LatestChangeDate");
+    row["latestChangePreviousDate"] = query.value("LatestChangePreviousDate");
     row["quoteLastDate"] = query.value("QuoteLastDate");
     row["status"] = query.value("Status");
     row["mic"] = query.value("MIC");

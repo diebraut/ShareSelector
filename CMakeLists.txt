@@ -37,6 +37,11 @@ if(WIN32)
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/IbkrHelper.csproj"
             "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/Program.cs"
+            "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/SnapshotReference.cs"
+            "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/UsdReference.cs"
+            "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/FwbReference.cs"
+            "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/HistoricalExchangeOrder.cs"
+            "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/HomeListingSelector.cs"
         VERBATIM
     )
     add_custom_target(ibkr_helper ALL DEPENDS "${IBKR_HELPER_EXECUTABLE}")
