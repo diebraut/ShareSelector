@@ -1,6 +1,7 @@
 import QtQuick 2.15
 import QtQuick.Controls 2.15
 import QtQuick.Layouts 1.15
+import QtQuick.Window 2.15
 
 Window {
     id: portfolioWindow
@@ -132,6 +133,48 @@ Window {
         hostWindow: portfolioWindow
     }
 
+    TradeRepublicWindow {
+        id: tradeRepublicWindow
+    }
+
+    CheckDepotsWindow {
+        id: checkDepotsWindow
+        dbManager: portfolioWindow.dbManager
+        browserWindow: tradeRepublicWindow
+    }
+
+    Timer {
+        id: checkDepotsPositionTimer
+        interval: 75
+        repeat: false
+        onTriggered: windowGeometryHelper.placeDirectlyBelow(
+            tradeRepublicWindow,
+            checkDepotsWindow,
+            checkDepotsWindow.height
+        )
+    }
+
+    function showTradeRepublicDepot() {
+        const desktopLeft = Screen.virtualX || 0
+        const leftWidth = Math.max(320, portfolioWindow.x - desktopLeft)
+        const checkHeight = app.calculatedPositionManagementHeight()
+
+        tradeRepublicWindow.openBeside(
+            desktopLeft,
+            portfolioWindow.x,
+            portfolioWindow.y,
+            portfolioWindow.height
+        )
+        checkDepotsWindow.openBelowBrowser(
+            desktopLeft,
+            portfolioWindow.y + portfolioWindow.height + 40,
+            leftWidth,
+            checkHeight,
+            app.selectedDepotId
+        )
+        checkDepotsPositionTimer.restart()
+    }
+
         Timer {
             id: localPortfolioBusyTimer
             interval: 700
@@ -202,6 +245,12 @@ Window {
                     }
 
                     Item { Layout.fillWidth: true }
+
+                    Button {
+                        text: "Show Trade Republic Depot"
+                        Layout.preferredWidth: 190
+                        onClicked: portfolioWindow.showTradeRepublicDepot()
+                    }
 
                     Button {
                         text: "Konfiguration Par."
@@ -675,14 +724,14 @@ Window {
                                     }
                                 }
                                 Rectangle {
-                                    Layout.preferredWidth: 112
+                                    Layout.preferredWidth: 90
                                     Layout.preferredHeight: 28
                                     Layout.minimumHeight: 28
                                     Layout.maximumHeight: 28
                                     color: app.portfolioSortKey === "latestChangePercent" ? "#e0f2fe" : "transparent"
                                     Label {
                                         anchors.fill: parent
-                                        text: "Letzte Änderung " + app.portfolioSortIcon("latestChangePercent")
+                                        text: "Letzte Änd. " + app.portfolioSortIcon("latestChangePercent")
                                         font.bold: true
                                         horizontalAlignment: Text.AlignRight
                                         verticalAlignment: Text.AlignVCenter
@@ -697,14 +746,14 @@ Window {
                                     }
                                 }
                                 Rectangle {
-                                    Layout.preferredWidth: 120
+                                    Layout.preferredWidth: 95
                                     Layout.preferredHeight: 28
                                     Layout.minimumHeight: 28
                                     Layout.maximumHeight: 28
                                     color: app.portfolioSortKey === "totalValue" ? "#e0f2fe" : "transparent"
                                     Label {
                                         anchors.fill: parent
-                                        text: "Gesamtwert " + app.portfolioSortIcon("totalValue")
+                                        text: "Ges.Wert " + app.portfolioSortIcon("totalValue")
                                         font.bold: true
                                         horizontalAlignment: Text.AlignRight
                                         verticalAlignment: Text.AlignVCenter
@@ -733,6 +782,28 @@ Window {
                                         anchors.fill: parent
                                         cursorShape: Qt.PointingHandCursor
                                         onClicked: app.sortPortfolioBy("gainPercent")
+                                    }
+                                }
+                                Rectangle {
+                                    Layout.preferredWidth: 92
+                                    Layout.preferredHeight: 28
+                                    Layout.minimumHeight: 28
+                                    Layout.maximumHeight: 28
+                                    color: app.portfolioSortKey === "changeFromHighPercent" ? "#e0f2fe" : "transparent"
+                                    Label {
+                                        anchors.fill: parent
+                                        text: "Vom Hoch " + app.portfolioSortIcon("changeFromHighPercent")
+                                        font.bold: true
+                                        horizontalAlignment: Text.AlignRight
+                                        verticalAlignment: Text.AlignVCenter
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            portfolioWindow.showLocalPortfolioBusy("Sortiere ...")
+                                            app.sortPortfolioBy("changeFromHighPercent")
+                                        }
                                     }
                                 }
                                 Label { text: "Investiert"; Layout.preferredWidth: 110; font.bold: true; horizontalAlignment: Text.AlignRight }
@@ -977,15 +1048,22 @@ Window {
                                             HoverHandler { id: usdReferenceHover }
                                             color: app.portfolioSignedPercentColor(portfolioPositionDelegate.rowData.latestChangePercent)
                                             font.bold: true
-                                            Layout.preferredWidth: 112
+                                            Layout.preferredWidth: 90
                                             horizontalAlignment: Text.AlignRight
                                         }
                                         Label {
                                             text: app.portfolioPositionTotalValue(portfolioPositionDelegate.rowData).toLocaleString(Qt.locale(), "f", 2)
-                                            Layout.preferredWidth: 120
+                                            Layout.preferredWidth: 95
                                             horizontalAlignment: Text.AlignRight
                                         }
                                         Label { text: app.formatPercentValue(portfolioPositionDelegate.rowData.valueIncreasePercent); Layout.preferredWidth: 90; Layout.leftMargin: 12; horizontalAlignment: Text.AlignRight }
+                                        Label {
+                                            text: app.formatPercentValue(portfolioPositionDelegate.rowData.changeFromHighPercent)
+                                            color: app.portfolioSignedPercentColor(portfolioPositionDelegate.rowData.changeFromHighPercent)
+                                            font.bold: true
+                                            Layout.preferredWidth: 92
+                                            horizontalAlignment: Text.AlignRight
+                                        }
                                         Label { text: app.portfolioPositionEntryTotal(portfolioPositionDelegate.rowData).toLocaleString(Qt.locale(), "f", 2); Layout.preferredWidth: 110; horizontalAlignment: Text.AlignRight }
                                         Label {
                                             text: portfolioPositionDelegate.positionSold

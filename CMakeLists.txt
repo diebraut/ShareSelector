@@ -4,7 +4,7 @@ project(ShareSelector VERSION 0.1 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 6.4 REQUIRED COMPONENTS Quick Sql QuickControls2 Network)
+find_package(Qt6 6.4 REQUIRED COMPONENTS Quick Sql QuickControls2 Network WebView)
 
 if(WIN32)
     set(TWS_API_ROOT "" CACHE PATH "Path to the installed IBKR TWS API")
@@ -42,6 +42,8 @@ if(WIN32)
             "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/FwbReference.cs"
             "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/HistoricalExchangeOrder.cs"
             "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/HomeListingSelector.cs"
+            "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/YahooReference.cs"
+            "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/FxReference.cs"
         VERBATIM
     )
     add_custom_target(ibkr_helper ALL DEPENDS "${IBKR_HELPER_EXECUTABLE}")
@@ -67,6 +69,8 @@ qt_add_qml_module(appShareSelector
         Main.qml  # Groß-/Kleinschreibung prüfen!
         PortfolioChartWindow.qml
         PortfolioWindow.qml
+        TradeRepublicWindow.qml
+        CheckDepotsWindow.qml
         DepotMasterDataDialog.qml
         StockAnalysisConfigPanel.qml
         StockAnalysisChartPanel.qml
@@ -85,6 +89,8 @@ qt_add_qml_module(appShareSelector
         databasemanager_quoteimport.cpp
         databasemanager.h
         databasemanager_internal.h
+        windowgeometryhelper.h
+        windowgeometryhelper.cpp
         alphavantageclient.h
         alphavantageclient.cpp
         yahoofinanceclient.h
@@ -101,7 +107,7 @@ set_target_properties(appShareSelector PROPERTIES
 )
 
 target_link_libraries(appShareSelector
-    PRIVATE Qt6::Quick Qt6::Sql Qt6::QuickControls2 Qt6::Network
+    PRIVATE Qt6::Quick Qt6::Sql Qt6::QuickControls2 Qt6::Network Qt6::WebView
 )
 
 include(GNUInstallDirs)

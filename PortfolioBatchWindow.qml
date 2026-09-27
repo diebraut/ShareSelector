@@ -6,6 +6,7 @@ Window {
     id: portfolioBatchWindow
     property var app
     property var dbManager
+    property bool ibkrExternalBatchActive: false
         title: "Depot-Batchaufrufe"
         width: 900
         height: 600
@@ -15,6 +16,14 @@ Window {
         onVisibleChanged: if (visible) {
             app.updateIbkrQuoteScheduleStatus()
             app.checkIbkrGatewayOnly()
+            ibkrExternalBatchActive = dbManager.isIbkrQuoteWorkerAllActive()
+        }
+
+        Timer {
+            interval: 2000
+            repeat: true
+            running: portfolioBatchWindow.visible
+            onTriggered: ibkrExternalBatchActive = dbManager.isIbkrQuoteWorkerAllActive()
         }
 
         Rectangle {
@@ -163,8 +172,24 @@ Window {
                     Button { text: "Get new Quotes for IBKR Data starten"; Layout.fillWidth: true; enabled: dbManager.ibkrConnected && !dbManager.ibkrGetStocksActive; onClicked: dbManager.startIbkrGetAllStocks() }
                     Button { text: "Get new Quotes for IBKR Data stoppen"; Layout.fillWidth: true; enabled: dbManager.ibkrGetStocksActive && dbManager.ibkrGetStocksBatchName === "Get new Quotes for IBKR Data"; onClicked: dbManager.stopIbkrGetStocks() }
 
-                    Button { text: "IBKR Gesamtbatch extern starten"; Layout.fillWidth: true; enabled: dbManager.ibkrConnected && !dbManager.ibkrGetStocksActive; onClicked: dbManager.startIbkrQuoteWorkerAll() }
-                    Item { Layout.fillWidth: true }
+                    Button {
+                        text: "IBKR Gesamtbatch extern starten"
+                        Layout.fillWidth: true
+                        enabled: dbManager.ibkrConnected && !dbManager.ibkrGetStocksActive && !ibkrExternalBatchActive
+                        onClicked: {
+                            if (dbManager.startIbkrQuoteWorkerAll())
+                                ibkrExternalBatchActive = true
+                        }
+                    }
+                    Button {
+                        text: "IBKR Gesamtbatch extern stoppen"
+                        Layout.fillWidth: true
+                        enabled: ibkrExternalBatchActive
+                        onClicked: {
+                            if (dbManager.stopIbkrQuoteWorkerAll())
+                                ibkrExternalBatchActive = false
+                        }
+                    }
 
                     Button { text: "IBKR Kurs-Backfill 2024-2025 starten"; Layout.fillWidth: true; enabled: dbManager.ibkrConnected && !dbManager.ibkrGetStocksActive; onClicked: dbManager.startIbkrQuoteHistoryBackfill2024_2025() }
                     Item { Layout.fillWidth: true }

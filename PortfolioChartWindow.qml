@@ -7,6 +7,7 @@ import QtQuick.Layouts 1.15
 
     property var portfolioChartStock: ({})
     property var portfolioChartData: ({})
+    property bool showCourseSincePurchase: false
 
     function cleanDisplayText(value) {
         let text = String(value)
@@ -40,6 +41,22 @@ import QtQuick.Layouts 1.15
 
     function chartDataNumber(key, fallback) {
         return Number(chartDataValue(key, fallback === undefined ? 0 : fallback))
+    }
+
+    function purchaseDate() {
+        return String((portfolioChartStock || ({})).buyDate || "")
+    }
+
+    function purchasePrice() {
+        return Number((portfolioChartStock || ({})).entryValue || 0)
+    }
+
+    function chartStartDate() {
+        const periodStart = String(chartDataValue("start90", ""))
+        const boughtOn = purchaseDate()
+        if (showCourseSincePurchase && boughtOn.length > 0)
+            return boughtOn
+        return periodStart
     }
 
     function openForStock(row, data) {
@@ -94,12 +111,31 @@ import QtQuick.Layouts 1.15
                             Layout.fillWidth: true
                         }
 
-                        Label {
-                            text: "Zeitraum: " + chartDataValue("start90", "-") + " bis " + chartDataValue("latestDate", "-")
-                                + " | letzter Schlusskurs: " + chartDataNumber("latestClose", 0).toFixed(2)
-                            color: "#4f5b62"
+                        RowLayout {
                             Layout.fillWidth: true
-                            elide: Text.ElideRight
+                            spacing: 10
+
+                            Label {
+                                text: "Zeitraum: " + (chartStartDate() || "-") + " bis " + chartDataValue("latestDate", "-")
+                                    + " | letzter Schlusskurs: " + chartDataNumber("latestClose", 0).toFixed(2)
+                                    + (purchaseDate().length > 0 && purchasePrice() > 0
+                                       ? " | Kauf: " + purchasePrice().toFixed(2) + " am " + purchaseDate()
+                                       : "")
+                                color: "#4f5b62"
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
+                            }
+
+                            CheckBox {
+                                text: "Kurs seit Kauf"
+                                enabled: purchaseDate().length > 0
+                                checked: portfolioChartWindow.showCourseSincePurchase
+                                onToggled: {
+                                    portfolioChartWindow.showCourseSincePurchase = checked
+                                    portfolioChart.hoveredQuoteIndex = -1
+                                    portfolioChart.requestPaint()
+                                }
+                            }
                         }
                     }
 
@@ -191,7 +227,7 @@ import QtQuick.Layouts 1.15
                                 return new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])).getTime()
                             }
 
-                            let firstMs = dateMs(chartDataValue("start90", portfolioChartQuoteModel.get(0).closeDate))
+                            let firstMs = dateMs(chartStartDate() || portfolioChartQuoteModel.get(0).closeDate)
                             let lastMs = dateMs(chartDataValue("latestDate", portfolioChartQuoteModel.get(count - 1).closeDate))
                             if (!isFinite(firstMs))
                                 firstMs = dateMs(portfolioChartQuoteModel.get(0).closeDate)
@@ -199,7 +235,15 @@ import QtQuick.Layouts 1.15
                                 lastMs = dateMs(portfolioChartQuoteModel.get(count - 1).closeDate)
                             let timeRange = Math.max(1, lastMs - firstMs)
 
-                            let minPrice = Number(portfolioChartQuoteModel.get(0).closePrice)
+                            let visibleStartIndex = 0
+                            for (let visibleIndex = 0; visibleIndex < count; visibleIndex++) {
+                                if (dateMs(portfolioChartQuoteModel.get(visibleIndex).closeDate) >= firstMs) {
+                                    visibleStartIndex = visibleIndex
+                                    break
+                                }
+                            }
+
+                            let minPrice = Number(portfolioChartQuoteModel.get(visibleStartIndex).closePrice)
                             let maxPrice = minPrice
                             let periods = [
                                 { label: "90", start: chartDataValue("start90", ""), avg: chartDataNumber("avg90", 0), inc: chartDataNumber("inc90", 0), color: "#7c3aed" },
@@ -210,8 +254,8 @@ import QtQuick.Layouts 1.15
                             function quoteIndexOnOrAfter(startDate) {
                                 let start = dateMs(startDate)
                                 if (!isFinite(start))
-                                    return 0
-                                for (let i = 0; i < count; i++) {
+                                    return visibleStartIndex
+                                for (let i = visibleStartIndex; i < count; i++) {
                                     if (dateMs(portfolioChartQuoteModel.get(i).closeDate) >= start)
                                         return i
                                 }
@@ -251,10 +295,40 @@ import QtQuick.Layouts 1.15
                                 }
                             }
 
-                            for (let i = 0; i < count; i++) {
+                            for (let i = visibleStartIndex; i < count; i++) {
                                 let price = Number(portfolioChartQuoteModel.get(i).closePrice)
                                 minPrice = Math.min(minPrice, price)
                                 maxPrice = Math.max(maxPrice, price)
+                            }
+                            let boughtPrice = purchasePrice()
+                            let boughtDate = purchaseDate()
+                            let boughtMs = dateMs(boughtDate)
+                            let purchaseVisible = boughtPrice > 0
+                                                  && isFinite(boughtMs)
+                                                  && boughtMs >= firstMs
+                                                  && boughtMs <= lastMs
+                            if (purchaseVisible) {
+                                minPrice = Math.min(minPrice, boughtPrice)
+                                maxPrice = Math.max(maxPrice, boughtPrice)
+                            }
+
+                            // Hoechsten Schlusskurs seit dem Kauf bestimmen.
+                            // Die spaeter gezeichnete Linie verbindet dieses
+                            // Hoch mit dem aktuellsten vorhandenen Kurs.
+                            let highestSincePurchaseIndex = -1
+                            let highestSincePurchasePrice = 0
+                            if (purchaseVisible) {
+                                for (let highIndex = visibleStartIndex; highIndex < count; highIndex++) {
+                                    let highRow = portfolioChartQuoteModel.get(highIndex)
+                                    let highDateMs = dateMs(highRow.closeDate)
+                                    let highPrice = Number(highRow.closePrice)
+                                    if (isFinite(highDateMs)
+                                            && highDateMs >= boughtMs
+                                            && highPrice > highestSincePurchasePrice) {
+                                        highestSincePurchaseIndex = highIndex
+                                        highestSincePurchasePrice = highPrice
+                                    }
+                                }
                             }
                             for (let p = 0; p < periods.length; p++) {
                                 let trend = trendForPeriod(quoteIndexOnOrAfter(periods[p].start))
@@ -314,6 +388,8 @@ import QtQuick.Layouts 1.15
                             }
 
                             for (let band = 0; band < periods.length; band++) {
+                                if (dateMs(periods[band].start) < firstMs)
+                                    continue
                                 let startX = xForDate(periods[band].start)
                                 ctx.fillStyle = band % 2 === 0 ? "rgba(37, 99, 235, 0.035)" : "rgba(5, 150, 105, 0.035)"
                                 ctx.fillRect(startX, topPad, leftPad + plotWidth - startX, plotHeight)
@@ -322,11 +398,11 @@ import QtQuick.Layouts 1.15
                             ctx.strokeStyle = "#cbd5dc"
                             ctx.lineWidth = 1.5
                             ctx.beginPath()
-                            for (let j = 0; j < count; j++) {
+                            for (let j = visibleStartIndex; j < count; j++) {
                                 let row = portfolioChartQuoteModel.get(j)
                                 let x = xForDate(row.closeDate)
                                 let y = yForPrice(Number(row.closePrice))
-                                if (j === 0)
+                                if (j === visibleStartIndex)
                                     ctx.moveTo(x, y)
                                 else
                                     ctx.lineTo(x, y)
@@ -340,6 +416,8 @@ import QtQuick.Layouts 1.15
 
                             for (let b = 0; b < periods.length; b++) {
                                 let period = periods[b]
+                                if (dateMs(period.start) < firstMs)
+                                    continue
                                 let startIndex = quoteIndexOnOrAfter(period.start)
                                 let startXLine = xForDate(period.start)
 
@@ -403,8 +481,52 @@ import QtQuick.Layouts 1.15
                                 }
                             }
 
+                            if (highestSincePurchaseIndex >= 0) {
+                                let highRow = portfolioChartQuoteModel.get(highestSincePurchaseIndex)
+                                let currentRow = portfolioChartQuoteModel.get(count - 1)
+                                let currentPrice = Number(currentRow.closePrice)
+                                let highX = xForDate(highRow.closeDate)
+                                let highY = yForPrice(highestSincePurchasePrice)
+                                let currentX = xForDate(currentRow.closeDate)
+                                let currentY = yForPrice(currentPrice)
+                                let changeFromHigh = highestSincePurchasePrice > 0
+                                                     ? (currentPrice - highestSincePurchasePrice)
+                                                       / highestSincePurchasePrice * 100
+                                                     : 0
+                                let highLineColor = changeFromHigh >= 0 ? "#15803d" : "#dc2626"
+
+                                ctx.strokeStyle = highLineColor
+                                ctx.lineWidth = 3
+                                ctx.beginPath()
+                                ctx.moveTo(highX, highY)
+                                ctx.lineTo(currentX, currentY)
+                                ctx.stroke()
+
+                                ctx.fillStyle = highLineColor
+                                ctx.beginPath()
+                                ctx.arc(highX, highY, 5, 0, Math.PI * 2)
+                                ctx.arc(currentX, currentY, 5, 0, Math.PI * 2)
+                                ctx.fill()
+
+                                let highLabel = "Vom Hoch " + signedPercent(changeFromHigh)
+                                ctx.font = "bold 12px sans-serif"
+                                let highLabelWidth = ctx.measureText(highLabel).width + 12
+                                let highLabelX = highX + (currentX - highX) * 0.5
+                                                 - highLabelWidth / 2
+                                let highLabelY = highY + (currentY - highY) * 0.5 - 10
+                                highLabelX = Math.min(width - highLabelWidth - 4,
+                                                      Math.max(leftPad + 4, highLabelX))
+                                highLabelY = Math.min(topPad + plotHeight - 8,
+                                                      Math.max(topPad + 16, highLabelY))
+                                ctx.fillStyle = "rgba(255, 255, 255, 0.92)"
+                                ctx.fillRect(highLabelX - 5, highLabelY - 14,
+                                             highLabelWidth, 19)
+                                ctx.fillStyle = highLineColor
+                                ctx.fillText(highLabel, highLabelX, highLabelY)
+                            }
+
                             let pointEvery = Math.max(1, Math.ceil(count / Math.max(2, Math.floor(plotWidth / 42))))
-                            for (let k = 0; k < count; k++) {
+                            for (let k = visibleStartIndex; k < count; k++) {
                                 let point = portfolioChartQuoteModel.get(k)
                                 let px = xForDate(point.closeDate)
                                 let py = yForPrice(Number(point.closePrice))
@@ -412,14 +534,49 @@ import QtQuick.Layouts 1.15
                                 ctx.beginPath()
                                 ctx.arc(px, py, portfolioChart.hoveredQuoteIndex === k ? 5 : 2.5, 0, Math.PI * 2)
                                 ctx.fill()
-                                if (k === 0 || k === count - 1 || k % pointEvery === 0 || portfolioChart.hoveredQuoteIndex === k) {
+                                if (k === visibleStartIndex || k === count - 1 || k % pointEvery === 0 || portfolioChart.hoveredQuoteIndex === k) {
                                     ctx.fillStyle = "#374151"
                                     ctx.font = "10px sans-serif"
                                     ctx.fillText(Number(point.closePrice).toFixed(2), px - 14, Math.max(10, py - 7))
                                 }
                             }
 
+                            if (purchaseVisible) {
+                                let purchaseX = xForDate(boughtDate)
+                                let purchaseY = yForPrice(boughtPrice)
+
+                                ctx.strokeStyle = "rgba(220, 38, 38, 0.55)"
+                                ctx.lineWidth = 1.5
+                                ctx.setLineDash([4, 4])
+                                ctx.beginPath()
+                                ctx.moveTo(purchaseX, purchaseY)
+                                ctx.lineTo(purchaseX, topPad + plotHeight)
+                                ctx.stroke()
+                                ctx.setLineDash([])
+
+                                ctx.fillStyle = "#dc2626"
+                                ctx.strokeStyle = "#ffffff"
+                                ctx.lineWidth = 2
+                                ctx.beginPath()
+                                ctx.arc(purchaseX, purchaseY, 7, 0, Math.PI * 2)
+                                ctx.fill()
+                                ctx.stroke()
+
+                                let purchaseLabel = "Kauf " + boughtPrice.toFixed(2)
+                                ctx.font = "bold 12px sans-serif"
+                                let purchaseLabelWidth = ctx.measureText(purchaseLabel).width + 12
+                                let purchaseLabelX = Math.min(width - purchaseLabelWidth - 4,
+                                                              Math.max(leftPad + 4, purchaseX + 9))
+                                let purchaseLabelY = Math.max(topPad + 16, purchaseY - 10)
+                                ctx.fillStyle = "rgba(255, 255, 255, 0.92)"
+                                ctx.fillRect(purchaseLabelX - 5, purchaseLabelY - 14,
+                                             purchaseLabelWidth, 19)
+                                ctx.fillStyle = "#dc2626"
+                                ctx.fillText(purchaseLabel, purchaseLabelX, purchaseLabelY)
+                            }
+
                             let labelDates = [
+                                { text: purchaseVisible ? boughtDate : "", color: "#dc2626" },
                                 { text: chartDataValue("start90", ""), color: "#7c3aed" },
                                 { text: chartDataValue("start60", ""), color: "#d97706" },
                                 { text: chartDataValue("start40", ""), color: "#059669" },
@@ -428,6 +585,8 @@ import QtQuick.Layouts 1.15
                             ]
                             for (let d = 0; d < labelDates.length; d++) {
                                 if (!labelDates[d].text)
+                                    continue
+                                if (dateMs(labelDates[d].text) < firstMs)
                                     continue
                                 let lx = xForDate(labelDates[d].text)
                                 ctx.fillStyle = labelDates[d].color
@@ -477,11 +636,13 @@ import QtQuick.Layouts 1.15
                                         return NaN
                                     return new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2])).getTime()
                                 }
-                                let firstMs = dateMs(chartDataValue("start90", portfolioChartQuoteModel.get(0).closeDate))
+                                let firstMs = dateMs(chartStartDate() || portfolioChartQuoteModel.get(0).closeDate)
                                 let lastMs = dateMs(chartDataValue("latestDate", portfolioChartQuoteModel.get(count - 1).closeDate))
                                 let range = Math.max(1, lastMs - firstMs)
                                 for (let i = 0; i < count; i++) {
                                     let ms = dateMs(portfolioChartQuoteModel.get(i).closeDate)
+                                    if (ms < firstMs)
+                                        continue
                                     let x = leftPad + Math.max(0, Math.min(1, (ms - firstMs) / range)) * plotWidth
                                     let dist = Math.abs(mouse.x - x)
                                     if (dist < bestDistance) {

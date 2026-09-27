@@ -97,12 +97,24 @@ internal sealed partial class ContractDetailsWrapper
             Client.reqMktData(requestId + 3, contract, string.Empty, true, false, []);
             try { await usdSnapshotReady.Task.WaitAsync(TimeSpan.FromSeconds(3)); }
             catch (TimeoutException) { Console.Error.WriteLine("Home snapshot timed out; trying history."); }
+            MarketReference? snapshot = null;
             lock (usdLock) {
                 var last = usdPrices.GetValueOrDefault(4, usdPrices.GetValueOrDefault(68));
                 var close = usdPrices.GetValueOrDefault(9, usdPrices.GetValueOrDefault(75));
                 if (last > 0 && close > 0)
-                    return new(last, close, contract.Currency, contract.ConId, contract.LocalSymbol,
+                    snapshot = new(last, close, contract.Currency, contract.ConId, contract.LocalSymbol,
                         contract.PrimaryExch, usdLastTimestamp, usdMarketDataType is 3 or 4, exchange: contract.Exchange);
+            }
+            if (snapshot != null) {
+                if (!snapshot.lastTimestamp.HasValue)
+                    return snapshot;
+                var dated = await RequestHomeHistoryAsync(contract, details.TimeZoneId);
+                var zone = HomeListingSelector.TimeZone(details.TimeZoneId);
+                var snapshotDay = DateOnly.FromDateTime(TimeZoneInfo.ConvertTime(
+                    DateTimeOffset.FromUnixTimeSeconds(snapshot.lastTimestamp.Value), zone).DateTime);
+                return dated != null && dated.lastDate == snapshotDay.ToString("yyyy-MM-dd")
+                    ? snapshot with { lastDate = dated.lastDate, closeDate = dated.closeDate }
+                    : snapshot;
             }
             return await RequestHomeHistoryAsync(contract, details.TimeZoneId);
         } catch (Exception exception) {

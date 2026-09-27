@@ -89,6 +89,7 @@ public:
     Q_INVOKABLE QVariantMap getStockAnalysisCandidate(const QString &symbol, double minIncreasePercent, int quoteCount);
     Q_INVOKABLE QVariantList getBoughtStocks();
     Q_INVOKABLE QVariantList getDepots();
+    Q_INVOKABLE QVariantList getObservedStocksForDepotCheck(int depotId);
     Q_INVOKABLE QVariantMap getDepotMasterData(int depotId, int investmentYear);
     Q_INVOKABLE QVariantMap getDepotYearGainPercentages(int depotId, int investmentYear);
     Q_INVOKABLE QVariantMap getObservedDepotYearGainPercentages(int depotId, int investmentYear);
@@ -119,6 +120,8 @@ public:
     Q_INVOKABLE void startIbkrGetStocks();
     Q_INVOKABLE void startIbkrGetAllStocks();
     Q_INVOKABLE bool startIbkrQuoteWorkerAll();
+    Q_INVOKABLE bool stopIbkrQuoteWorkerAll();
+    Q_INVOKABLE bool isIbkrQuoteWorkerAllActive() const;
     Q_INVOKABLE bool startIbkrQuoteHistoryBackfill2024_2025();
     Q_INVOKABLE void getIbkrQuotesForSingleStock(const QString &symbol);
     Q_INVOKABLE void startIbkrGetStocksForSymbols(const QVariantList &symbols);

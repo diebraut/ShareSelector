@@ -88,6 +88,8 @@ wrapper.CachedSnapshotReference = new SnapshotReference(
 wrapper.ReferenceIsin = Argument(args, "--reference-isin") ?? string.Empty;
 wrapper.ReferenceExchanges = Argument(args, "--reference-exchanges") ?? string.Empty;
 wrapper.PreferredQuoteExchange = Argument(args, "--preferred-quote-exchange") ?? exchange;
+wrapper.YahooSymbol = Argument(args, "--yahoo-symbol") ?? string.Empty;
+wrapper.ExpectedYahooQuoteDate = Argument(args, "--expected-quote-date") ?? string.Empty;
 var client = new EClientSocket(wrapper, signal);
 wrapper.Client = client;
 client.SetConnectOptions("+PACEAPI");
@@ -309,6 +311,11 @@ internal sealed partial class ContractDetailsWrapper : DefaultEWrapper
                 usdHistory.Add((date, bar.Close));
             return;
         }
+        if (marketSnapshot && reqId == fxHistoryRequestId) {
+            fxHistory.Add(new HistoricalBar(NormalizeIbkrDate(bar.Time), bar.Open, bar.High,
+                bar.Low, bar.Close, (double)bar.Volume));
+            return;
+        }
         if (reqId != requestId || (!historicalQuotes && !probeQuoteExchanges))
             return;
 
@@ -335,6 +342,10 @@ internal sealed partial class ContractDetailsWrapper : DefaultEWrapper
         }
         if (marketSnapshot && reqId == requestId + 4) {
             usdHistoryReady.TrySetResult(true);
+            return;
+        }
+        if (marketSnapshot && reqId == fxHistoryRequestId) {
+            fxHistoryReady.TrySetResult(true);
             return;
         }
         if (reqId != requestId || (!historicalQuotes && !probeQuoteExchanges))
@@ -591,6 +602,12 @@ internal sealed partial class ContractDetailsWrapper : DefaultEWrapper
             CompleteSnapshot();
             return;
         }
+        if (marketSnapshot && id == requestId && errorCode == 200
+            && !string.IsNullOrWhiteSpace(YahooSymbol)) {
+            Console.Error.WriteLine($"Snapshot contract unavailable: {errorCode}: {errorMsg}; trying fallbacks.");
+            CompleteSnapshot();
+            return;
+        }
         lock (snapshotLock) {
             if (marketSnapshot && nativeScheduleRequestId > 0 && id == nativeScheduleRequestId) {
                 Console.Error.WriteLine($"EUR history calendar: {errorCode}: {errorMsg}");
@@ -619,6 +636,12 @@ internal sealed partial class ContractDetailsWrapper : DefaultEWrapper
             Console.Error.WriteLine($"Home history: {errorCode}: {errorMsg}");
             // 2188 warns about real-time history; completed bars may still follow.
             if (errorCode != 2188) usdHistoryReady.TrySetResult(false);
+            return;
+        }
+
+        if (marketSnapshot && id == fxHistoryRequestId) {
+            Console.Error.WriteLine($"FX history: {errorCode}: {errorMsg}");
+            if (errorCode != 2188) fxHistoryReady.TrySetResult(false);
             return;
         }
 
@@ -842,10 +865,23 @@ internal sealed partial class ContractDetailsWrapper : DefaultEWrapper
         var changeReference = !last.HasValue && requestedCurrency == "EUR"
             ? await RequestFwbReferenceAsync(true) : null;
         if (changeReference == null && !last.HasValue && requestedCurrency == "EUR")
-            changeReference = await RequestHomeReferenceAsync();
-        if (changeReference == null && !last.HasValue && requestedCurrency == "EUR")
             changeReference = await RequestFwbReferenceAsync(false);
+        if (changeReference == null && !last.HasValue && requestedCurrency == "EUR")
+            changeReference = await RequestHomeReferenceAsync();
         var nativeHistory = fwbCompletedBars;
+        if (changeReference == null && !last.HasValue) {
+            var yahoo = await RequestYahooReferenceAsync();
+            changeReference = yahoo.reference;
+            nativeHistory = yahoo.bars;
+        }
+        if (changeReference != null
+            && !string.Equals(changeReference.currency, "EUR", StringComparison.OrdinalIgnoreCase)) {
+            var converted = await ConvertReferenceToEurAsync(changeReference);
+            if (converted.reference != null) {
+                changeReference = converted.reference;
+                nativeHistory = converted.bars;
+            }
+        }
         if (nativeHistory.Length > 0 && changeReference != null) selected = changeReference.last;
 
         Result.TrySetResult(new {
@@ -863,7 +899,10 @@ internal sealed partial class ContractDetailsWrapper : DefaultEWrapper
                 close,
                 changeReference,
                 nativeHistory,
-                fallbackError = changeReference == null ? homeReferenceError : null,
+                resolvedYahooSymbol = ResolvedYahooSymbol,
+                fallbackError = changeReference == null
+                    ? string.Join("; ", new[] { homeReferenceError, yahooReferenceError }.Where(value => !string.IsNullOrWhiteSpace(value)))
+                    : null,
                 lastTimestamp,
                 lastDate = reference?.lastDate,
                 closeDate = reference?.closeDate,
@@ -1052,7 +1091,8 @@ internal sealed record HistoricalBar(string date,
                                      double high,
                                      double low,
                                      double close,
-                                     double volume);
+                                     double volume,
+                                     string source = "");
 
 internal sealed record QuoteExchangeProbeResult(string exchange,
                                                 double turnover,

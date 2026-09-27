@@ -1038,13 +1038,15 @@ void DatabaseManager::startIbkrQuoteHelperRequest(bool probeExchange)
         arguments << QStringLiteral("--reference-isin") << m_pendingIbkrQuotesIsin;
         QSqlQuery referenceQuery(db);
         referenceQuery.prepare(R"SQL(
-            SELECT "IBKRSnapshotLastDate", "IBKRSnapshotCloseDate", "IBKRSnapshotTimeZone", "ValidExchanges", "IBKRQuoteExchange"
+            SELECT "IBKRSnapshotLastDate", "IBKRSnapshotCloseDate", "IBKRSnapshotTimeZone", "ValidExchanges", "IBKRQuoteExchange", "YahooSymbol"
             FROM "Stocks" WHERE "Symbol" = :symbol
         )SQL");
         referenceQuery.bindValue(QStringLiteral(":symbol"), m_pendingIbkrQuotesSymbol);
         if (referenceQuery.exec() && referenceQuery.next()) {
             arguments << QStringLiteral("--reference-exchanges") << referenceQuery.value(3).toString();
             arguments << QStringLiteral("--preferred-quote-exchange") << referenceQuery.value(4).toString();
+            if (!referenceQuery.value(5).toString().trimmed().isEmpty())
+                arguments << QStringLiteral("--yahoo-symbol") << referenceQuery.value(5).toString().trimmed();
             if (!referenceQuery.value(0).isNull() && !referenceQuery.value(1).isNull()) {
             arguments << QStringLiteral("--snapshot-last-date") << referenceQuery.value(0).toDate().toString(Qt::ISODate)
                       << QStringLiteral("--snapshot-close-date") << referenceQuery.value(1).toDate().toString(Qt::ISODate)
@@ -1353,13 +1355,13 @@ bool DatabaseManager::startIbkrQuoteWorkerAll()
               << QStringLiteral("start")
               << QStringLiteral("IBKR Gesamtbatch")
               << QStringLiteral("cmd.exe")
-              << QStringLiteral("/k")
+              << QStringLiteral("/c")
               << QStringLiteral("python")
               << QStringLiteral("-u")
               << scriptInfo.absoluteFilePath()
               << QStringLiteral("--all-ibkr")
               << QStringLiteral("--snapshot-timeout-seconds")
-              << QStringLiteral("25")
+              << QStringLiteral("5")
               << QStringLiteral("--job-name")
               << QStringLiteral("IBKR Gesamtbatch");
 
@@ -1379,6 +1381,77 @@ bool DatabaseManager::startIbkrQuoteWorkerAll()
 
     setIbkrConnectionState(
         QStringLiteral("Externer IBKR Quote Worker fuer alle IBKR-Stocks wurde gestartet. ShareSelector bleibt bedienbar."),
+        m_ibkrConnected,
+        false);
+    return true;
+}
+
+bool DatabaseManager::isIbkrQuoteWorkerAllActive() const
+{
+    if (!db.isOpen())
+        return false;
+
+    QSqlQuery query(db);
+    if (!query.exec(QStringLiteral(R"SQL(
+        SELECT CASE WHEN status IN ('pending', 'running') THEN 1 ELSE 0 END
+        FROM ibkr_quote_jobs
+        WHERE scope = 'all_ibkr'
+        ORDER BY id DESC
+        LIMIT 1
+    )SQL")) || !query.next()) {
+        return false;
+    }
+
+    return query.value(0).toLongLong() > 0;
+}
+
+bool DatabaseManager::stopIbkrQuoteWorkerAll()
+{
+    if (!db.isOpen()) {
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: Datenbank ist nicht verbunden; externer IBKR Gesamtbatch kann nicht gestoppt werden."),
+            m_ibkrConnected,
+            false);
+        return false;
+    }
+
+    QSqlQuery query(db);
+    if (!query.exec(QStringLiteral(R"SQL(
+        WITH target AS (
+            SELECT id, status
+            FROM ibkr_quote_jobs
+            WHERE scope = 'all_ibkr'
+            ORDER BY id DESC
+            LIMIT 1
+        )
+        UPDATE ibkr_quote_jobs AS job
+        SET status = 'stop_requested',
+            last_error = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        FROM target
+        WHERE job.id = target.id
+          AND target.status IN ('pending', 'running')
+        RETURNING job.id
+    )SQL"))) {
+        setIbkrConnectionState(
+            QStringLiteral("Fehler: Stoppsignal fuer externen IBKR Gesamtbatch konnte nicht gesetzt werden: %1")
+                .arg(query.lastError().text()),
+            m_ibkrConnected,
+            false);
+        return false;
+    }
+
+    if (!query.next()) {
+        setIbkrConnectionState(
+            QStringLiteral("Kein laufender externer IBKR Gesamtbatch gefunden."),
+            m_ibkrConnected,
+            false);
+        return false;
+    }
+
+    setIbkrConnectionState(
+        QStringLiteral("Stopp fuer externen IBKR Gesamtbatch %1 angefordert. Der aktuelle Abruf wird noch abgeschlossen.")
+            .arg(query.value(0).toLongLong()),
         m_ibkrConnected,
         false);
     return true;
@@ -2451,11 +2524,11 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
     insertQuery.prepare(R"SQL(
         INSERT INTO "Quotes" (
             "Symbol", "CloseDate", "ClosePrice", "OpenPrice",
-            "HighestPrice", "LowestPrice", "Volume"
+            "HighestPrice", "LowestPrice", "Volume", "IBKRCloseSource"
         )
         VALUES (
             :symbol, :closeDate, :closePrice, :openPrice,
-            :highestPrice, :lowestPrice, :volume
+            :highestPrice, :lowestPrice, :volume, NULLIF(:source, '')
         )
         ON CONFLICT ("Symbol", "CloseDate") DO UPDATE
         SET
@@ -2463,8 +2536,22 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
             "OpenPrice" = EXCLUDED."OpenPrice",
             "HighestPrice" = EXCLUDED."HighestPrice",
             "LowestPrice" = EXCLUDED."LowestPrice",
-            "Volume" = EXCLUDED."Volume"
+            "Volume" = EXCLUDED."Volume",
+            "IBKRCloseSource" = COALESCE(EXCLUDED."IBKRCloseSource", "Quotes"."IBKRCloseSource")
         WHERE "Quotes"."IBKRCloseSource" IS DISTINCT FROM 'snapshot'
+          AND (EXCLUDED."IBKRCloseSource" IS NULL
+               OR "Quotes"."IBKRCloseSource" LIKE 'fx:%')
+    )SQL");
+
+    QSqlQuery existingNativeQuery(db);
+    existingNativeQuery.prepare(R"SQL(
+        SELECT 1
+        FROM "Quotes"
+        WHERE "Symbol" = :symbol
+          AND "CloseDate" = :closeDate
+          AND ("IBKRCloseSource" IS NULL
+               OR "IBKRCloseSource" NOT LIKE 'fx:%')
+        LIMIT 1
     )SQL");
 
     QSqlQuery existingQuery(db);
@@ -2483,6 +2570,7 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
 
     int inserted = 0;
     int changed = 0;
+    bool fxFallbackCoveredByNativeEur = false;
     QDate newestQuoteDate;
     double newestClosePrice = 0.0;
     for (const QJsonValue &value : bars) {
@@ -2494,11 +2582,26 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
             continue;
         const double closePrice = bar.value(QStringLiteral("close")).toDouble();
         const double volume = bar.value(QStringLiteral("volume")).toDouble();
+        const QString source = bar.value(QStringLiteral("source")).toString().trimmed();
+        if (source.startsWith(QStringLiteral("fx:"))) {
+            existingNativeQuery.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
+            existingNativeQuery.bindValue(QStringLiteral(":closeDate"), closeDate);
+            if (!existingNativeQuery.exec()) {
+                qCritical() << "Vorhandener EUR-Kurs konnte nicht geprueft werden:"
+                            << existingNativeQuery.lastError().text() << normalizedSymbol << closeDate;
+                db.rollback();
+                return false;
+            }
+            if (existingNativeQuery.next()) {
+                fxFallbackCoveredByNativeEur = true;
+                continue;
+            }
+        }
         // IBKR liefert fuer den laufenden Handelstag teilweise einen
         // Null-Volumen-Platzhalter. Er ist kein abgeschlossener Tageskurs und
         // darf weder einen vorhandenen Tageskurs noch den aktuellen Snapshot
         // verdecken.
-        if (closeDate == QDate::currentDate() && volume <= 0.0)
+        if (closeDate == QDate::currentDate() && volume <= 0.0 && source.isEmpty())
             continue;
         if (!newestQuoteDate.isValid() || closeDate > newestQuoteDate) {
             newestQuoteDate = closeDate;
@@ -2531,6 +2634,7 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
         insertQuery.bindValue(QStringLiteral(":highestPrice"), highestPrice);
         insertQuery.bindValue(QStringLiteral(":lowestPrice"), lowestPrice);
         insertQuery.bindValue(QStringLiteral(":volume"), volume);
+        insertQuery.bindValue(QStringLiteral(":source"), source);
         if (!insertQuery.exec()) {
             qCritical() << "IBKR-Quote konnte nicht gespeichert werden:"
                         << insertQuery.lastError().text() << normalizedSymbol << closeDate;
@@ -2541,6 +2645,13 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
     }
 
     if (inserted == 0) {
+        if (fxFallbackCoveredByNativeEur) {
+            // The converted home-market fallback was valid, but a better
+            // native EUR quote already exists for every supplied date.  This
+            // is a successful no-op, not a quote retrieval/storage failure.
+            db.rollback();
+            return true;
+        }
         qCritical() << "IBKR-Quotes enthielten keine gueltigen Tagesdaten:" << normalizedSymbol;
         db.rollback();
         return false;

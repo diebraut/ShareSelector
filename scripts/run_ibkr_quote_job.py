@@ -24,10 +24,24 @@ DEFAULT_DB_NAME = "TotalStocks"
 DEFAULT_DB_USER = "postgres"
 DEFAULT_DB_PASSWORD = "castell"
 DEFAULT_DB_HOST = "localhost"
-DEFAULT_HELPER = (
-    Path(__file__).resolve().parents[1]
-    / "ibkr-helper/bin/Release/net8.0/win-x64/publish/IbkrHelper.exe"
-)
+
+
+def newest_built_helper() -> Path:
+    project_root = Path(__file__).resolve().parents[1]
+    candidates = [
+        project_root / "ibkr-helper/bin/x64/Release/net8.0/IbkrHelper.exe",
+        project_root / "ibkr-helper/bin/Release/net8.0/IbkrHelper.exe",
+        project_root / "ibkr-helper/bin/Release/net8.0/win-x64/IbkrHelper.exe",
+        project_root / "ibkr-helper/bin/Release/net8.0/win-x64/publish/IbkrHelper.exe",
+    ]
+    candidates.extend((project_root / "build").glob("*/ibkr-helper/IbkrHelper.exe"))
+    existing = [candidate for candidate in candidates if candidate.is_file()]
+    if existing:
+        return max(existing, key=lambda candidate: candidate.stat().st_mtime)
+    return candidates[-1]
+
+
+DEFAULT_HELPER = newest_built_helper()
 
 
 @dataclass
@@ -54,6 +68,7 @@ class StockRequest:
     history_start: str = ""
     history_end: str = ""
     preferred_quote_exchange: str = ""
+    yahoo_symbol: str = ""
 
     @property
     def is_historical_backfill(self) -> bool:
@@ -398,6 +413,7 @@ def fetch_next_item(db: DbConfig, job_id: int) -> StockRequest | None:
                 COALESCE(s."ISIN", '') AS isin,
                 COALESCE(NULLIF(s."IBKRQuoteExchange", ''), NULLIF(s."IBKRBestDirectExchange", ''), NULLIF(s."PrimaryExchange", ''), NULLIF(s."MIC", ''), 'SMART') AS quote_exchange,
                 COALESCE(s."ValidExchanges", '') AS valid_exchanges,
+                COALESCE(s."YahooSymbol", '') AS yahoo_symbol,
                 CASE
                     WHEN COALESCE(NULLIF(s."IBKRQuoteExchange", ''), '') = 'SMART'
                     THEN COALESCE(NULLIF(s."IBKRBestDirectExchange", ''), NULLIF(s."PrimaryExchange", ''), '')
@@ -416,7 +432,7 @@ def fetch_next_item(db: DbConfig, job_id: int) -> StockRequest | None:
             FROM stock_rows sr
             JOIN ibkr_quote_jobs j ON j.id = {job_id}
             LEFT JOIN "Quotes" q ON q."Symbol" = sr.symbol
-            GROUP BY sr.item_id, sr.symbol, sr.con_id, sr.ibkr_symbol, sr.currency, sr.isin, sr.quote_exchange, sr.primary_exchange, sr.valid_exchanges, j.history_start, j.history_end
+            GROUP BY sr.item_id, sr.symbol, sr.con_id, sr.ibkr_symbol, sr.currency, sr.isin, sr.quote_exchange, sr.primary_exchange, sr.valid_exchanges, sr.yahoo_symbol, j.history_start, j.history_end
         )
         SELECT
             item_id,
@@ -428,6 +444,7 @@ def fetch_next_item(db: DbConfig, job_id: int) -> StockRequest | None:
             quote_exchange,
             primary_exchange,
             valid_exchanges,
+            yahoo_symbol,
             CASE
                 WHEN history_start IS NOT NULL AND history_end IS NOT NULL
                 THEN (history_end - history_start + 1)::int
@@ -454,6 +471,7 @@ def fetch_next_item(db: DbConfig, job_id: int) -> StockRequest | None:
         preferred_quote_exchange=(row["quote_exchange"] or "SMART").upper(),
         primary_exchange=(row["primary_exchange"] or "").upper(),
         valid_exchanges=row["valid_exchanges"] or "",
+        yahoo_symbol=row["yahoo_symbol"] or "",
         days=max(1, int(row["days"])),
         history_start=row["history_start"] or "",
         history_end=row["history_end"] or "",
@@ -504,6 +522,7 @@ def save_bars(db: DbConfig, symbol: str, bars: list[dict[str, object]]) -> int:
                     sql_literal(float(bar.get("high") or 0)),
                     sql_literal(float(bar.get("low") or 0)),
                     sql_literal(float(bar.get("volume") or 0)),
+                    sql_literal(str(bar.get("source") or "")),
                 ]
             )
             + ")"
@@ -520,7 +539,7 @@ def save_bars(db: DbConfig, symbol: str, bars: list[dict[str, object]]) -> int:
         changed_text = run_psql(
             db,
             f"""
-        WITH incoming("Symbol", "CloseDate", "ClosePrice", "OpenPrice", "HighestPrice", "LowestPrice", "Volume") AS (
+        WITH incoming("Symbol", "CloseDate", "ClosePrice", "OpenPrice", "HighestPrice", "LowestPrice", "Volume", "IBKRCloseSource") AS (
             VALUES {", ".join(batch_values)}
         ),
         changed AS (
@@ -529,17 +548,20 @@ def save_bars(db: DbConfig, symbol: str, bars: list[dict[str, object]]) -> int:
             LEFT JOIN "Quotes" q
               ON q."Symbol" = i."Symbol"
              AND q."CloseDate" = i."CloseDate"::date
-            WHERE q."Symbol" IS NULL
+            WHERE (q."Symbol" IS NULL
                OR q."ClosePrice" IS DISTINCT FROM i."ClosePrice"::double precision
                OR q."OpenPrice" IS DISTINCT FROM i."OpenPrice"::double precision
                OR q."HighestPrice" IS DISTINCT FROM i."HighestPrice"::double precision
                OR q."LowestPrice" IS DISTINCT FROM i."LowestPrice"::double precision
-               OR q."Volume" IS DISTINCT FROM i."Volume"::double precision
+               OR q."Volume" IS DISTINCT FROM i."Volume"::double precision)
+              AND (NULLIF(i."IBKRCloseSource", '') IS NULL
+                   OR q."Symbol" IS NULL
+                   OR q."IBKRCloseSource" LIKE 'fx:%')
         ),
         upserted AS (
             INSERT INTO "Quotes" (
                 "Symbol", "CloseDate", "ClosePrice", "OpenPrice",
-                "HighestPrice", "LowestPrice", "Volume"
+                "HighestPrice", "LowestPrice", "Volume", "IBKRCloseSource"
             )
             SELECT
                 "Symbol",
@@ -548,7 +570,8 @@ def save_bars(db: DbConfig, symbol: str, bars: list[dict[str, object]]) -> int:
                 "OpenPrice"::double precision,
                 "HighestPrice"::double precision,
                 "LowestPrice"::double precision,
-                "Volume"::double precision
+                "Volume"::double precision,
+                NULLIF("IBKRCloseSource", '')
             FROM incoming
             ON CONFLICT ("Symbol", "CloseDate") DO UPDATE
             SET
@@ -556,8 +579,11 @@ def save_bars(db: DbConfig, symbol: str, bars: list[dict[str, object]]) -> int:
                 "OpenPrice" = EXCLUDED."OpenPrice",
                 "HighestPrice" = EXCLUDED."HighestPrice",
                 "LowestPrice" = EXCLUDED."LowestPrice",
-                "Volume" = EXCLUDED."Volume"
+                "Volume" = EXCLUDED."Volume",
+                "IBKRCloseSource" = COALESCE(EXCLUDED."IBKRCloseSource", "Quotes"."IBKRCloseSource")
             WHERE "Quotes"."IBKRCloseSource" IS DISTINCT FROM 'snapshot'
+              AND (EXCLUDED."IBKRCloseSource" IS NULL
+                   OR "Quotes"."IBKRCloseSource" LIKE 'fx:%')
             RETURNING 1
         ),
         stock_update AS (
@@ -647,6 +673,7 @@ def save_snapshot_quote(db: DbConfig, symbol: str, data: dict[str, object]) -> i
     reference_sql = sql_literal(json.dumps(reference)) if valid_reference else 'NULL'
     last_date = str(data.get("lastDate") or "")
     close_date = str(data.get("closeDate") or "")
+    resolved_yahoo_symbol = str(data.get("resolvedYahooSymbol") or "").strip()
     try:
         dated_close = dated_last and 0 < close and date.fromisoformat(close_date) < date.fromisoformat(last_date) <= date.today()
     except ValueError:
@@ -680,7 +707,11 @@ def save_snapshot_quote(db: DbConfig, symbol: str, data: dict[str, object]) -> i
             "IBKRSnapshotClose" = {close if close > 0 else 'NULL'},
             "IBKRSnapshotLastDate" = {sql_literal(last_date) if dated_last else 'NULL'}::date,
             "IBKRSnapshotCloseDate" = {sql_literal(close_date) if dated_close else 'NULL'}::date,
-            "IBKRSnapshotTimeZone" = {sql_literal(str(data.get('timeZone') or '')) if dated_close else 'NULL'}
+            "IBKRSnapshotTimeZone" = {sql_literal(str(data.get('timeZone') or '')) if dated_close else 'NULL'},
+            "YahooSymbol" = CASE
+                WHEN {sql_literal(resolved_yahoo_symbol)} <> '' THEN {sql_literal(resolved_yahoo_symbol)}
+                ELSE "YahooSymbol"
+            END
         WHERE "Symbol" = {sql_literal(symbol)};
         COMMIT;
     """, capture=False)
@@ -717,6 +748,9 @@ def helper_contract_args(request: StockRequest) -> list[str]:
     if request.valid_exchanges:
         helper_args += ["--reference-exchanges", request.valid_exchanges]
     helper_args += ["--preferred-quote-exchange", request.preferred_quote_exchange or request.quote_exchange]
+    if request.yahoo_symbol:
+        helper_args += ["--yahoo-symbol", request.yahoo_symbol]
+    helper_args += ["--expected-quote-date", expected_quote_date()]
     if request.quote_exchange and request.quote_exchange != "SMART":
         helper_args += ["--exchange", request.quote_exchange, "--direct-exchange"]
     elif request.primary_exchange:
@@ -754,11 +788,11 @@ def better_direct_exchange_attempts(request: StockRequest) -> list[tuple[str, St
         if normalized and normalized not in {existing for existing, _ in attempts}:
             attempts.append((normalized, candidate_request))
 
-    if "FWB" in valid:
-        append_attempt("FWB", exchange_request(request, "FWB"))
-
     has_fwb = "FWB" in valid
 
+    # Start with the exchange that last delivered usable quotes for this stock.
+    # A hard-coded FWB-first probe made the full batch unnecessarily expensive
+    # and ignored the exchange learned by earlier successful requests.
     if current and current != "SMART" and not (current == "SBF" and has_fwb):
         append_attempt(current, request)
     elif current == "SMART":
@@ -766,7 +800,12 @@ def better_direct_exchange_attempts(request: StockRequest) -> list[tuple[str, St
             append_attempt(primary, exchange_request(request, primary))
         append_attempt("SMART", request)
 
-    for fallback in ("SWB", "GETTEX", "TGATE", "IBIS"):
+    if primary and primary != "SMART" and not (primary == "SBF" and has_fwb):
+        append_attempt(primary, exchange_request(request, primary))
+
+    # Try the useful historical venues before falling back to snapshots. SWB
+    # remains last because it is the venue most often reaching the full timeout.
+    for fallback in ("FWB2", "GETTEX2", "FWB", "GETTEX", "TGATE", "IBIS", "SWB"):
         if fallback in valid:
             append_attempt(fallback, exchange_request(request, fallback))
 
@@ -793,6 +832,8 @@ def call_helper(args: argparse.Namespace, request: StockRequest) -> tuple[bool, 
     completed = subprocess.run(
         helper_args,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=args.timeout_seconds + 10,
@@ -830,6 +871,8 @@ def call_snapshot_helper(args: argparse.Namespace, request: StockRequest) -> tup
     completed = subprocess.run(
         helper_args,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         timeout=args.snapshot_timeout_seconds + 5,
@@ -854,15 +897,29 @@ def smart_snapshot_request(request: StockRequest) -> StockRequest:
 
 def snapshot_attempts(request: StockRequest) -> list[tuple[str, StockRequest]]:
     attempts: list[tuple[str, StockRequest]] = []
+    # Snapshots are only the final fallback. Probe at most the preferred/direct
+    # venue and SMART instead of walking every valid exchange with a long wait.
     for exchange, exchange_attempt in better_direct_exchange_attempts(request):
         if exchange != "SMART":
             attempts.append((f"snapshot-{exchange}", exchange_attempt))
+            break
     attempts.append(("snapshot-SMART", smart_snapshot_request(request)))
     return attempts
 
 
-def should_try_snapshot_fallback(message: str) -> bool:
+def bars_contain_expected_quote(bars: list[dict[str, object]]) -> bool:
+    expected = expected_quote_date()
+    return any(
+        str(bar.get("date") or "")[:10] == expected
+        and float(bar.get("close") or 0) > 0
+        for bar in bars
+    )
+
+
+def should_try_snapshot_fallback(message: str, request: StockRequest) -> bool:
     normalized = message.lower()
+    if "ibkr-fehler 200" in normalized and request.yahoo_symbol:
+        return True
     retryable_failures = [
         "ibkr-fehler 2188",
         "up-to-the-second historical data",
@@ -989,6 +1046,18 @@ def job_is_historical_backfill(db: DbConfig, job_id: int) -> bool:
     return result.splitlines()[-1].strip().lower() in {"t", "true", "1"} if result else False
 
 
+def job_stop_requested(db: DbConfig, job_id: int) -> bool:
+    result = run_psql(
+        db,
+        f"""
+        SELECT status = 'stop_requested'
+        FROM ibkr_quote_jobs
+        WHERE id = {job_id};
+        """,
+    )
+    return result.splitlines()[-1].strip().lower() in {"t", "true", "1"} if result else False
+
+
 def run_worker(args: argparse.Namespace, db: DbConfig, job_id: int) -> None:
     timing_log = Path(args.timing_log)
     run_psql(
@@ -1006,6 +1075,11 @@ def run_worker(args: argparse.Namespace, db: DbConfig, job_id: int) -> None:
     mark_job_status(db, job_id, "running")
     processed = 0
     while True:
+        if job_stop_requested(db, job_id):
+            mark_job_status(db, job_id, "paused", "Stopped from ShareSelector")
+            print(f"Job {job_id} paused by ShareSelector")
+            break
+
         if args.limit and processed >= args.limit:
             mark_job_status(db, job_id, "paused")
             break
@@ -1032,6 +1106,7 @@ def run_worker(args: argparse.Namespace, db: DbConfig, job_id: int) -> None:
             elapsed_ms = 0
             historical_request = request
             historical_errors: list[str] = []
+            first_historical_success: tuple[str, list[dict[str, object]], int, StockRequest] | None = None
             for phase_exchange, candidate_request in better_direct_exchange_attempts(request):
                 if phase_exchange != request.quote_exchange:
                     print(f"  Trying historical-{phase_exchange} ...")
@@ -1046,12 +1121,30 @@ def run_worker(args: argparse.Namespace, db: DbConfig, job_id: int) -> None:
                 )
                 historical_request = candidate_request
                 if success:
-                    break
+                    if first_historical_success is None:
+                        first_historical_success = (message, bars, elapsed_ms, candidate_request)
+                    if request.is_historical_backfill or bars_contain_expected_quote(bars):
+                        break
+                    historical_errors.append(
+                        f"{phase_exchange}: historische Daten ohne Kurs fuer {expected_quote_date()}"
+                    )
+                    print(
+                        f"  historical-{phase_exchange} has no quote for "
+                        f"{expected_quote_date()}, trying next historical venue ..."
+                    )
+                    success = False
+                    continue
                 historical_errors.append(f"{phase_exchange}: {message}")
+
+            # Preserve a successful (but stale) response for storing its older
+            # bars and for the final, short snapshot fallback.
+            if not success and first_historical_success is not None:
+                message, bars, elapsed_ms, historical_request = first_historical_success
+                success = True
 
             if not success:
                 combined_historical_message = "; ".join(historical_errors) or message
-                if request.is_historical_backfill or not should_try_snapshot_fallback(combined_historical_message):
+                if request.is_historical_backfill or not should_try_snapshot_fallback(combined_historical_message, request):
                     mark_item(
                         db,
                         request.item_id,
@@ -1087,31 +1180,35 @@ def run_worker(args: argparse.Namespace, db: DbConfig, job_id: int) -> None:
                     )
                     if snapshot_success:
                         changed = save_snapshot_quote(db, request.symbol, snapshot_data)
-                        mark_item(
-                            db,
-                            request.item_id,
-                            "success",
-                            changed=changed,
-                            rows_received=1,
-                            message=f"{message} {phase}: {snapshot_message}",
-                        )
-                        save_working_quote_exchange(db, request.symbol, snapshot_request.quote_exchange)
-                        selected = float(snapshot_data.get("selected") or 0)
-                        print(
-                            f"  OK {phase}: price={selected:.4f}, changed={changed}, "
-                            f"api={snapshot_elapsed_ms / 1000:.2f}s"
-                        )
-                        fallback_saved = True
-                        break
+                        if has_expected_quote(db, request.symbol):
+                            mark_item(
+                                db,
+                                request.item_id,
+                                "success",
+                                changed=changed,
+                                rows_received=1,
+                                message=f"{message} {phase}: {snapshot_message}",
+                            )
+                            save_working_quote_exchange(db, request.symbol, snapshot_request.quote_exchange)
+                            selected = float(snapshot_data.get("selected") or 0)
+                            print(
+                                f"  OK {phase}: price={selected:.4f}, changed={changed}, "
+                                f"api={snapshot_elapsed_ms / 1000:.2f}s"
+                            )
+                            fallback_saved = True
+                            break
+                        fallback_errors.append(f"{phase}: Snapshot did not create expected quote")
+                        continue
                     fallback_errors.append(f"{phase}: {snapshot_message}")
                 if not fallback_saved:
                     fallback_detail = "; ".join(fallback_errors) or "no snapshot attempt returned a usable result"
                     combined_message = f"{combined_historical_message}; Snapshot fallback failed: {fallback_detail}"
-                    mark_item(db, request.item_id, "failed", message=combined_message, error=combined_message)
-                    print(f"  FAILED: {combined_message}")
+                    mark_item(db, request.item_id, "skipped", message=combined_message)
+                    print(f"  SKIPPED (no current quote): {combined_message}")
             elif not bars:
-                mark_item(db, request.item_id, "failed", message=message, error="No bars returned")
-                print("  FAILED: no bars returned")
+                no_quote_message = message or "No bars returned"
+                mark_item(db, request.item_id, "skipped", message=no_quote_message)
+                print(f"  SKIPPED (no current quote): {no_quote_message}")
             else:
                 changed = save_bars(db, request.symbol, bars)
                 save_working_quote_exchange(db, request.symbol, historical_request.quote_exchange)
@@ -1169,13 +1266,12 @@ def run_worker(args: argparse.Namespace, db: DbConfig, job_id: int) -> None:
                         mark_item(
                             db,
                             request.item_id,
-                            "failed",
+                            "skipped",
                             changed=changed,
                             rows_received=len(bars),
                             message=combined_message,
-                            error=combined_message,
                         )
-                        print(f"  FAILED: {combined_message}")
+                        print(f"  SKIPPED (no current quote): {combined_message}")
                 else:
                     mark_item(
                         db,
@@ -1229,7 +1325,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--ibkr-port", type=int, default=7496)
     parser.add_argument("--client-id", type=int, default=240)
     parser.add_argument("--timeout-seconds", type=int, default=90)
-    parser.add_argument("--snapshot-timeout-seconds", type=int, default=25)
+    parser.add_argument("--snapshot-timeout-seconds", type=int, default=5)
     parser.add_argument("--delay-seconds", type=float, default=0.2)
     parser.add_argument(
         "--include-current",

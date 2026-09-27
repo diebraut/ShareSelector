@@ -16,6 +16,7 @@ ApplicationWindow {
     property var dbManager: databaseManager
     property alias positionManagementBuyVersion: positionManagementDialog.buyPositionVersion
     property alias positionManagementSellVersion: positionManagementDialog.sellPositionVersion
+    readonly property real portfolioOrderFee: 1.0
 
     function startupScreenWidth() {
         return Math.max(1, Screen.width || 1600)
@@ -73,6 +74,17 @@ ApplicationWindow {
 
         if (positionManagementDialog.visible)
             positionManagementDialog.open()
+    }
+
+    function calculatedPositionManagementHeight() {
+        const spacing = 40
+        const targetY = portfolioWindow.y + portfolioWindow.height + spacing
+        const targetBottom = y + height
+        const availableHeight = targetBottom - targetY
+        const minimumTargetHeight = positionManagementDialog.minimumHeight || 220
+        return availableHeight >= minimumTargetHeight
+            ? availableHeight
+            : positionManagementDialog.height
     }
 
     Component.onCompleted: Qt.callLater(function() {
@@ -840,6 +852,9 @@ ApplicationWindow {
             } else if (portfolioSortKey === "latestChangePercent") {
                 valueA = Number(a.latestChangePercent || 0)
                 valueB = Number(b.latestChangePercent || 0)
+            } else if (portfolioSortKey === "changeFromHighPercent") {
+                valueA = Number(a.changeFromHighPercent || 0)
+                valueB = Number(b.changeFromHighPercent || 0)
             }
 
             if (valueA === valueB)
@@ -1270,6 +1285,7 @@ ApplicationWindow {
             const quantity = portfolioPositionQuantity(row)
             const currentValue = quantity * Number(row.currentValue || 0)
             const entryValue = quantity * Number(row.entryValue || 0)
+                + (quantity > 0 ? portfolioOrderFee : 0)
             if (Number(row.status || 0) === 10) {
                 realizedGain += currentValue - entryValue
                 realizedEntryTotal += entryValue
@@ -1430,7 +1446,11 @@ ApplicationWindow {
     }
 
     function portfolioPositionEntryTotal(row) {
-        return portfolioPositionQuantity(row) * Number(row.entryValue || 0)
+        const quantity = portfolioPositionQuantity(row)
+        const entryValue = Number(row.entryValue || 0)
+        if (quantity <= 0 || entryValue <= 0)
+            return 0
+        return quantity * entryValue + portfolioOrderFee
     }
 
     function portfolioPositionGainTotal(row) {
@@ -2415,8 +2435,8 @@ ApplicationWindow {
     function buySelectedStockAnalysisStocks() {
         let amount = parseDecimal(stockAnalysisBuyDialog.amountText)
         let buyDate = stockAnalysisBuyDialog.dateText.trim()
-        if (amount <= 0) {
-            stockAnalysisBuyDialog.errorText = "Bitte einen Betrag größer 0 eintragen"
+        if (amount <= portfolioOrderFee) {
+            stockAnalysisBuyDialog.errorText = "Der Betrag muss größer als die Gebühr von 1 Euro sein"
             return
         }
         if (!/^\d{4}-\d{2}-\d{2}$/.test(buyDate)) {
@@ -2432,7 +2452,7 @@ ApplicationWindow {
             if (entryPrice <= 0)
                 entryPrice = Number(stock.firstcloseprice || stock.lastcloseprice || 0)
             let currentPrice = Number(stock.lastcloseprice || entryPrice)
-            let quantity = entryPrice > 0 ? amount / entryPrice : 0
+            let quantity = entryPrice > 0 ? (amount - portfolioOrderFee) / entryPrice : 0
             let gainPercent = entryPrice > 0 ? (currentPrice - entryPrice) / entryPrice * 100 : 0
             let ok = dbManager.saveBoughtStock(
                 stock.symbol,
@@ -2547,7 +2567,7 @@ ApplicationWindow {
                 entryPrice = Number(buy.value || 0)
             const currentValue = Number(buy.value || entryPrice)
 
-            if (amount <= 0 || entryPrice <= 0 || currentValue <= 0) {
+            if (amount <= portfolioOrderFee || entryPrice <= 0 || currentValue <= 0) {
                 failed++
                 positionManagementDialog.setExchangeStatus(
                     false,

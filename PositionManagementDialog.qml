@@ -196,12 +196,8 @@ Window {
             y = hostWindow.y + hostWindow.height + spacing
         }
 
-        if (stockAnalysisWindow && hostWindow) {
-            const targetBottom = stockAnalysisWindow.y + stockAnalysisWindow.height
-            const availableHeight = targetBottom - y
-            if (availableHeight >= minimumHeight)
-                height = availableHeight
-        }
+        if (app && app.calculatedPositionManagementHeight)
+            height = app.calculatedPositionManagementHeight()
 
         show()
         raise()
@@ -593,11 +589,9 @@ Window {
                         : (positionManagementDialog.exchangeStatusText.indexOf("Warnung") >= 0
                            ? "#b45309"
                            : "#475569")
-                    elide: Text.ElideRight
-                    Layout.preferredWidth: 360
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
                 }
-
-                Item { Layout.fillWidth: true }
 
                 Button {
                     text: "Schliessen"

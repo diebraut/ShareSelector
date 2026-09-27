@@ -9,24 +9,53 @@ Window {
     property var hostWindow
     property var positionRow: ({})
     property bool entryEditedByUser: false
+    property bool buyDateEditedByUser: false
     property bool updatingEntryFromDate: false
     property bool largeInvestmentWarningVisible: false
 
     title: "Ändere Daten"
     width: 430
-    height: 350
+    height: 500
     minimumWidth: 400
-    minimumHeight: 330
+    minimumHeight: 480
     flags: Qt.Dialog
     modality: Qt.ApplicationModal
     visible: false
 
+    function enteredInvestmentAmount() {
+        return app ? Number(app.parseDecimal(positionEditInvestedInput.text) || 0) : 0
+    }
+
+    function enteredEntryValue() {
+        return app ? Number(app.parseDecimal(positionEditEntryInput.text) || 0) : 0
+    }
+
+    function totalInvestmentText() {
+        const invested = enteredInvestmentAmount()
+        if (invested <= 0)
+            return "-"
+        return (invested + app.portfolioOrderFee).toLocaleString(Qt.locale(), "f", 2) + " €"
+    }
+
+    function calculatedQuantityText() {
+        const invested = enteredInvestmentAmount()
+        const entry = enteredEntryValue()
+        if (invested <= 0 || entry <= 0)
+            return "-"
+        return (invested / entry).toLocaleString(Qt.locale(), "f", 6)
+            .replace(/([,.]\d*?[1-9])0+$/, "$1")
+            .replace(/[,.]0+$/, "")
+    }
+
     function openForRow(row) {
         positionRow = row || ({})
         entryEditedByUser = false
+        buyDateEditedByUser = false
         positionEditNameLabel.text = app.cleanDisplayText(positionRow.name || positionRow.symbol || "")
         positionEditBuyDateInput.text = positionRow.buyDate || ""
-        positionEditInvestedInput.text = app.portfolioPositionEntryTotal(positionRow).toLocaleString(Qt.locale(), "f", 2)
+        const quantity = Number(positionRow.quantity || 0)
+        const entryValue = Number(positionRow.entryValue || 0)
+        positionEditInvestedInput.text = (quantity * entryValue).toLocaleString(Qt.locale(), "f", 2)
         updatingEntryFromDate = true
         positionEditEntryInput.text = Number(positionRow.entryValue || 0).toLocaleString(Qt.locale(), "f", 2)
         updatingEntryFromDate = false
@@ -45,7 +74,7 @@ Window {
     }
 
     function updateEntryFromBuyDate() {
-        if (!app || !app.dbManager || entryEditedByUser)
+        if (!app || !app.dbManager || entryEditedByUser || !buyDateEditedByUser)
             return
 
         const buyDate = positionEditBuyDateInput.text.trim()
@@ -60,6 +89,7 @@ Window {
         updatingEntryFromDate = true
         positionEditEntryInput.text = entry.toLocaleString(Qt.locale(), "f", 2)
         updatingEntryFromDate = false
+        buyDateEditedByUser = false
     }
 
     function availableCashForPosition() {
@@ -95,7 +125,7 @@ Window {
         }
         if (invested <= 0) {
             largeInvestmentWarningVisible = false
-            positionEditError.text = "Bitte eine investierte Summe groesser 0 eingeben."
+            positionEditError.text = "Bitte eine Investitionssumme groesser 0 eingeben."
             return
         }
         if (entry <= 0) {
@@ -104,11 +134,12 @@ Window {
             return
         }
 
+        const totalInvested = invested + app.portfolioOrderFee
         const availableCash = availableCashForPosition()
-        if (!isNaN(availableCash) && invested > availableCash && !largeInvestmentWarningVisible) {
+        if (!isNaN(availableCash) && totalInvested > availableCash && !largeInvestmentWarningVisible) {
             largeInvestmentWarningVisible = true
-            positionEditError.text = "Warnung: Die Investitionssumme ("
-                + invested.toLocaleString(Qt.locale(), "f", 2) + " €) ist höher als das verfügbare Guthaben ("
+            positionEditError.text = "Warnung: Die Investitionssumme inklusive Gebühr ("
+                + totalInvested.toLocaleString(Qt.locale(), "f", 2) + " €) ist höher als das verfügbare Guthaben ("
                 + availableCash.toLocaleString(Qt.locale(), "f", 2) + " €). "
                 + "Bitte nur bei Absicht auf ‚Trotzdem speichern‘ klicken."
             return
@@ -144,12 +175,29 @@ Window {
                 Layout.fillWidth: true
                 placeholderText: "JJJJ-MM-TT"
                 selectByMouse: true
+                onTextEdited: {
+                    positionEditDialog.buyDateEditedByUser = true
+                    positionEditDialog.entryEditedByUser = false
+                    positionEditDialog.largeInvestmentWarningVisible = false
+                }
                 onEditingFinished: positionEditDialog.updateEntryFromBuyDate()
             }
 
-            Label { text: "Investierte Summe" }
+            Label { text: "Investitionssumme (ohne Gebühr)" }
             TextField {
                 id: positionEditInvestedInput
+                Layout.fillWidth: true
+                horizontalAlignment: Text.AlignRight
+                selectByMouse: true
+                inputMethodHints: Qt.ImhFormattedNumbersOnly
+                onTextEdited: {
+                    positionEditDialog.largeInvestmentWarningVisible = false
+                }
+            }
+
+            Label { text: "Einstiegswert" }
+            TextField {
+                id: positionEditEntryInput
                 Layout.fillWidth: true
                 horizontalAlignment: Text.AlignRight
                 selectByMouse: true
@@ -161,13 +209,32 @@ Window {
                 }
             }
 
-            Label { text: "Einstiegswert" }
+            Label { text: "Gebühr" }
             TextField {
-                id: positionEditEntryInput
                 Layout.fillWidth: true
+                text: app ? app.portfolioOrderFee.toLocaleString(Qt.locale(), "f", 2) + " €" : "1,00 €"
                 horizontalAlignment: Text.AlignRight
-                selectByMouse: true
-                inputMethodHints: Qt.ImhFormattedNumbersOnly
+                readOnly: true
+                focusPolicy: Qt.NoFocus
+            }
+
+            Label { text: "Investitionssumme + Gebühr" }
+            TextField {
+                Layout.fillWidth: true
+                text: positionEditDialog.totalInvestmentText()
+                horizontalAlignment: Text.AlignRight
+                readOnly: true
+                focusPolicy: Qt.NoFocus
+                font.bold: true
+            }
+
+            Label { text: "Errechnete Stückzahl" }
+            TextField {
+                Layout.fillWidth: true
+                text: positionEditDialog.calculatedQuantityText()
+                horizontalAlignment: Text.AlignRight
+                readOnly: true
+                focusPolicy: Qt.NoFocus
             }
 
             Label {

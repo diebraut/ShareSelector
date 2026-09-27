@@ -122,6 +122,61 @@ QVariantList DatabaseManager::getDepots()
     return results;
 }
 
+QVariantList DatabaseManager::getObservedStocksForDepotCheck(int depotId)
+{
+    QVariantList results;
+
+    if (!db.isOpen()) {
+        qWarning() << "Datenbank nicht verbunden!";
+        return results;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT
+            COALESCE(NULLIF(s."Name", ''), NULLIF(b."Name", ''), b."Symbol") AS "Name",
+            COALESCE(s."ISIN", '') AS "ISIN",
+            COALESCE(b."Quantity", 1) AS "Quantity",
+            CASE
+                WHEN b."Status" = 10 THEN b."CurrentValue"
+                ELSE COALESCE(lq.latest_close, b."CurrentValue")
+            END AS "CurrentPrice"
+        FROM "BoughtStocks" b
+        LEFT JOIN "Stocks" s ON s."Symbol" = b."Symbol"
+        LEFT JOIN LATERAL (
+            SELECT q."ClosePrice" AS latest_close
+            FROM "Quotes" q
+            WHERE q."Symbol" = b."Symbol"
+              AND COALESCE(q."ClosePrice", 0) > 0
+            ORDER BY q."CloseDate" DESC
+            LIMIT 1
+        ) lq ON true
+        WHERE b."DepotId" = :depotId
+          AND COALESCE(b."Observed", FALSE) = TRUE
+          AND b."SellDate" IS NULL
+          AND COALESCE(b."Status", 0) <> 10
+        ORDER BY COALESCE(NULLIF(s."Name", ''), NULLIF(b."Name", ''), b."Symbol") ASC
+    )SQL");
+    query.bindValue(QStringLiteral(":depotId"), depotId);
+
+    if (!query.exec()) {
+        qCritical() << "Fehler beim Laden der beobachteten Aktien fuer Check Depots:"
+                    << query.lastError().text();
+        return results;
+    }
+
+    while (query.next()) {
+        QVariantMap row;
+        row[QStringLiteral("name")] = query.value(QStringLiteral("Name"));
+        row[QStringLiteral("isin")] = query.value(QStringLiteral("ISIN"));
+        row[QStringLiteral("quantity")] = query.value(QStringLiteral("Quantity"));
+        row[QStringLiteral("currentPrice")] = query.value(QStringLiteral("CurrentPrice"));
+        results.append(row);
+    }
+
+    return results;
+}
+
 QVariantMap DatabaseManager::getDepotMasterData(int depotId, int investmentYear)
 {
     QVariantMap row;
@@ -224,6 +279,7 @@ QVariantMap DatabaseManager::getDepotYearGainPercentages(int depotId, int invest
             SELECT COALESCE(SUM(
                 COALESCE(b."Quantity", 1)
                 * (COALESCE(b."CurrentValue", b."EntryValue", 0) - COALESCE(b."EntryValue", 0))
+                - 1.0
             ), 0) AS realized_gain
             FROM "BoughtStocks" b
             WHERE b."DepotId" = :depotId
@@ -233,7 +289,7 @@ QVariantMap DatabaseManager::getDepotYearGainPercentages(int depotId, int invest
         totals AS (
             SELECT
                 COALESCE((SELECT investment_amount FROM year_data), 0) AS investment_amount,
-                COALESCE(SUM(quantity * entry_value), 0) AS invested_amount,
+                COALESCE(SUM(quantity * entry_value + 1.0), 0) AS invested_amount,
                 COALESCE(SUM(quantity * value_at_date), 0) AS position_value,
                 COALESCE((SELECT realized_gain FROM realized), 0) AS realized_gain
             FROM positions
@@ -317,7 +373,7 @@ QVariantMap DatabaseManager::getObservedDepotYearGainPercentages(int depotId, in
         totals AS (
             SELECT
                 COALESCE((SELECT investment_amount FROM year_data), 0) AS investment_amount,
-                COALESCE(SUM(quantity * entry_value), 0) AS invested_amount,
+                COALESCE(SUM(quantity * entry_value + 1.0), 0) AS invested_amount,
                 COALESCE(SUM(quantity * value_at_date), 0) AS position_value
             FROM positions
         )
@@ -607,7 +663,19 @@ QVariantMap DatabaseManager::getPortfolioChartData(const QString &symbol)
             CROSS JOIN summary s
             WHERE q."Symbol" = :symbol
               AND COALESCE(q."ClosePrice", 0) > 0
-              AND q."CloseDate" BETWEEN s.start_90 AND s.latest_date
+              AND q."CloseDate" BETWEEN LEAST(
+                    s.start_90,
+                    COALESCE(
+                        (
+                            SELECT b."BuyDate"
+                            FROM "BoughtStocks" b
+                            WHERE b."DepotId" = 1
+                              AND b."Symbol" = :symbol
+                            LIMIT 1
+                        ),
+                        s.start_90
+                    )
+                  ) AND s.latest_date
         )
         SELECT
             'summary' AS row_type,
@@ -757,6 +825,7 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
             qp.days60_value_inc AS "Days60ValueInc",
             qp.days90_value_inc AS "Days90ValueInc",
             qp.latest_change_percent AS "LatestChangePercent",
+            qp.change_from_high_percent AS "ChangeFromHighPercent",
             s."IBKRChangeReference"->>'source' AS "LatestChangeSource",
             s."IBKRChangeReference"->>'lastDate' AS "LatestChangeDate",
             s."IBKRChangeReference"->>'closeDate' AS "LatestChangePreviousDate",
@@ -820,10 +889,19 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
                     THEN (s."IBKRSnapshotLast" - s."IBKRSnapshotClose") / NULLIF(s."IBKRSnapshotClose", 0)
                     ELSE ((s."IBKRChangeReference"->>'last')::numeric - (s."IBKRChangeReference"->>'close')::numeric)
                         / NULLIF((s."IBKRChangeReference"->>'close')::numeric, 0)
-                    END * 100)::numeric, 2) AS latest_change_percent
+                    END * 100)::numeric, 2) AS latest_change_percent,
+                ROUND(((l.latest_close - hb.highest_close)
+                    / NULLIF(hb.highest_close, 0) * 100)::numeric, 2) AS change_from_high_percent
             FROM latest_quote l
             LEFT JOIN previous_quote pq ON true
             CROSS JOIN boundaries bd
+            LEFT JOIN LATERAL (
+                SELECT MAX(q."ClosePrice") AS highest_close
+                FROM "Quotes" q
+                WHERE q."Symbol" = b."Symbol"
+                  AND COALESCE(q."ClosePrice", 0) > 0
+                  AND q."CloseDate" BETWEEN b."BuyDate" AND l.latest_date
+            ) hb ON true
             LEFT JOIN LATERAL (
                 SELECT
                     AVG(close_price) FILTER (WHERE rn_asc <= LEAST(5::bigint, total_count)) AS old_avg,
@@ -933,6 +1011,8 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
         row["days90ValueInc"] = query.value("Days90ValueInc");
         row["latestChangePercent"] = query.value("LatestChangePercent").isNull()
             ? QVariant() : query.value("LatestChangePercent");
+        row["changeFromHighPercent"] = query.value("ChangeFromHighPercent").isNull()
+            ? QVariant() : query.value("ChangeFromHighPercent");
         row["latestChangeCurrency"] = query.value("LatestChangeCurrency");
         row["latestChangeExchange"] = query.value("LatestChangeExchange");
         row["latestChangeDelayed"] = query.value("LatestChangeDelayed");
@@ -954,6 +1034,7 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
             QStringLiteral("analysisConfigName"),
             QStringLiteral("days10ValueInc"), QStringLiteral("days20ValueInc"), QStringLiteral("days40ValueInc"), QStringLiteral("days60ValueInc"),
             QStringLiteral("days90ValueInc"), QStringLiteral("latestChangePercent"),
+            QStringLiteral("changeFromHighPercent"),
             QStringLiteral("quoteLastDate"), QStringLiteral("status"),
             QStringLiteral("mic"), QStringLiteral("isin"), QStringLiteral("exchange"),
             QStringLiteral("countryCode"), QStringLiteral("city")
@@ -1012,6 +1093,8 @@ QVariantMap DatabaseManager::getTestPortfolioSummaryForSymbol(const QString &sym
                 ELSE ((s."IBKRChangeReference"->>'last')::numeric - (s."IBKRChangeReference"->>'close')::numeric)
                     / NULLIF((s."IBKRChangeReference"->>'close')::numeric, 0)
                 END * 100)::numeric, 2) AS "LatestChangePercent",
+            ROUND(((lq.latest_close - hq.highest_close)
+                / NULLIF(hq.highest_close, 0) * 100)::numeric, 2) AS "ChangeFromHighPercent",
             CASE WHEN s."IBKRSnapshotLast" IS NULL THEN COALESCE(s."IBKRChangeReference"->>'currency', '') ELSE '' END AS "LatestChangeCurrency",
             s."IBKRChangeReference"->>'exchange' AS "LatestChangeExchange",
             TO_CHAR(lq.latest_date, 'YYYY-MM-DD') AS "QuoteLastDate"
@@ -1031,6 +1114,13 @@ QVariantMap DatabaseManager::getTestPortfolioSummaryForSymbol(const QString &sym
             ORDER BY q."CloseDate" DESC
             LIMIT 1
         ) lq ON true
+        LEFT JOIN LATERAL (
+            SELECT MAX(q."ClosePrice") AS highest_close
+            FROM "Quotes" q
+            WHERE q."Symbol" = b."Symbol"
+              AND COALESCE(q."ClosePrice", 0) > 0
+              AND q."CloseDate" BETWEEN b."BuyDate" AND lq.latest_date
+        ) hq ON true
         LEFT JOIN LATERAL (
             SELECT q."ClosePrice" AS previous_close
             FROM "Quotes" q
@@ -1066,6 +1156,8 @@ QVariantMap DatabaseManager::getTestPortfolioSummaryForSymbol(const QString &sym
     row["analysisConfigName"] = query.value("AnalysisConfigName");
     row["latestChangePercent"] = query.value("LatestChangePercent").isNull()
         ? QVariant() : query.value("LatestChangePercent");
+    row["changeFromHighPercent"] = query.value("ChangeFromHighPercent").isNull()
+        ? QVariant() : query.value("ChangeFromHighPercent");
     row["latestChangeCurrency"] = query.value("LatestChangeCurrency");
     row["latestChangeExchange"] = query.value("LatestChangeExchange");
     row["latestChangeDelayed"] = query.value("LatestChangeDelayed");
@@ -1085,6 +1177,7 @@ QVariantMap DatabaseManager::getTestPortfolioSummaryForSymbol(const QString &sym
         QStringLiteral("sellDate"), QStringLiteral("currentValue"), QStringLiteral("entryValue"),
         QStringLiteral("valueIncreasePercent"), QStringLiteral("quantity"), QStringLiteral("observed"),
         QStringLiteral("analysisConfigName"), QStringLiteral("latestChangePercent"),
+        QStringLiteral("changeFromHighPercent"),
         QStringLiteral("quoteLastDate"), QStringLiteral("status"),
         QStringLiteral("mic"), QStringLiteral("isin"), QStringLiteral("exchange"),
         QStringLiteral("countryCode"), QStringLiteral("city")
@@ -2058,6 +2151,7 @@ bool DatabaseManager::exchangeBoughtStock(
         return false;
     }
 
+    constexpr double orderFee = 1.0;
     const QString normalizedSellSymbol = sellSymbol.trimmed();
     const QString normalizedBuySymbol = buySymbol.trimmed();
     const QString normalizedBuyName = buyName.trimmed();
@@ -2068,7 +2162,7 @@ bool DatabaseManager::exchangeBoughtStock(
         || normalizedBuyDate.isEmpty()
         || currentValue <= 0.0
         || entryValue <= 0.0
-        || investedAmount <= 0.0) {
+        || investedAmount <= orderFee) {
         qWarning() << "Pflichtfelder fuer Aktienaustausch fehlen.";
         return false;
     }
@@ -2095,7 +2189,7 @@ bool DatabaseManager::exchangeBoughtStock(
         return false;
     }
 
-    const double quantity = investedAmount / entryValue;
+    const double quantity = (investedAmount - orderFee) / entryValue;
     const double valueIncreasePercent = entryValue > 0.0
                                             ? (currentValue - entryValue) / entryValue * 100.0
                                             : 0.0;
