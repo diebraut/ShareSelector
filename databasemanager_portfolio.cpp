@@ -23,6 +23,49 @@ double mockPortfolioValue(quint32 seed, int shift, double minimum, double maximu
     const quint32 part = (seed >> shift) & 0xffu;
     return minimum + (maximum - minimum) * (double(part) / 255.0);
 }
+
+QVariant frozenDepotGain(QSqlDatabase &db, int depotId, const QDate &date, bool observedOnly)
+{
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        SELECT "GainPercent" FROM "DepotGainSnapshots"
+        WHERE "DepotId" = :depotId AND "AsOfDate" = :asOfDate
+          AND "ObservedOnly" = :observedOnly
+    )SQL");
+    query.bindValue(QStringLiteral(":depotId"), depotId);
+    query.bindValue(QStringLiteral(":asOfDate"), date);
+    query.bindValue(QStringLiteral(":observedOnly"), observedOnly);
+    if (!query.exec()) {
+        qWarning() << "Historischer Depotgewinn konnte nicht geladen werden:"
+                   << query.lastError().text() << depotId << date;
+        return {};
+    }
+    return query.next() ? query.value(0) : QVariant();
+}
+
+QVariant freezeDepotGain(QSqlDatabase &db, int depotId, const QDate &date,
+                         bool observedOnly, const QVariant &calculated)
+{
+    if (!calculated.isValid() || calculated.isNull())
+        return calculated;
+    QSqlQuery query(db);
+    query.prepare(R"SQL(
+        INSERT INTO "DepotGainSnapshots" ("DepotId", "AsOfDate", "ObservedOnly", "GainPercent")
+        VALUES (:depotId, :asOfDate, :observedOnly, :gainPercent)
+        ON CONFLICT ("DepotId", "AsOfDate", "ObservedOnly") DO NOTHING
+    )SQL");
+    query.bindValue(QStringLiteral(":depotId"), depotId);
+    query.bindValue(QStringLiteral(":asOfDate"), date);
+    query.bindValue(QStringLiteral(":observedOnly"), observedOnly);
+    query.bindValue(QStringLiteral(":gainPercent"), calculated);
+    if (!query.exec()) {
+        qWarning() << "Historischer Depotgewinn konnte nicht festgehalten werden:"
+                   << query.lastError().text() << depotId << date;
+        return calculated;
+    }
+    const QVariant frozen = frozenDepotGain(db, depotId, date, observedOnly);
+    return frozen.isValid() ? frozen : calculated;
+}
 } // namespace
 QVariantList DatabaseManager::getBoughtStocks()
 {
@@ -308,6 +351,15 @@ QVariantMap DatabaseManager::getDepotYearGainPercentages(int depotId, int invest
         const QDate periodEndDate = asOfDate.addMonths(1).addDays(-1);
         if (periodEndDate > QDate::currentDate())
             continue;
+        const bool freeze = periodEndDate.addDays(3) < QDate::currentDate();
+        const QString key = QStringLiteral("month%1").arg(month);
+        if (freeze) {
+            const QVariant stored = frozenDepotGain(db, depotId, periodEndDate, false);
+            if (stored.isValid()) {
+                result[key] = stored;
+                continue;
+            }
+        }
 
         const QString asOfDateText = periodEndDate.toString(QStringLiteral("yyyy-MM-dd"));
 
@@ -322,8 +374,12 @@ QVariantMap DatabaseManager::getDepotYearGainPercentages(int depotId, int invest
             continue;
         }
 
-        if (query.next())
-            result[QStringLiteral("month%1").arg(month)] = query.value(QStringLiteral("gain_percent"));
+        if (query.next()) {
+            const QVariant calculated = query.value(QStringLiteral("gain_percent"));
+            result[key] = freeze
+                ? freezeDepotGain(db, depotId, periodEndDate, false, calculated)
+                : calculated;
+        }
 
         query.finish();
     }
@@ -390,13 +446,26 @@ QVariantMap DatabaseManager::getObservedDepotYearGainPercentages(int depotId, in
         const QDate periodEndDate = QDate(investmentYear, month, 1).addMonths(1).addDays(-1);
         if (periodEndDate > QDate::currentDate())
             continue;
+        const bool freeze = periodEndDate.addDays(3) < QDate::currentDate();
+        const QString key = QStringLiteral("month%1").arg(month);
+        if (freeze) {
+            const QVariant stored = frozenDepotGain(db, depotId, periodEndDate, true);
+            if (stored.isValid()) {
+                result[key] = stored;
+                continue;
+            }
+        }
 
         query.bindValue(QStringLiteral(":depotId"), depotId);
         query.bindValue(QStringLiteral(":investmentYear"), investmentYear);
         query.bindValue(QStringLiteral(":asOfDate"), periodEndDate.toString(QStringLiteral("yyyy-MM-dd")));
 
-        if (query.exec() && query.next())
-            result[QStringLiteral("month%1").arg(month)] = query.value(QStringLiteral("gain_percent"));
+        if (query.exec() && query.next()) {
+            const QVariant calculated = query.value(QStringLiteral("gain_percent"));
+            result[key] = freeze
+                ? freezeDepotGain(db, depotId, periodEndDate, true, calculated)
+                : calculated;
+        }
         else if (query.lastError().isValid())
             qCritical() << "Fehler beim Berechnen der Observed-Depot-Jahresgewinne:"
                         << query.lastError().text() << depotId << investmentYear << periodEndDate;
@@ -825,21 +894,45 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
             qp.days60_value_inc AS "Days60ValueInc",
             qp.days90_value_inc AS "Days90ValueInc",
             qp.latest_change_percent AS "LatestChangePercent",
+            qp.latest_previous_close AS "LatestPreviousClose",
             qp.change_from_high_percent AS "ChangeFromHighPercent",
             s."IBKRChangeReference"->>'source' AS "LatestChangeSource",
             s."IBKRChangeReference"->>'lastDate' AS "LatestChangeDate",
             s."IBKRChangeReference"->>'closeDate' AS "LatestChangePreviousDate",
             COALESCE((s."IBKRChangeReference"->>'delayed')::boolean, false) AS "LatestChangeDelayed",
-            CASE WHEN s."IBKRSnapshotLast" IS NULL THEN COALESCE(s."IBKRChangeReference"->>'currency', '') ELSE '' END AS "LatestChangeCurrency",
+            CASE WHEN qp.latest_live_at IS NOT NULL THEN ''
+                 WHEN s."IBKRSnapshotLast" IS NULL THEN COALESCE(s."IBKRChangeReference"->>'currency', '')
+                 ELSE '' END AS "LatestChangeCurrency",
             s."IBKRChangeReference"->>'exchange' AS "LatestChangeExchange",
-            TO_CHAR(qp.latest_date, 'YYYY-MM-DD') AS "QuoteLastDate"
+            CASE
+                WHEN qp.latest_trade_at IS NOT NULL
+                THEN TO_CHAR(qp.latest_trade_at AT TIME ZONE 'Europe/Berlin', 'DD-MM-YY HH24:MI')
+                WHEN qp.latest_live_at IS NOT NULL
+                THEN TO_CHAR(qp.latest_date, 'DD-MM-YY') || ' --:--'
+                WHEN s."IBKRSnapshotLast" IS NOT NULL
+                     AND COALESCE(s."IBKRSnapshotRaw"->>'lastTimestamp', '') ~ '^[0-9]+([.][0-9]+)?$'
+                     AND (s."IBKRSnapshotRaw"->>'lastTimestamp')::double precision > 0
+                     AND (TO_TIMESTAMP((s."IBKRSnapshotRaw"->>'lastTimestamp')::double precision)
+                              AT TIME ZONE 'Europe/Berlin')::date = qp.latest_date
+                THEN TO_CHAR(
+                    TO_TIMESTAMP((s."IBKRSnapshotRaw"->>'lastTimestamp')::double precision)
+                        AT TIME ZONE 'Europe/Berlin',
+                    'DD-MM-YY HH24:MI'
+                )
+                WHEN qp.latest_date IS NOT NULL
+                THEN TO_CHAR(qp.latest_date, 'DD-MM-YY') || ' --:--'
+                ELSE ''
+            END AS "QuoteLastDate"
         FROM "BoughtStocks" b
         LEFT JOIN "Stocks" s ON s."Symbol" = b."Symbol"
         LEFT JOIN LATERAL (
             WITH latest_quote AS (
                 SELECT
                     q."ClosePrice" AS latest_close,
-                    q."CloseDate" AS latest_date
+                    q."CloseDate" AS latest_date,
+                    CASE WHEN q."IBKRCloseSource" = 'live-mid'
+                        THEN q."IBKRLiveQuoteAt" END AS latest_live_at,
+                    q."IBKRLiveLastTradeAt" AS latest_trade_at
                 FROM "Quotes" q
                 WHERE q."Symbol" = b."Symbol"
                   AND COALESCE(q."ClosePrice", 0) > 0
@@ -880,12 +973,17 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
             SELECT
                 l.latest_close,
                 l.latest_date,
+                l.latest_live_at,
+                l.latest_trade_at,
+                CASE WHEN l.latest_live_at IS NOT NULL THEN pq.previous_close END AS latest_previous_close,
                 ROUND(((p10.new_avg - p10.old_avg) / NULLIF(p10.old_avg, 0) * 100)::numeric, 2) AS days10_value_inc,
                 ROUND(((p20.new_avg - p20.old_avg) / NULLIF(p20.old_avg, 0) * 100)::numeric, 2) AS days20_value_inc,
                 ROUND(((p40.new_avg - p40.old_avg) / NULLIF(p40.old_avg, 0) * 100)::numeric, 2) AS days40_value_inc,
                 ROUND(((p60.new_avg - p60.old_avg) / NULLIF(p60.old_avg, 0) * 100)::numeric, 2) AS days60_value_inc,
                 ROUND(((p90.new_avg - p90.old_avg) / NULLIF(p90.old_avg, 0) * 100)::numeric, 2) AS days90_value_inc,
-                ROUND((CASE WHEN s."IBKRSnapshotLast" IS NOT NULL
+                ROUND((CASE WHEN l.latest_live_at IS NOT NULL
+                    THEN (l.latest_close - pq.previous_close) / NULLIF(pq.previous_close, 0)
+                    WHEN s."IBKRSnapshotLast" IS NOT NULL
                     THEN (s."IBKRSnapshotLast" - s."IBKRSnapshotClose") / NULLIF(s."IBKRSnapshotClose", 0)
                     ELSE ((s."IBKRChangeReference"->>'last')::numeric - (s."IBKRChangeReference"->>'close')::numeric)
                         / NULLIF((s."IBKRChangeReference"->>'close')::numeric, 0)
@@ -1011,6 +1109,8 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
         row["days90ValueInc"] = query.value("Days90ValueInc");
         row["latestChangePercent"] = query.value("LatestChangePercent").isNull()
             ? QVariant() : query.value("LatestChangePercent");
+        row["latestPreviousClose"] = query.value("LatestPreviousClose").isNull()
+            ? QVariant() : query.value("LatestPreviousClose");
         row["changeFromHighPercent"] = query.value("ChangeFromHighPercent").isNull()
             ? QVariant() : query.value("ChangeFromHighPercent");
         row["latestChangeCurrency"] = query.value("LatestChangeCurrency");
@@ -1088,16 +1188,39 @@ QVariantMap DatabaseManager::getTestPortfolioSummaryForSymbol(const QString &sym
             s."Exchange",
             s."CountryCode",
             s."City",
-            ROUND((CASE WHEN s."IBKRSnapshotLast" IS NOT NULL
+            CASE WHEN lq.latest_live_at IS NOT NULL THEN pq.previous_close END AS "LatestPreviousClose",
+            ROUND((CASE WHEN lq.latest_live_at IS NOT NULL
+                THEN (lq.latest_close - pq.previous_close) / NULLIF(pq.previous_close, 0)
+                WHEN s."IBKRSnapshotLast" IS NOT NULL
                 THEN (s."IBKRSnapshotLast" - s."IBKRSnapshotClose") / NULLIF(s."IBKRSnapshotClose", 0)
                 ELSE ((s."IBKRChangeReference"->>'last')::numeric - (s."IBKRChangeReference"->>'close')::numeric)
                     / NULLIF((s."IBKRChangeReference"->>'close')::numeric, 0)
                 END * 100)::numeric, 2) AS "LatestChangePercent",
             ROUND(((lq.latest_close - hq.highest_close)
                 / NULLIF(hq.highest_close, 0) * 100)::numeric, 2) AS "ChangeFromHighPercent",
-            CASE WHEN s."IBKRSnapshotLast" IS NULL THEN COALESCE(s."IBKRChangeReference"->>'currency', '') ELSE '' END AS "LatestChangeCurrency",
+            CASE WHEN lq.latest_live_at IS NOT NULL THEN ''
+                 WHEN s."IBKRSnapshotLast" IS NULL THEN COALESCE(s."IBKRChangeReference"->>'currency', '')
+                 ELSE '' END AS "LatestChangeCurrency",
             s."IBKRChangeReference"->>'exchange' AS "LatestChangeExchange",
-            TO_CHAR(lq.latest_date, 'YYYY-MM-DD') AS "QuoteLastDate"
+            CASE
+                WHEN lq.latest_trade_at IS NOT NULL
+                THEN TO_CHAR(lq.latest_trade_at AT TIME ZONE 'Europe/Berlin', 'DD-MM-YY HH24:MI')
+                WHEN lq.latest_live_at IS NOT NULL
+                THEN TO_CHAR(lq.latest_date, 'DD-MM-YY') || ' --:--'
+                WHEN s."IBKRSnapshotLast" IS NOT NULL
+                     AND COALESCE(s."IBKRSnapshotRaw"->>'lastTimestamp', '') ~ '^[0-9]+([.][0-9]+)?$'
+                     AND (s."IBKRSnapshotRaw"->>'lastTimestamp')::double precision > 0
+                     AND (TO_TIMESTAMP((s."IBKRSnapshotRaw"->>'lastTimestamp')::double precision)
+                              AT TIME ZONE 'Europe/Berlin')::date = lq.latest_date
+                THEN TO_CHAR(
+                    TO_TIMESTAMP((s."IBKRSnapshotRaw"->>'lastTimestamp')::double precision)
+                        AT TIME ZONE 'Europe/Berlin',
+                    'DD-MM-YY HH24:MI'
+                )
+                WHEN lq.latest_date IS NOT NULL
+                THEN TO_CHAR(lq.latest_date, 'DD-MM-YY') || ' --:--'
+                ELSE ''
+            END AS "QuoteLastDate"
             , COALESCE((s."IBKRChangeReference"->>'delayed')::boolean, false) AS "LatestChangeDelayed"
             , s."IBKRChangeReference"->>'source' AS "LatestChangeSource"
             , s."IBKRChangeReference"->>'lastDate' AS "LatestChangeDate"
@@ -1107,7 +1230,10 @@ QVariantMap DatabaseManager::getTestPortfolioSummaryForSymbol(const QString &sym
         LEFT JOIN LATERAL (
             SELECT
                 q."ClosePrice" AS latest_close,
-                q."CloseDate" AS latest_date
+                q."CloseDate" AS latest_date,
+                CASE WHEN q."IBKRCloseSource" = 'live-mid'
+                    THEN q."IBKRLiveQuoteAt" END AS latest_live_at,
+                q."IBKRLiveLastTradeAt" AS latest_trade_at
             FROM "Quotes" q
             WHERE q."Symbol" = b."Symbol"
               AND COALESCE(q."ClosePrice", 0) > 0
@@ -1156,6 +1282,8 @@ QVariantMap DatabaseManager::getTestPortfolioSummaryForSymbol(const QString &sym
     row["analysisConfigName"] = query.value("AnalysisConfigName");
     row["latestChangePercent"] = query.value("LatestChangePercent").isNull()
         ? QVariant() : query.value("LatestChangePercent");
+    row["latestPreviousClose"] = query.value("LatestPreviousClose").isNull()
+        ? QVariant() : query.value("LatestPreviousClose");
     row["changeFromHighPercent"] = query.value("ChangeFromHighPercent").isNull()
         ? QVariant() : query.value("ChangeFromHighPercent");
     row["latestChangeCurrency"] = query.value("LatestChangeCurrency");
@@ -1584,7 +1712,25 @@ QVariantList DatabaseManager::getTestPortfolio()
             qp.days40_value_inc AS "Days40ValueInc",
             qp.days60_value_inc AS "Days60ValueInc",
             qp.days90_value_inc AS "Days90ValueInc",
-            TO_CHAR(qp.latest_date, 'YYYY-MM-DD') AS "QuoteLastDate"
+            CASE
+                WHEN qp.latest_trade_at IS NOT NULL
+                THEN TO_CHAR(qp.latest_trade_at AT TIME ZONE 'Europe/Berlin', 'DD-MM-YY HH24:MI')
+                WHEN qp.latest_live_at IS NOT NULL
+                THEN TO_CHAR(qp.latest_date, 'DD-MM-YY') || ' --:--'
+                WHEN s."IBKRSnapshotLast" IS NOT NULL
+                     AND COALESCE(s."IBKRSnapshotRaw"->>'lastTimestamp', '') ~ '^[0-9]+([.][0-9]+)?$'
+                     AND (s."IBKRSnapshotRaw"->>'lastTimestamp')::double precision > 0
+                     AND (TO_TIMESTAMP((s."IBKRSnapshotRaw"->>'lastTimestamp')::double precision)
+                              AT TIME ZONE 'Europe/Berlin')::date = qp.latest_date
+                THEN TO_CHAR(
+                    TO_TIMESTAMP((s."IBKRSnapshotRaw"->>'lastTimestamp')::double precision)
+                        AT TIME ZONE 'Europe/Berlin',
+                    'DD-MM-YY HH24:MI'
+                )
+                WHEN qp.latest_date IS NOT NULL
+                THEN TO_CHAR(qp.latest_date, 'DD-MM-YY') || ' --:--'
+                ELSE ''
+            END AS "QuoteLastDate"
         FROM "BoughtStocks" b
         LEFT JOIN "Stocks" s ON s."Symbol" = b."Symbol"
         LEFT JOIN LATERAL (
@@ -1602,7 +1748,10 @@ QVariantList DatabaseManager::getTestPortfolio()
             WITH latest_quote AS (
                 SELECT
                     q."ClosePrice" AS latest_close,
-                    q."CloseDate" AS latest_date
+                    q."CloseDate" AS latest_date,
+                    CASE WHEN q."IBKRCloseSource" = 'live-mid'
+                        THEN q."IBKRLiveQuoteAt" END AS latest_live_at,
+                    q."IBKRLiveLastTradeAt" AS latest_trade_at
                 FROM "Quotes" q
                 WHERE q."Symbol" = b."Symbol"
                   AND COALESCE(q."ClosePrice", 0) > 0
@@ -1633,6 +1782,8 @@ QVariantList DatabaseManager::getTestPortfolio()
             SELECT
                 l.latest_close,
                 l.latest_date,
+                l.latest_live_at,
+                l.latest_trade_at,
                 ROUND(((p10.new_avg - p10.old_avg) / NULLIF(p10.old_avg, 0) * 100)::numeric, 2) AS days10_value_inc,
                 ROUND(((p20.new_avg - p20.old_avg) / NULLIF(p20.old_avg, 0) * 100)::numeric, 2) AS days20_value_inc,
                 ROUND(((p40.new_avg - p40.old_avg) / NULLIF(p40.old_avg, 0) * 100)::numeric, 2) AS days40_value_inc,

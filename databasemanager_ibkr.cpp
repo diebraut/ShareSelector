@@ -979,6 +979,32 @@ void DatabaseManager::startIbkrQuoteHelperRequest(bool probeExchange)
         return;
     }
 
+    // A foreign home listing can identify the stock, but its native prices
+    // must not be written into the EUR depot. Use the existing home-market
+    // snapshot fallback, which converts dated native prices to EUR.
+    if (!probeExchange && !m_pendingIbkrQuotesSymbol.isEmpty()) {
+        QSqlQuery currencyQuery(db);
+        currencyQuery.prepare(R"SQL(
+            SELECT "Currency", "IBKRContractCurrency"
+            FROM "Stocks" WHERE "Symbol" = :symbol
+        )SQL");
+        currencyQuery.bindValue(QStringLiteral(":symbol"), m_pendingIbkrQuotesSymbol);
+        if (currencyQuery.exec() && currencyQuery.next()) {
+            const QString depotCurrency = currencyQuery.value(0).toString().trimmed().toUpper();
+            const QString contractCurrency = currencyQuery.value(1).toString().trimmed().toUpper();
+            if (depotCurrency == QStringLiteral("EUR") && !contractCurrency.isEmpty()
+                && contractCurrency != depotCurrency) {
+                m_pendingIbkrProcessIsHistoricalQuotes = false;
+                m_pendingIbkrProcessIsMarketSnapshot = true;
+                m_pendingIbkrQuotesConId = 0;
+                m_pendingIbkrQuotesCurrency = depotCurrency;
+                m_pendingIbkrQuotesIbkrSymbol =
+                    m_pendingIbkrQuotesSymbol.section(QLatin1Char('.'), 0, 0);
+                m_pendingIbkrQuotesPrimaryExchange.clear();
+            }
+        }
+    }
+
     const bool snapshotRequest = !probeExchange && m_pendingIbkrProcessIsMarketSnapshot;
     const QString requestSymbol = m_pendingIbkrQuotesSymbol.isEmpty()
                                       ? m_ibkrPendingSymbol
@@ -1583,7 +1609,7 @@ void DatabaseManager::getIbkrData(const QString &symbol)
 
     QSqlQuery stockQuery(db);
     stockQuery.prepare(R"SQL(
-        SELECT "ISIN", "Currency", "CountryCode", "MIC", "PrimaryExchange",
+        SELECT "ISIN", "Currency", "IBKRContractCurrency", "CountryCode", "MIC", "PrimaryExchange",
                "IBKRResolvedSymbol", "YahooSymbol", "Name"
         FROM "Stocks"
         WHERE "Symbol" = :symbol
@@ -1600,6 +1626,9 @@ void DatabaseManager::getIbkrData(const QString &symbol)
     QString currency = stockQuery.value(QStringLiteral("Currency")).toString().trimmed();
     if (currency.isEmpty())
         currency = currencyForCountry(stockQuery.value(QStringLiteral("CountryCode")).toString());
+    const QString contractCurrency = stockQuery.value(QStringLiteral("IBKRContractCurrency")).toString().trimmed();
+    if (!contractCurrency.isEmpty())
+        currency = contractCurrency;
 
     m_ibkrPendingSymbol = normalizedSymbol;
     m_pendingIbkrCurrency = currency;
@@ -1634,7 +1663,10 @@ void DatabaseManager::getIbkrData(const QString &symbol)
     m_pendingIbkrDirectExchanges = ibkrDirectExchanges(m_pendingIbkrExchange);
     m_pendingIbkrDirectExchangeIndex = 0;
     m_pendingIbkrCurrentDirectExchange.clear();
-    m_pendingIbkrDirectExchange = false;
+    m_pendingIbkrDirectExchange = !contractCurrency.isEmpty()
+        && contractCurrency != stockQuery.value(QStringLiteral("Currency")).toString().trimmed();
+    if (m_pendingIbkrDirectExchange)
+        m_pendingIbkrCurrentDirectExchange = m_pendingIbkrExchange;
 
     appendIbkrSymbolVariants(m_pendingIbkrCandidateSymbols,
                              stockQuery.value(QStringLiteral("IBKRResolvedSymbol")).toString());
@@ -1789,7 +1821,9 @@ bool DatabaseManager::tryNextIbkrCandidate(const QString &lastError)
                 .arg(m_ibkrPendingSymbol,
                      candidate,
                      m_pendingIbkrTryWithoutIsin ? QStringLiteral(" ohne ISIN") : QString(),
-                     m_pendingIbkrDirectExchange ? QStringLiteral(" direkt an FWB") : QString()),
+                     m_pendingIbkrDirectExchange
+                         ? QStringLiteral(" direkt an %1").arg(m_pendingIbkrCurrentDirectExchange)
+                         : QString()),
             true,
             false);
         startIbkrHelperRequest(candidate);
@@ -2537,7 +2571,15 @@ bool DatabaseManager::saveIbkrHistoricalQuotes(const QString &symbol,
             "HighestPrice" = EXCLUDED."HighestPrice",
             "LowestPrice" = EXCLUDED."LowestPrice",
             "Volume" = EXCLUDED."Volume",
-            "IBKRCloseSource" = COALESCE(EXCLUDED."IBKRCloseSource", "Quotes"."IBKRCloseSource")
+            "IBKRCloseSource" = CASE WHEN "Quotes"."IBKRCloseSource" = 'live-mid'
+                THEN EXCLUDED."IBKRCloseSource"
+                ELSE COALESCE(EXCLUDED."IBKRCloseSource", "Quotes"."IBKRCloseSource") END,
+            "IBKRLiveBid" = NULL,
+            "IBKRLiveAsk" = NULL,
+            "IBKRLiveBidReceivedAt" = NULL,
+            "IBKRLiveAskReceivedAt" = NULL,
+            "IBKRLiveQuoteAt" = NULL,
+            "IBKRLiveExchange" = NULL
         WHERE "Quotes"."IBKRCloseSource" IS DISTINCT FROM 'snapshot'
           AND (EXCLUDED."IBKRCloseSource" IS NULL
                OR "Quotes"."IBKRCloseSource" LIKE 'fx:%')
@@ -2847,7 +2889,14 @@ bool DatabaseManager::saveIbkrQuoteSnapshot(const QString &symbol,
             "OpenPrice" = EXCLUDED."OpenPrice",
             "HighestPrice" = EXCLUDED."HighestPrice",
             "LowestPrice" = EXCLUDED."LowestPrice",
-            "Volume" = EXCLUDED."Volume"
+            "Volume" = EXCLUDED."Volume",
+            "IBKRCloseSource" = NULL,
+            "IBKRLiveBid" = NULL,
+            "IBKRLiveAsk" = NULL,
+            "IBKRLiveBidReceivedAt" = NULL,
+            "IBKRLiveAskReceivedAt" = NULL,
+            "IBKRLiveQuoteAt" = NULL,
+            "IBKRLiveExchange" = NULL
     )SQL");
     insertQuery.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
     insertQuery.bindValue(QStringLiteral(":lastDate"), snapshotLastDate);
@@ -2907,7 +2956,13 @@ bool DatabaseManager::saveIbkrQuoteSnapshot(const QString &symbol,
             SET "ClosePrice" = EXCLUDED."ClosePrice",
                 "HighestPrice" = GREATEST("Quotes"."HighestPrice", EXCLUDED."ClosePrice"),
                 "LowestPrice" = LEAST("Quotes"."LowestPrice", EXCLUDED."ClosePrice"),
-                "IBKRCloseSource" = 'snapshot'
+                "IBKRCloseSource" = 'snapshot',
+                "IBKRLiveBid" = NULL,
+                "IBKRLiveAsk" = NULL,
+                "IBKRLiveBidReceivedAt" = NULL,
+                "IBKRLiveAskReceivedAt" = NULL,
+                "IBKRLiveQuoteAt" = NULL,
+                "IBKRLiveExchange" = NULL
             WHERE "Quotes"."IBKRCloseSource" IS DISTINCT FROM 'snapshot'
         )SQL");
         finalCloseQuery.bindValue(QStringLiteral(":symbol"), normalizedSymbol);
@@ -4242,7 +4297,7 @@ bool DatabaseManager::saveIbkrContractDetails(const QString &symbol, const QVari
     query.prepare(R"SQL(
         INSERT INTO "Stocks" (
             "Symbol", "MIC", "Name", "Exchange", "CountryCode", "LastUpdateDate",
-            "ISIN", "IBKRConId", "IBKRResolvedSymbol", "Currency", "PrimaryExchange",
+            "ISIN", "IBKRConId", "IBKRResolvedSymbol", "Currency", "IBKRContractCurrency", "PrimaryExchange",
             "LocalSymbol", "SecurityType", "TradingClass", "StockType", "Industry",
             "Category", "Subcategory", "TimeZoneId", "TradingHours", "LiquidHours",
             "MinTick", "MarketRuleIds", "ValidExchanges", "OrderTypes", "MarketName",
@@ -4253,7 +4308,7 @@ bool DatabaseManager::saveIbkrContractDetails(const QString &symbol, const QVari
             :symbol, :mic, COALESCE(NULLIF(:name, ''), :symbol),
             :exchange, NULLIF(LEFT(:isin, 2), ''),
             CURRENT_DATE, NULLIF(:isin, ''), :ibkrConId, NULLIF(:ibkrResolvedSymbol, ''),
-            NULLIF(:currency, ''), NULLIF(:primaryExchange, ''), NULLIF(:localSymbol, ''),
+            NULLIF(:currency, ''), NULLIF(:currency, ''), NULLIF(:primaryExchange, ''), NULLIF(:localSymbol, ''),
             NULLIF(:securityType, ''), NULLIF(:tradingClass, ''), NULLIF(:stockType, ''),
             NULLIF(:industry, ''), NULLIF(:category, ''), NULLIF(:subcategory, ''),
             NULLIF(:timeZoneId, ''), NULLIF(:tradingHours, ''), NULLIF(:liquidHours, ''),
@@ -4270,7 +4325,14 @@ bool DatabaseManager::saveIbkrContractDetails(const QString &symbol, const QVari
             END,
             "IBKRConId" = EXCLUDED."IBKRConId",
             "IBKRResolvedSymbol" = COALESCE(EXCLUDED."IBKRResolvedSymbol", "Stocks"."IBKRResolvedSymbol"),
-            "Currency" = COALESCE(EXCLUDED."Currency", "Stocks"."Currency"),
+            "Currency" = CASE
+                WHEN "Stocks"."Currency" = 'EUR'
+                     AND NULLIF("Stocks"."IBKRContractCurrency", '') IS NOT NULL
+                     AND EXCLUDED."Currency" IS DISTINCT FROM 'EUR'
+                THEN "Stocks"."Currency"
+                ELSE COALESCE(EXCLUDED."Currency", "Stocks"."Currency")
+            END,
+            "IBKRContractCurrency" = COALESCE(EXCLUDED."IBKRContractCurrency", "Stocks"."IBKRContractCurrency"),
             "PrimaryExchange" = COALESCE(EXCLUDED."PrimaryExchange", "Stocks"."PrimaryExchange"),
             "LocalSymbol" = COALESCE(EXCLUDED."LocalSymbol", "Stocks"."LocalSymbol"),
             "SecurityType" = COALESCE(EXCLUDED."SecurityType", "Stocks"."SecurityType"),

@@ -53,6 +53,14 @@ var timeoutSeconds = int.TryParse(timeoutSecondsText, out var parsedTimeoutSecon
     ? Math.Max(1, parsedTimeoutSeconds)
     : 0;
 
+if (args.Contains("--stream-quotes", StringComparer.OrdinalIgnoreCase)) {
+    if (!int.TryParse(Argument(args, "--port"), out var streamPort)
+        || !int.TryParse(Argument(args, "--client-id"), out var streamClientId))
+        return 2;
+    return await LiveQuoteStream.RunAsync(host, streamPort, streamClientId,
+        Argument(args, "--contracts-base64") ?? "");
+}
+
 if ((string.IsNullOrWhiteSpace(symbol) && conId <= 0)
     || !int.TryParse(Argument(args, "--port"), out var port)
     || !int.TryParse(Argument(args, "--client-id") ?? "23", out var clientId)) {

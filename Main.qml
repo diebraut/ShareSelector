@@ -631,6 +631,9 @@ ApplicationWindow {
 
     Connections {
         target: dbManager
+        function onIbkrLiveMidQuotesSaved(quotes) {
+            refreshPortfolioRows(Object.keys(quotes), true)
+        }
         function onIbkrStockDataUpdated(symbol) {
             const normalizedSymbol = String(symbol || "").trim()
             if (normalizedSymbol.length === 0)
@@ -766,41 +769,63 @@ ApplicationWindow {
     }
 
     function refreshPortfolioRow(symbol) {
-        const normalizedSymbol = String(symbol || "").trim()
-        if (normalizedSymbol.length === 0)
-            return false
+        return refreshPortfolioRows([symbol])
+    }
 
-        const updatedRow = dbManager.getTestPortfolioSummaryForSymbol(normalizedSymbol)
-        if (!updatedRow || String(updatedRow.symbol || "").trim().length === 0)
+    function refreshPortfolioRows(symbols, highlightChanges) {
+        if (!symbols || symbols.length === 0 || portfolioRows.length === 0)
             return false
-
+        const visibleSymbols = new Set(portfolioRows.map(row => String(row.symbol || "").trim()))
+        const updates = ({})
+        symbols.forEach(symbol => {
+            const normalizedSymbol = String(symbol || "").trim()
+            if (normalizedSymbol.length === 0 || !visibleSymbols.has(normalizedSymbol)
+                    || updates[normalizedSymbol] !== undefined)
+                return
+            const updatedRow = dbManager.getTestPortfolioSummaryForSymbol(normalizedSymbol)
+            if (updatedRow && String(updatedRow.symbol || "").trim() === normalizedSymbol)
+                updates[normalizedSymbol] = updatedRow
+        })
         let rowsUpdated = 0
         for (let i = 0; i < portfolioRows.length; i++) {
-            if (String(portfolioRows[i].symbol || "").trim() === normalizedSymbol) {
-                portfolioRows[i] = Object.assign({}, portfolioRows[i], updatedRow)
-                rowsUpdated++
-            }
+            const updatedRow = updates[String(portfolioRows[i].symbol || "").trim()]
+            if (!updatedRow)
+                continue
+            portfolioRows[i] = Object.assign({}, portfolioRows[i], updatedRow)
+            rowsUpdated++
         }
 
         let modelRowsUpdated = 0
+        let selectedRowUpdated = false
         for (let modelIndex = 0; modelIndex < portfolioModel.count; modelIndex++) {
             const modelRow = portfolioModel.get(modelIndex)
-            if (String(modelRow.symbol || "").trim() === normalizedSymbol) {
-                Object.keys(updatedRow).forEach(key => {
-                    portfolioModel.setProperty(modelIndex, key, updatedRow[key])
-                })
-                portfolioModel.setProperty(modelIndex, "rowUpdateVersion", Number(modelRow.rowUpdateVersion || 0) + 1)
-                modelRowsUpdated++
+            const updatedRow = updates[String(modelRow.symbol || "").trim()]
+            let changeDirection = 0
+            if (highlightChanges && updatedRow
+                    && modelRow.latestChangePercent !== null && modelRow.latestChangePercent !== undefined
+                    && updatedRow.latestChangePercent !== null && updatedRow.latestChangePercent !== undefined) {
+                const previousPercent = Number(modelRow.latestChangePercent)
+                const currentPercent = Number(updatedRow.latestChangePercent)
+                if (isFinite(previousPercent) && isFinite(currentPercent))
+                    changeDirection = currentPercent > previousPercent ? 1 : (currentPercent < previousPercent ? -1 : 0)
             }
+            if (highlightChanges && Number(modelRow.liveChangeDirection || 0) !== changeDirection)
+                portfolioModel.setProperty(modelIndex, "liveChangeDirection", changeDirection)
+            if (!updatedRow)
+                continue
+            Object.keys(updatedRow).forEach(key => {
+                portfolioModel.setProperty(modelIndex, key, updatedRow[key])
+            })
+            portfolioModel.setProperty(modelIndex, "rowUpdateVersion", Number(modelRow.rowUpdateVersion || 0) + 1)
+            if (modelIndex === selectedPortfolioIndex)
+                selectedRowUpdated = true
+            modelRowsUpdated++
         }
 
         if (rowsUpdated > 0 || modelRowsUpdated > 0) {
             updatePortfolioTotals()
-            if (selectedPortfolioIndex >= 0 && selectedPortfolioIndex < portfolioModel.count) {
-                const selectedRow = portfolioModel.get(selectedPortfolioIndex)
-                if (String(selectedRow.symbol || "").trim() === normalizedSymbol)
-                    schedulePortfolioDetailsLoad()
-            }
+            if (selectedRowUpdated)
+                schedulePortfolioDetailsLoad()
             portfolioUpdateDoneTimer.restart()
             return true
         }
@@ -960,7 +985,7 @@ ApplicationWindow {
         return true
     }
 
-    function updatePortfolioPositionData(row, buyDate, investedAmount, entryValue) {
+    function updatePortfolioPositionData(row, buyDate, investedAmount, entryValue, positionQuantity) {
         if (!row)
             return false
 
@@ -983,7 +1008,9 @@ ApplicationWindow {
         let currentValue = Number(dbManager.closePriceOnOrBefore(symbol, todayText) || 0)
         if (currentValue <= 0)
             currentValue = Number(row.currentValue || 0)
-        const quantity = invested / entry
+        const quantity = Number(positionQuantity)
+        if (!isFinite(quantity) || quantity <= 0)
+            return false
         const gainPercent = entry > 0 ? (currentValue - entry) / entry * 100 : 0
         const ok = dbManager.saveBoughtStock(
             symbol,
@@ -1062,6 +1089,7 @@ ApplicationWindow {
         let preferredIndex = -1
         sortedPortfolioRows().forEach((item, index) => {
             item.rowUpdateVersion = Number(item.rowUpdateVersion || 0) + 1
+            item.liveChangeDirection = 0
             portfolioModel.append(item)
             if (preferredSymbol && item.symbol === preferredSymbol)
                 preferredIndex = index
@@ -1307,8 +1335,13 @@ ApplicationWindow {
                 const latestChangePercent = row.latestChangePercent === null || row.latestChangePercent === undefined
                     ? NaN : Number(row.latestChangePercent)
                 const latestFactor = 1 + latestChangePercent / 100
-                if (!row.latestChangeCurrency && portfolioHeldAtLeast(row, 1) && !isNaN(latestChangePercent) && latestFactor > 0 && currentValue > 0) {
-                    const previousValue = currentValue / latestFactor
+                const exactPreviousClose = row.latestPreviousClose === null || row.latestPreviousClose === undefined
+                    ? NaN : Number(row.latestPreviousClose)
+                if (!row.latestChangeCurrency && portfolioHeldAtLeast(row, 1) && currentValue > 0) {
+                    const previousValue = isFinite(exactPreviousClose) && exactPreviousClose > 0
+                        ? quantity * exactPreviousClose
+                        : (!isNaN(latestChangePercent) && latestFactor > 0
+                            ? currentValue / latestFactor : NaN)
                     if (isFinite(previousValue) && previousValue > 0) {
                         latestPreviousTotal += previousValue
                         latestChangeAmount += currentValue - previousValue

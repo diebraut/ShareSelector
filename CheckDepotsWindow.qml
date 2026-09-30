@@ -121,7 +121,7 @@ Window {
             .replace(/ß/g, "ss")
             .replace(/&/g, " und ")
             .replace(/\b(gds|gdr)\b/g, "depositaryreceipt")
-            .replace(/\b(ag|se|inc|incorporated|corp|corporation|co|company|ltd|limited|plc|nv|sa|spa|holdings?|na|on|o|n)\b/g, " ")
+            .replace(/\b(ag|se|inc|incorporated|corp|corporation|co|company|ltd|limited|plc|nv|sa|spa|oyj|holdings?|hldg|na|nk|nn|on|o|n)\b/g, " ")
             .replace(/[^a-z0-9]+/g, " ")
             .replace(/\s+/g, " ")
             .trim()
@@ -134,36 +134,67 @@ Window {
             match = /A\/S[-\s]+([A-Z])\s*$/.exec(text)
         if (!match)
             match = /(?:CLASS|CL)[-\s]+([A-Z])\s*$/.exec(text)
+        if (!match)
+            match = /(?:^|[^A-Z0-9])([A-D])(?:\s+(?:N[AKN]|O\.?N\.?|[0-9]+))*\s*$/.exec(text)
         return match ? match[1] : ""
     }
 
-    function positionMatches(stock, position) {
+    function companyNamePartMatches(left, right) {
+        if (left === right)
+            return true
+        const shorterLength = Math.min(left.length, right.length)
+        return shorterLength >= 5
+            && (left.indexOf(right) === 0 || right.indexOf(left) === 0)
+    }
+
+    function isGenericCompanyNamePart(part) {
+        const genericParts = [
+            "bank", "group", "holding", "holdings", "international",
+            "energy", "pharma", "pharmaceutical", "solutions", "systems"
+        ]
+        return genericParts.some(function(genericPart) {
+            return companyNamePartMatches(part, genericPart)
+        })
+    }
+
+    function positionMatchStrength(stock, position) {
         const stockIsin = String(stock.isin || "").toUpperCase()
         const positionIsin = String(position.isin || "").toUpperCase()
         if (stockIsin && positionIsin)
-            return stockIsin === positionIsin
+            return stockIsin === positionIsin ? 3 : 0
 
         const stockClass = shareClass(stock.name)
         const positionClass = shareClass(position.name)
         if (stockClass && positionClass && stockClass !== positionClass)
-            return false
+            return 0
 
         const stockName = normalizedName(stock.name)
         const positionName = normalizedName(position.name)
         if (!stockName || !positionName)
-            return false
+            return 0
         if (stockName === positionName)
-            return true
+            return 2
+        // Generic terms (including abbreviations) cannot identify a company.
+        const hasCompanyPart = stockName.split(" ").some(function(stockPart) {
+            return stockPart.length >= 3 && !/^\d+$/.test(stockPart)
+                && !isGenericCompanyNamePart(stockPart)
+                && positionName.split(" ").some(function(positionPart) {
+                    return !isGenericCompanyNamePart(positionPart)
+                        && companyNamePartMatches(stockPart, positionPart)
+                })
+        })
+        if (!hasCompanyPart)
+            return 0
         if (Math.min(stockName.length, positionName.length) >= 4
                 && (stockName.indexOf(positionName) >= 0
                     || positionName.indexOf(stockName) >= 0))
-            return true
+            return 1
 
         const stockParts = stockName.split(" ").filter(function(part) {
-            return part.length >= 3
+            return part.length >= 3 && !/^\d+$/.test(part)
         })
         const positionParts = positionName.split(" ").filter(function(part) {
-            return part.length >= 3
+            return part.length >= 3 && !/^\d+$/.test(part)
         })
         const commonParts = []
         for (let stockPartIndex = 0;
@@ -174,7 +205,7 @@ Window {
                     positionPartIndex < positionParts.length;
                     ++positionPartIndex) {
                 const positionPart = positionParts[positionPartIndex]
-                if (stockPart === positionPart
+                if (companyNamePartMatches(stockPart, positionPart)
                         && commonParts.indexOf(stockPart) < 0)
                     commonParts.push(stockPart)
             }
@@ -183,18 +214,14 @@ Window {
         if (commonParts.length >= 2) {
             const shorterNamePartCount = Math.min(stockParts.length, positionParts.length)
             if (commonParts.length / Math.max(1, shorterNamePartCount) >= 0.5)
-                return true
+                return 1
         }
 
-        const genericSingleParts = [
-            "bank", "group", "holding", "holdings", "international",
-            "energy", "pharma", "pharmaceutical", "solutions", "systems"
-        ]
         if (commonParts.length === 1
                 && commonParts[0].length >= 6
-                && genericSingleParts.indexOf(commonParts[0]) < 0)
-            return true
-        return false
+                && !isGenericCompanyNamePart(commonParts[0]))
+            return 1
+        return 0
     }
 
     function applyPortfolioCheck(result) {
@@ -228,21 +255,29 @@ Window {
         const missingLocal = []
         let matchedCount = 0
 
-        for (let stockIndex = 0; stockIndex < observedStocks.length; ++stockIndex) {
-            const stock = observedStocks[stockIndex]
-            let matched = false
-            let matchedPosition = null
-            for (let positionIndex = 0; positionIndex < positions.length; ++positionIndex) {
-                if (usedPositions[positionIndex])
+        // Reserve ISIN and exact name matches before considering fuzzy names.
+        const matchedPositions = {}
+        for (let strength = 3; strength >= 1; --strength) {
+            for (let stockIndex = 0; stockIndex < observedStocks.length; ++stockIndex) {
+                if (matchedPositions[stockIndex] !== undefined)
                     continue
-                if (positionMatches(stock, positions[positionIndex])) {
-                    matched = true
-                    matchedPosition = positions[positionIndex]
-                    usedPositions[positionIndex] = true
-                    matchedCount += 1
-                    break
+                for (let positionIndex = 0; positionIndex < positions.length; ++positionIndex) {
+                    if (!usedPositions[positionIndex]
+                            && positionMatchStrength(observedStocks[stockIndex],
+                                positions[positionIndex]) === strength) {
+                        matchedPositions[stockIndex] = positionIndex
+                        usedPositions[positionIndex] = true
+                        matchedCount += 1
+                        break
+                    }
                 }
             }
+        }
+
+        for (let stockIndex = 0; stockIndex < observedStocks.length; ++stockIndex) {
+            const stock = observedStocks[stockIndex]
+            const matched = matchedPositions[stockIndex] !== undefined
+            const matchedPosition = matched ? positions[matchedPositions[stockIndex]] : null
             checkedRows.push({
                 name: stock.name,
                 isin: stock.isin,

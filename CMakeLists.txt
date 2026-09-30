@@ -37,6 +37,7 @@ if(WIN32)
         DEPENDS
             "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/IbkrHelper.csproj"
             "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/Program.cs"
+            "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/LiveQuoteStream.cs"
             "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/SnapshotReference.cs"
             "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/UsdReference.cs"
             "${CMAKE_CURRENT_SOURCE_DIR}/ibkr-helper/FwbReference.cs"
@@ -72,6 +73,7 @@ qt_add_qml_module(appShareSelector
         TradeRepublicWindow.qml
         CheckDepotsWindow.qml
         DepotMasterDataDialog.qml
+        IbkrLiveQuotesWindow.qml
         StockAnalysisConfigPanel.qml
         StockAnalysisChartPanel.qml
         StockAnalysisBuyDialog.qml
@@ -85,6 +87,7 @@ qt_add_qml_module(appShareSelector
         databasemanager_marketstack.cpp
         databasemanager_fundamentals.cpp
         databasemanager_portfolio.cpp
+        databasemanager_livequotes.cpp
         databasemanager_stockanalysis.cpp
         databasemanager_quoteimport.cpp
         databasemanager.h
@@ -109,6 +112,10 @@ set_target_properties(appShareSelector PROPERTIES
 target_link_libraries(appShareSelector
     PRIVATE Qt6::Quick Qt6::Sql Qt6::QuickControls2 Qt6::Network Qt6::WebView
 )
+
+if(WIN32)
+    target_link_libraries(appShareSelector PRIVATE Advapi32)
+endif()
 
 include(GNUInstallDirs)
 install(TARGETS appShareSelector

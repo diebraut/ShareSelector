@@ -34,6 +34,9 @@ class DatabaseManager : public QObject
     Q_PROPERTY(QString ibkrConnectionStatus READ ibkrConnectionStatus NOTIFY ibkrConnectionChanged)
     Q_PROPERTY(QVariantMap ibkrQuoteIssues READ ibkrQuoteIssues NOTIFY ibkrConnectionChanged)
     Q_PROPERTY(bool ibkrConnected READ ibkrConnected NOTIFY ibkrConnectionChanged)
+    Q_PROPERTY(bool ibkrLiveQuotesActive READ ibkrLiveQuotesActive NOTIFY ibkrLiveQuotesChanged)
+    Q_PROPERTY(QString ibkrLiveQuotesStatus READ ibkrLiveQuotesStatus NOTIFY ibkrLiveQuotesChanged)
+    Q_PROPERTY(QVariantMap ibkrLiveQuotes READ ibkrLiveQuotes NOTIFY ibkrLiveQuotesChanged)
     Q_PROPERTY(bool ibkrConnecting READ ibkrConnecting NOTIFY ibkrConnectionChanged)
     Q_PROPERTY(bool ibkrDataLoading READ ibkrDataLoading NOTIFY ibkrConnectionChanged)
     Q_PROPERTY(QString fundamentalDataStatus READ fundamentalDataStatus NOTIFY fundamentalDataChanged)
@@ -90,6 +93,9 @@ public:
     Q_INVOKABLE QVariantList getBoughtStocks();
     Q_INVOKABLE QVariantList getDepots();
     Q_INVOKABLE QVariantList getObservedStocksForDepotCheck(int depotId);
+    Q_INVOKABLE QVariantList getActiveDepotLiveQuoteStocks(int depotId, bool observedOnly);
+    Q_INVOKABLE bool startIbkrLiveQuotes(int depotId, bool observedOnly);
+    Q_INVOKABLE void stopIbkrLiveQuotes();
     Q_INVOKABLE QVariantMap getDepotMasterData(int depotId, int investmentYear);
     Q_INVOKABLE QVariantMap getDepotYearGainPercentages(int depotId, int investmentYear);
     Q_INVOKABLE QVariantMap getObservedDepotYearGainPercentages(int depotId, int investmentYear);
@@ -137,6 +143,9 @@ public:
     QString ibkrConnectionStatus() const;
     QVariantMap ibkrQuoteIssues() const;
     bool ibkrConnected() const;
+    bool ibkrLiveQuotesActive() const;
+    QString ibkrLiveQuotesStatus() const;
+    QVariantMap ibkrLiveQuotes() const;
     bool ibkrConnecting() const;
     bool ibkrDataLoading() const;
     QString fundamentalDataStatus() const;
@@ -193,12 +202,17 @@ public:
 signals:
     Q_SIGNAL void saveComplete(QString symbol);
     Q_SIGNAL void ibkrConnectionChanged();
+    Q_SIGNAL void ibkrLiveQuotesChanged();
+    Q_SIGNAL void ibkrLiveMidQuotesSaved(const QVariantMap &quotes);
     Q_SIGNAL void ibkrStockDataUpdated(QString symbol);
     Q_SIGNAL void fundamentalDataChanged();
     Q_SIGNAL void fundamentalDataUpdated(QString symbol);
 
 private:
     bool ensureSchema();
+    void initializeIbkrLiveQuotes();
+    void readIbkrLiveQuotesOutput();
+    void flushIbkrLiveMidQuotes();
     void tryNextIbkrPort();
     void setIbkrConnectionState(const QString &status, bool connected, bool connecting);
     bool probeIbkrConnection(int timeoutMs, quint16 *connectedPort = nullptr);
@@ -335,6 +349,14 @@ private:
     bool m_ibkrDataLoading = false;
     quint16 m_ibkrConnectedPort = 0;
     QProcess m_ibkrProcess;
+    QProcess m_ibkrLiveProcess;
+    QTimer m_ibkrLivePersistTimer;
+    QByteArray m_ibkrLiveBuffer;
+    QVariantMap m_ibkrLiveQuotes;
+    QVariantMap m_ibkrLivePendingQuotes;
+    QVariantMap m_ibkrLivePendingTradeTimes;
+    QVariantMap m_ibkrLiveSavedTradeTimes;
+    QString m_ibkrLiveQuotesStatus = QStringLiteral("IBKR-Livekurse sind ausgeschaltet.");
     QElapsedTimer m_ibkrHelperTimer;
     qint64 m_lastIbkrHelperElapsedMs = -1;
     QTimer m_ibkrDataTimeout;

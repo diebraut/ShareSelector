@@ -2,10 +2,30 @@
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QSettings>
 #include <QtWebView>
+#ifdef Q_OS_WIN
+#include <windows.h>
+#include <wincred.h>
+#endif
 #include "databasemanager.h"
 #include "windowgeometryhelper.h"
+
+static QJsonObject tradeRepublicCredentials()
+{
+#ifdef Q_OS_WIN
+    PCREDENTIALW credential = nullptr;
+    if (CredReadW(L"ShareSelector/TradeRepublic", CRED_TYPE_GENERIC, 0, &credential)) {
+        const QByteArray blob(reinterpret_cast<const char *>(credential->CredentialBlob),
+                              static_cast<qsizetype>(credential->CredentialBlobSize));
+        CredFree(credential);
+        return QJsonDocument::fromJson(blob).object();
+    }
+#endif
+    return {};
+}
 
 int main(int argc, char *argv[])
 {
@@ -22,13 +42,12 @@ int main(int argc, char *argv[])
 
     QQmlApplicationEngine engine;
 
-    const QSettings settings;
-    const QString tradeRepublicPhone = qEnvironmentVariableIsSet("SHARESELECTOR_TR_PHONE")
-        ? qEnvironmentVariable("SHARESELECTOR_TR_PHONE")
-        : settings.value(QStringLiteral("tradeRepublic/phone")).toString();
-    const QString tradeRepublicPin = qEnvironmentVariableIsSet("SHARESELECTOR_TR_PIN")
-        ? qEnvironmentVariable("SHARESELECTOR_TR_PIN")
-        : settings.value(QStringLiteral("tradeRepublic/pin")).toString();
+    const QJsonObject credentials = tradeRepublicCredentials();
+    const QString tradeRepublicPhone = credentials.value(QStringLiteral("phone")).toString();
+    const QString tradeRepublicPin = credentials.value(QStringLiteral("pin")).toString();
+    QSettings settings;
+    settings.remove(QStringLiteral("tradeRepublic/phone"));
+    settings.remove(QStringLiteral("tradeRepublic/pin"));
 
     engine.rootContext()->setContextProperty("databaseManager", &dbManager);
     engine.rootContext()->setContextProperty("windowGeometryHelper", &windowGeometryHelper);

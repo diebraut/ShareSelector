@@ -22,6 +22,7 @@ using namespace DatabaseManagerInternal;
 
 DatabaseManager::DatabaseManager(QObject *parent) : QObject(parent)
 {
+    initializeIbkrLiveQuotes();
     m_ibkrPorts = {7497, 7496, 4002, 4001};
     m_ibkrConnectTimeout.setSingleShot(true);
     m_ibkrConnectTimeout.setInterval(1200);
@@ -556,6 +557,7 @@ DatabaseManager::DatabaseManager(QObject *parent) : QObject(parent)
 
 DatabaseManager::~DatabaseManager()
 {
+    stopIbkrLiveQuotes();
     if (m_ibkrProcess.state() != QProcess::NotRunning) {
         m_ibkrProcess.kill();
         m_ibkrProcess.waitForFinished(2000);
@@ -591,6 +593,7 @@ bool DatabaseManager::ensureSchema()
                 ADD COLUMN IF NOT EXISTS "IBKRConId" BIGINT,
                 ADD COLUMN IF NOT EXISTS "IBKRResolvedSymbol" VARCHAR(64),
                 ADD COLUMN IF NOT EXISTS "Currency" VARCHAR(8),
+                ADD COLUMN IF NOT EXISTS "IBKRContractCurrency" VARCHAR(8),
                 ADD COLUMN IF NOT EXISTS "PrimaryExchange" VARCHAR(32),
                 ADD COLUMN IF NOT EXISTS "LocalSymbol" VARCHAR(64),
                 ADD COLUMN IF NOT EXISTS "SecurityType" VARCHAR(16),
@@ -649,7 +652,25 @@ bool DatabaseManager::ensureSchema()
                 ADD COLUMN IF NOT EXISTS "marketplace_last_error" TEXT
         )SQL"),
         QStringLiteral(R"SQL(
-            ALTER TABLE "Quotes" ADD COLUMN IF NOT EXISTS "IBKRCloseSource" TEXT
+            ALTER TABLE "Quotes"
+                ADD COLUMN IF NOT EXISTS "IBKRCloseSource" TEXT,
+                ADD COLUMN IF NOT EXISTS "IBKRLiveBid" NUMERIC(28, 8),
+                ADD COLUMN IF NOT EXISTS "IBKRLiveAsk" NUMERIC(28, 8),
+                ADD COLUMN IF NOT EXISTS "IBKRLiveBidReceivedAt" TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS "IBKRLiveAskReceivedAt" TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS "IBKRLiveQuoteAt" TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS "IBKRLiveLastTradeAt" TIMESTAMPTZ,
+                ADD COLUMN IF NOT EXISTS "IBKRLiveExchange" TEXT
+        )SQL"),
+        QStringLiteral(R"SQL(
+            CREATE TABLE IF NOT EXISTS "DepotGainSnapshots" (
+                "DepotId" INTEGER NOT NULL,
+                "AsOfDate" DATE NOT NULL,
+                "ObservedOnly" BOOLEAN NOT NULL,
+                "GainPercent" NUMERIC(12, 2) NOT NULL,
+                "CapturedAt" TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY ("DepotId", "AsOfDate", "ObservedOnly")
+            )
         )SQL"),
         QStringLiteral(R"SQL(
             DO $$

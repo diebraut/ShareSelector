@@ -47,6 +47,23 @@ Window {
             .replace(/[,.]0+$/, "")
     }
 
+    function preciseNumberText(value, digits) {
+        return Number(value || 0).toLocaleString(Qt.locale(), "f", digits)
+            .replace(/([,.]\d*?[1-9])0+$/, "$1")
+            .replace(/[,.]0+$/, "")
+    }
+
+    function updateQuantityFromInvestment() {
+        positionEditQuantityInput.text = calculatedQuantityText()
+    }
+
+    function updateInvestmentFromQuantity() {
+        const quantity = app.parseDecimal(positionEditQuantityInput.text)
+        const entry = enteredEntryValue()
+        if (quantity > 0 && entry > 0)
+            positionEditInvestedInput.text = (quantity * entry).toLocaleString(Qt.locale(), "f", 2)
+    }
+
     function openForRow(row) {
         positionRow = row || ({})
         entryEditedByUser = false
@@ -57,7 +74,8 @@ Window {
         const entryValue = Number(positionRow.entryValue || 0)
         positionEditInvestedInput.text = (quantity * entryValue).toLocaleString(Qt.locale(), "f", 2)
         updatingEntryFromDate = true
-        positionEditEntryInput.text = Number(positionRow.entryValue || 0).toLocaleString(Qt.locale(), "f", 2)
+        positionEditEntryInput.text = preciseNumberText(entryValue, 10)
+        positionEditQuantityInput.text = preciseNumberText(quantity, 6)
         updatingEntryFromDate = false
         largeInvestmentWarningVisible = false
         positionEditError.text = ""
@@ -88,6 +106,7 @@ Window {
 
         updatingEntryFromDate = true
         positionEditEntryInput.text = entry.toLocaleString(Qt.locale(), "f", 2)
+        updateQuantityFromInvestment()
         updatingEntryFromDate = false
         buyDateEditedByUser = false
     }
@@ -118,6 +137,7 @@ Window {
         const buyDate = positionEditBuyDateInput.text.trim()
         const invested = app.parseDecimal(positionEditInvestedInput.text)
         const entry = app.parseDecimal(positionEditEntryInput.text)
+        const quantity = app.parseDecimal(positionEditQuantityInput.text)
         if (!/^\d{4}-\d{2}-\d{2}$/.test(buyDate)) {
             largeInvestmentWarningVisible = false
             positionEditError.text = "Bitte Kaufdatum im Format JJJJ-MM-TT eingeben."
@@ -133,6 +153,11 @@ Window {
             positionEditError.text = "Bitte einen Einstiegswert groesser 0 eingeben."
             return
         }
+        if (quantity <= 0) {
+            largeInvestmentWarningVisible = false
+            positionEditError.text = "Bitte eine Stückzahl groesser 0 eingeben."
+            return
+        }
 
         const totalInvested = invested + app.portfolioOrderFee
         const availableCash = availableCashForPosition()
@@ -145,7 +170,7 @@ Window {
             return
         }
 
-        const ok = app.updatePortfolioPositionData(positionRow, buyDate, invested, entry)
+        const ok = app.updatePortfolioPositionData(positionRow, buyDate, invested, entry, quantity)
         if (!ok) {
             positionEditError.text = "Position konnte nicht gespeichert werden."
             return
@@ -192,6 +217,7 @@ Window {
                 inputMethodHints: Qt.ImhFormattedNumbersOnly
                 onTextEdited: {
                     positionEditDialog.largeInvestmentWarningVisible = false
+                    positionEditDialog.updateQuantityFromInvestment()
                 }
             }
 
@@ -206,6 +232,7 @@ Window {
                     positionEditDialog.largeInvestmentWarningVisible = false
                     if (!positionEditDialog.updatingEntryFromDate)
                         positionEditDialog.entryEditedByUser = true
+                    positionEditDialog.updateQuantityFromInvestment()
                 }
             }
 
@@ -228,13 +255,17 @@ Window {
                 font.bold: true
             }
 
-            Label { text: "Errechnete Stückzahl" }
+            Label { text: "Stückzahl" }
             TextField {
+                id: positionEditQuantityInput
                 Layout.fillWidth: true
-                text: positionEditDialog.calculatedQuantityText()
                 horizontalAlignment: Text.AlignRight
-                readOnly: true
-                focusPolicy: Qt.NoFocus
+                selectByMouse: true
+                inputMethodHints: Qt.ImhFormattedNumbersOnly
+                onTextEdited: {
+                    positionEditDialog.largeInvestmentWarningVisible = false
+                    positionEditDialog.updateInvestmentFromQuantity()
+                }
             }
 
             Label {

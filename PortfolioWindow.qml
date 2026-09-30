@@ -5,6 +5,7 @@ import QtQuick.Window 2.15
 
 Window {
     id: portfolioWindow
+    onClosing: ibkrLiveQuotesWindow.close()
     property var app
     property var dbManager
     property bool localPortfolioBusyVisible: false
@@ -142,6 +143,19 @@ Window {
         dbManager: portfolioWindow.dbManager
         browserWindow: tradeRepublicWindow
     }
+    IbkrLiveQuotesWindow {
+        id: ibkrLiveQuotesWindow
+        dbManager: portfolioWindow.dbManager
+    }
+    Connections {
+        target: portfolioWindow.app
+        function onPortfolioStatusFilterChanged() {
+            ibkrLiveQuotesWindow.selectPortfolio(portfolioWindow.app.selectedDepotId, portfolioWindow.app.portfolioStatusFilter)
+        }
+        function onSelectedDepotIdChanged() {
+            ibkrLiveQuotesWindow.selectPortfolio(portfolioWindow.app.selectedDepotId, portfolioWindow.app.portfolioStatusFilter)
+        }
+    }
 
     Timer {
         id: checkDepotsPositionTimer
@@ -250,6 +264,20 @@ Window {
                         text: "Show Trade Republic Depot"
                         Layout.preferredWidth: 190
                         onClicked: portfolioWindow.showTradeRepublicDepot()
+                    }
+
+                    Button {
+                        text: "IBKR Geld/Brief"
+                        Layout.preferredWidth: 145
+                        enabled: app.portfolioStatusFilter !== "sold"
+                        onClicked: ibkrLiveQuotesWindow.openForDepot(app.selectedDepotId, app.portfolioStatusFilter)
+                    }
+
+                    CheckBox {
+                        text: "Live aktualisieren"
+                        checked: ibkrLiveQuotesWindow.updatesEnabled
+                        enabled: app.portfolioStatusFilter !== "sold"
+                        onClicked: ibkrLiveQuotesWindow.setUpdatesEnabled(checked)
                     }
 
                     Button {
@@ -873,7 +901,7 @@ Window {
                                 }
                                 Label { text: "60 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
                                 Label { text: "90 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
-                                Label { text: "LastQuote"; Layout.preferredWidth: 95; font.bold: true; horizontalAlignment: Text.AlignRight; rightPadding: 10 }
+                                Label { text: "Letzter Handel"; Layout.preferredWidth: 125; font.bold: true; horizontalAlignment: Text.AlignLeft; leftPadding: 8 }
                             }
 
                             Item {
@@ -914,6 +942,7 @@ Window {
                                         id: portfolioPositionDelegate
                                         required property int index
                                         required property var rowUpdateVersion
+                                        required property int liveChangeDirection
                                         property int rowVersion: Number(rowUpdateVersion || 0)
                                         property var rowData: {
                                             rowVersion
@@ -941,7 +970,11 @@ Window {
                                                 ? "#fff1f2"
                                                 : (portfolioPositionDelegate.positionUsed
                                                 ? "#e5e7eb"
-                                                : (portfolioPositionDelegate.index % 2 === 0 ? "#ffffff" : "#f8fafc")))
+                                                : (portfolioPositionDelegate.liveChangeDirection > 0
+                                                    ? "#ecfdf3"
+                                                    : (portfolioPositionDelegate.liveChangeDirection < 0
+                                                        ? "#fff1f2"
+                                                        : (portfolioPositionDelegate.index % 2 === 0 ? "#ffffff" : "#f8fafc")))))
 
                                     Item {
                                         id: portfolioPositionDragProxy
@@ -1110,9 +1143,9 @@ Window {
                                         }
                                         Label {
                                             text: portfolioPositionDelegate.positionSold ? "" : (portfolioPositionDelegate.rowData.quoteLastDate || "-")
-                                            Layout.preferredWidth: 95
-                                            horizontalAlignment: Text.AlignRight
-                                            rightPadding: 10
+                                            Layout.preferredWidth: 125
+                                            horizontalAlignment: Text.AlignLeft
+                                            leftPadding: 8
                                         }
                                     }
 
@@ -1372,7 +1405,7 @@ Window {
                     }
 
                     Rectangle {
-                        Layout.preferredWidth: Math.max(1, portfolioWindow.width * 0.1875)
+                        Layout.preferredWidth: Math.max(1, portfolioWindow.width * 0.17)
                         Layout.fillHeight: true
                         color: "#ffffff"
                         border.color: "#c9d0d5"
@@ -1452,7 +1485,11 @@ Window {
                                             required property var modelData
 
                                             width: parent.width
-                                            height: portfolioFieldDelegate.modelData.heading ? 40 : (portfolioFieldDelegate.modelData.key === "name" || portfolioFieldDelegate.modelData.key === "analysisConfigName" ? 46 : 34)
+                                            height: portfolioFieldDelegate.modelData.heading
+                                                ? 40
+                                                : (portfolioFieldDelegate.modelData.key === "name"
+                                                    ? 66
+                                                    : (portfolioFieldDelegate.modelData.key === "analysisConfigName" ? 46 : 34))
                                             color: portfolioFieldDelegate.modelData.heading
                                                 ? "#e5e7eb"
                                                 : (portfolioFieldDelegate.index % 2 === 0 ? "#ffffff" : "#f8fafc")
