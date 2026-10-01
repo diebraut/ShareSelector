@@ -823,6 +823,8 @@ ApplicationWindow {
         }
 
         if (rowsUpdated > 0 || modelRowsUpdated > 0) {
+            if (modelRowsUpdated > 0)
+                reorderUpdatedPortfolioRows()
             updatePortfolioTotals()
             if (selectedRowUpdated)
                 schedulePortfolioDetailsLoad()
@@ -831,6 +833,66 @@ ApplicationWindow {
         }
 
         return false
+    }
+
+    function reorderUpdatedPortfolioRows() {
+        if (portfolioModel.count < 2 || portfolioSortKey.length === 0)
+            return
+
+        const desiredSymbols = sortedPortfolioRows().map(row => String(row.symbol || "").trim())
+        if (desiredSymbols.length !== portfolioModel.count)
+            return
+        let currentSymbols = []
+        for (let i = 0; i < portfolioModel.count; i++)
+            currentSymbols.push(String(portfolioModel.get(i).symbol || "").trim())
+        if (desiredSymbols.every((symbol, index) => symbol === currentSymbols[index]))
+            return
+
+        const selectedSymbols = selectedPortfolioIndexes.map(index => currentSymbols[index])
+        const activeSymbol = currentSymbols[selectedPortfolioIndex]
+        const anchorSymbol = currentSymbols[portfolioSelectionAnchorIndex]
+        const previousContentY = portfolioWindow && portfolioWindow.visible
+            ? portfolioWindow.portfolioListContentY() : -1
+
+        // Keep the longest already sorted subsequence in place; move only the others.
+        const targetIndexes = currentSymbols.map(symbol => desiredSymbols.indexOf(symbol))
+        let lengths = targetIndexes.map(() => 1)
+        let predecessors = targetIndexes.map(() => -1)
+        let longestEnd = 0
+        for (let i = 0; i < targetIndexes.length; i++) {
+            for (let j = 0; j < i; j++) {
+                if (targetIndexes[j] < targetIndexes[i] && lengths[j] + 1 > lengths[i]) {
+                    lengths[i] = lengths[j] + 1
+                    predecessors[i] = j
+                }
+            }
+            if (lengths[i] > lengths[longestEnd])
+                longestEnd = i
+        }
+        const keepSymbols = new Set()
+        for (let index = longestEnd; index >= 0; index = predecessors[index])
+            keepSymbols.add(currentSymbols[index])
+
+        for (let targetIndex = desiredSymbols.length - 1; targetIndex >= 0; targetIndex--) {
+            const symbol = desiredSymbols[targetIndex]
+            if (keepSymbols.has(symbol))
+                continue
+            const currentIndex = currentSymbols.indexOf(symbol)
+            const nextIndex = targetIndex + 1 < desiredSymbols.length
+                ? currentSymbols.indexOf(desiredSymbols[targetIndex + 1]) : currentSymbols.length
+            const moveIndex = currentIndex < nextIndex ? nextIndex - 1 : nextIndex
+            if (currentIndex === moveIndex)
+                continue
+            portfolioModel.move(currentIndex, moveIndex, 1)
+            currentSymbols.splice(moveIndex, 0, currentSymbols.splice(currentIndex, 1)[0])
+        }
+
+        selectedPortfolioIndexes = selectedSymbols.map(symbol => currentSymbols.indexOf(symbol))
+            .filter(index => index >= 0).sort((a, b) => a - b)
+        selectedPortfolioIndex = activeSymbol ? currentSymbols.indexOf(activeSymbol) : -1
+        portfolioSelectionAnchorIndex = anchorSymbol ? currentSymbols.indexOf(anchorSymbol) : -1
+        if (previousContentY >= 0)
+            portfolioWindow.restorePortfolioListContentY(previousContentY)
     }
 
     function sortedPortfolioRows() {

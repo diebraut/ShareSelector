@@ -908,7 +908,7 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
                 WHEN qp.latest_trade_at IS NOT NULL
                 THEN TO_CHAR(qp.latest_trade_at AT TIME ZONE 'Europe/Berlin', 'DD-MM-YY HH24:MI')
                 WHEN qp.latest_live_at IS NOT NULL
-                THEN TO_CHAR(qp.latest_date, 'DD-MM-YY') || ' --:--'
+                THEN TO_CHAR(qp.latest_live_at AT TIME ZONE 'Europe/Berlin', 'DD-MM-YY HH24:MI')
                 WHEN s."IBKRSnapshotLast" IS NOT NULL
                      AND COALESCE(s."IBKRSnapshotRaw"->>'lastTimestamp', '') ~ '^[0-9]+([.][0-9]+)?$'
                      AND (s."IBKRSnapshotRaw"->>'lastTimestamp')::double precision > 0
@@ -922,7 +922,8 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
                 WHEN qp.latest_date IS NOT NULL
                 THEN TO_CHAR(qp.latest_date, 'DD-MM-YY') || ' --:--'
                 ELSE ''
-            END AS "QuoteLastDate"
+            END AS "QuoteLastDate",
+            (qp.latest_trade_at IS NULL AND qp.latest_live_at IS NOT NULL) AS "QuoteLastIsBidAsk"
         FROM "BoughtStocks" b
         LEFT JOIN "Stocks" s ON s."Symbol" = b."Symbol"
         LEFT JOIN LATERAL (
@@ -1120,6 +1121,7 @@ QVariantList DatabaseManager::getTestPortfolioSummary()
         row["latestChangeDate"] = query.value("LatestChangeDate");
         row["latestChangePreviousDate"] = query.value("LatestChangePreviousDate");
         row["quoteLastDate"] = query.value("QuoteLastDate");
+        row["quoteLastIsBidAsk"] = query.value("QuoteLastIsBidAsk").toBool();
         row["status"] = query.value("Status");
         row["mic"] = query.value("MIC");
         row["isin"] = query.value("ISIN");
@@ -1206,7 +1208,7 @@ QVariantMap DatabaseManager::getTestPortfolioSummaryForSymbol(const QString &sym
                 WHEN lq.latest_trade_at IS NOT NULL
                 THEN TO_CHAR(lq.latest_trade_at AT TIME ZONE 'Europe/Berlin', 'DD-MM-YY HH24:MI')
                 WHEN lq.latest_live_at IS NOT NULL
-                THEN TO_CHAR(lq.latest_date, 'DD-MM-YY') || ' --:--'
+                THEN TO_CHAR(lq.latest_live_at AT TIME ZONE 'Europe/Berlin', 'DD-MM-YY HH24:MI')
                 WHEN s."IBKRSnapshotLast" IS NOT NULL
                      AND COALESCE(s."IBKRSnapshotRaw"->>'lastTimestamp', '') ~ '^[0-9]+([.][0-9]+)?$'
                      AND (s."IBKRSnapshotRaw"->>'lastTimestamp')::double precision > 0
@@ -1220,7 +1222,8 @@ QVariantMap DatabaseManager::getTestPortfolioSummaryForSymbol(const QString &sym
                 WHEN lq.latest_date IS NOT NULL
                 THEN TO_CHAR(lq.latest_date, 'DD-MM-YY') || ' --:--'
                 ELSE ''
-            END AS "QuoteLastDate"
+            END AS "QuoteLastDate",
+            (lq.latest_trade_at IS NULL AND lq.latest_live_at IS NOT NULL) AS "QuoteLastIsBidAsk"
             , COALESCE((s."IBKRChangeReference"->>'delayed')::boolean, false) AS "LatestChangeDelayed"
             , s."IBKRChangeReference"->>'source' AS "LatestChangeSource"
             , s."IBKRChangeReference"->>'lastDate' AS "LatestChangeDate"
@@ -1293,6 +1296,7 @@ QVariantMap DatabaseManager::getTestPortfolioSummaryForSymbol(const QString &sym
     row["latestChangeDate"] = query.value("LatestChangeDate");
     row["latestChangePreviousDate"] = query.value("LatestChangePreviousDate");
     row["quoteLastDate"] = query.value("QuoteLastDate");
+    row["quoteLastIsBidAsk"] = query.value("QuoteLastIsBidAsk").toBool();
     row["status"] = query.value("Status");
     row["mic"] = query.value("MIC");
     row["isin"] = query.value("ISIN");
@@ -1716,7 +1720,7 @@ QVariantList DatabaseManager::getTestPortfolio()
                 WHEN qp.latest_trade_at IS NOT NULL
                 THEN TO_CHAR(qp.latest_trade_at AT TIME ZONE 'Europe/Berlin', 'DD-MM-YY HH24:MI')
                 WHEN qp.latest_live_at IS NOT NULL
-                THEN TO_CHAR(qp.latest_date, 'DD-MM-YY') || ' --:--'
+                THEN TO_CHAR(qp.latest_live_at AT TIME ZONE 'Europe/Berlin', 'DD-MM-YY HH24:MI')
                 WHEN s."IBKRSnapshotLast" IS NOT NULL
                      AND COALESCE(s."IBKRSnapshotRaw"->>'lastTimestamp', '') ~ '^[0-9]+([.][0-9]+)?$'
                      AND (s."IBKRSnapshotRaw"->>'lastTimestamp')::double precision > 0
@@ -1730,7 +1734,8 @@ QVariantList DatabaseManager::getTestPortfolio()
                 WHEN qp.latest_date IS NOT NULL
                 THEN TO_CHAR(qp.latest_date, 'DD-MM-YY') || ' --:--'
                 ELSE ''
-            END AS "QuoteLastDate"
+            END AS "QuoteLastDate",
+            (qp.latest_trade_at IS NULL AND qp.latest_live_at IS NOT NULL) AS "QuoteLastIsBidAsk"
         FROM "BoughtStocks" b
         LEFT JOIN "Stocks" s ON s."Symbol" = b."Symbol"
         LEFT JOIN LATERAL (
@@ -1931,6 +1936,7 @@ QVariantList DatabaseManager::getTestPortfolio()
         row["days60ValueInc"] = query.value("Days60ValueInc");
         row["days90ValueInc"] = query.value("Days90ValueInc");
         row["quoteLastDate"] = query.value("QuoteLastDate");
+        row["quoteLastIsBidAsk"] = query.value("QuoteLastIsBidAsk").toBool();
         row["status"] = query.value("Status");
         row["mic"] = mic;
         row["isin"] = query.value("ISIN");

@@ -1610,7 +1610,7 @@ void DatabaseManager::getIbkrData(const QString &symbol)
     QSqlQuery stockQuery(db);
     stockQuery.prepare(R"SQL(
         SELECT "ISIN", "Currency", "IBKRContractCurrency", "CountryCode", "MIC", "PrimaryExchange",
-               "IBKRResolvedSymbol", "YahooSymbol", "Name"
+               "IBKRResolvedSymbol", "YahooSymbol", "Name", "ValidExchanges"
         FROM "Stocks"
         WHERE "Symbol" = :symbol
     )SQL");
@@ -1663,8 +1663,13 @@ void DatabaseManager::getIbkrData(const QString &symbol)
     m_pendingIbkrDirectExchanges = ibkrDirectExchanges(m_pendingIbkrExchange);
     m_pendingIbkrDirectExchangeIndex = 0;
     m_pendingIbkrCurrentDirectExchange.clear();
+    // A contract that IBKR lists only on its direct exchange must not be
+    // looked up through SMART, even when its currency matches the depot.
+    const QString validExchanges = stockQuery.value(QStringLiteral("ValidExchanges")).toString();
     m_pendingIbkrDirectExchange = !contractCurrency.isEmpty()
-        && contractCurrency != stockQuery.value(QStringLiteral("Currency")).toString().trimmed();
+        && (contractCurrency != stockQuery.value(QStringLiteral("Currency")).toString().trimmed()
+            || (!validExchanges.trimmed().isEmpty()
+                && !ibkrValidExchangesContainSmart(validExchanges)));
     if (m_pendingIbkrDirectExchange)
         m_pendingIbkrCurrentDirectExchange = m_pendingIbkrExchange;
 

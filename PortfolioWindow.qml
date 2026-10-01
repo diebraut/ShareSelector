@@ -901,7 +901,7 @@ Window {
                                 }
                                 Label { text: "60 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
                                 Label { text: "90 Tage"; Layout.preferredWidth: 90; font.bold: true; horizontalAlignment: Text.AlignRight }
-                                Label { text: "Letzter Handel"; Layout.preferredWidth: 125; font.bold: true; horizontalAlignment: Text.AlignLeft; leftPadding: 8 }
+                                Label { text: "Handel / G/B"; Layout.preferredWidth: 145; font.bold: true; horizontalAlignment: Text.AlignLeft; leftPadding: 8 }
                             }
 
                             Item {
@@ -1141,11 +1141,28 @@ Window {
                                             Layout.preferredWidth: 90
                                             horizontalAlignment: Text.AlignRight
                                         }
-                                        Label {
-                                            text: portfolioPositionDelegate.positionSold ? "" : (portfolioPositionDelegate.rowData.quoteLastDate || "-")
-                                            Layout.preferredWidth: 125
-                                            horizontalAlignment: Text.AlignLeft
-                                            leftPadding: 8
+                                        Rectangle {
+                                            Layout.preferredWidth: 145
+                                            Layout.preferredHeight: 24
+                                            Layout.alignment: Qt.AlignVCenter
+                                            radius: 3
+                                            color: !portfolioPositionDelegate.positionSold
+                                                && portfolioPositionDelegate.rowData.quoteLastIsBidAsk
+                                                ? "#fef9c3" : "transparent"
+                                            Label {
+                                                anchors.fill: parent
+                                                text: portfolioPositionDelegate.positionSold ? ""
+                                                    : (portfolioPositionDelegate.rowData.quoteLastIsBidAsk ? "G/B " : "")
+                                                        + (portfolioPositionDelegate.rowData.quoteLastDate || "-")
+                                                font.pixelSize: 11
+                                                horizontalAlignment: Text.AlignLeft
+                                                verticalAlignment: Text.AlignVCenter
+                                                leftPadding: 8
+                                                ToolTip.visible: quoteTimeHover.hovered
+                                                    && portfolioPositionDelegate.rowData.quoteLastIsBidAsk
+                                                ToolTip.text: "Geld/Brief-Empfangszeit; keine Handelszeit"
+                                                HoverHandler { id: quoteTimeHover }
+                                            }
                                         }
                                     }
 
